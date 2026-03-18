@@ -265,7 +265,7 @@ class HexEditorFrame(ttk.Frame):
             w.bind("<Button-4>", lambda e: _asm_scroll(3))
             w.bind("<Button-5>", lambda e: _asm_scroll(-3))
 
-        # Pseudo-C pane: to the right of ASM, hidden by default, toggleable with Ctrl+G
+        # Pseudo-C pane: to the right of ASM, hidden by default, toggleable with Ctrl+H
         self._pseudo_c_frame = ttk.LabelFrame(body, text=" Pseudo-C ", padding=2)
         self._pseudo_c_frame.grid(row=1, column=4, sticky="nsew", padx=(4, 0))
         self._pseudo_c_frame.columnconfigure(0, weight=1)
@@ -319,8 +319,11 @@ class HexEditorFrame(ttk.Frame):
             w.bind("<Control-A>", self._toggle_asm_pane)
 
         def _bind_pseudo_c_toggle(w: tk.Misc) -> None:
-            w.bind("<Control-g>", self._toggle_pseudo_c_pane)
-            w.bind("<Control-G>", self._toggle_pseudo_c_pane)
+            w.bind("<Control-h>", self._toggle_pseudo_c_pane)
+            w.bind("<Control-H>", self._toggle_pseudo_c_pane)
+        def _bind_goto(w: tk.Misc) -> None:
+            w.bind("<Control-g>", self._focus_goto_entry)
+            w.bind("<Control-G>", self._focus_goto_entry)
 
         _bind_asm_toggle(self._text)
         _bind_asm_toggle(self._text_ascii)
@@ -340,8 +343,20 @@ class HexEditorFrame(ttk.Frame):
         _bind_pseudo_c_toggle(self._pseudo_c_frame)
         _bind_pseudo_c_toggle(self._text_pseudo_c)
         _bind_pseudo_c_toggle(outer)
-        self.winfo_toplevel().bind("<Control-g>", self._toggle_pseudo_c_pane, add=True)
-        self.winfo_toplevel().bind("<Control-G>", self._toggle_pseudo_c_pane, add=True)
+        self.winfo_toplevel().bind("<Control-h>", self._toggle_pseudo_c_pane, add=True)
+        self.winfo_toplevel().bind("<Control-H>", self._toggle_pseudo_c_pane, add=True)
+        _bind_goto(self._text)
+        _bind_goto(self._text_ascii)
+        _bind_goto(self._goto_entry)
+        _bind_goto(self._encoding_combo)
+        _bind_goto(self._asm_mode_combo)
+        _bind_goto(self._asm_frame)
+        _bind_goto(self._text_asm)
+        _bind_goto(self._pseudo_c_frame)
+        _bind_goto(self._text_pseudo_c)
+        _bind_goto(outer)
+        self.winfo_toplevel().bind("<Control-g>", self._focus_goto_entry, add=True)
+        self.winfo_toplevel().bind("<Control-G>", self._focus_goto_entry, add=True)
         for w in (
             self._text, self._text_ascii, self._goto_entry, self._encoding_combo,
             self._asm_mode_combo, self._asm_frame, self._text_asm,
@@ -400,7 +415,7 @@ class HexEditorFrame(ttk.Frame):
         self._text.bind("<KeyPress>", self._prevent_unwanted, add=True)
 
     def _focus_goto_entry(self, event: Optional[tk.Event] = None) -> Optional[str]:
-        """Focus the Goto (offset) entry box."""
+        """Focus the Goto (offset) entry box. Bound to Ctrl+G."""
         self._goto_entry.focus_set()
         self._goto_entry.select_range(0, tk.END)
         return "break"
@@ -572,7 +587,7 @@ class HexEditorFrame(ttk.Frame):
         return "break"
 
     def _toggle_pseudo_c_pane(self, event: Optional[tk.Event] = None) -> Optional[str]:
-        """Toggle Pseudo-C pane visibility. Bound to Ctrl+G."""
+        """Toggle Pseudo-C pane visibility. Bound to Ctrl+H."""
         self._goto_entry.selection_clear()
         self._text.focus_set()
         self._pseudo_c_pane_visible = not self._pseudo_c_pane_visible
@@ -777,7 +792,7 @@ class HexEditorFrame(ttk.Frame):
     def _prevent_unwanted(self, event: tk.Event) -> Optional[str]:
         if event.keysym in ("Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next"):
             return None
-        if event.state & 0x4 and event.keysym.lower() in ("a", "b", "c", "v", "x", "s"):
+        if event.state & 0x4 and event.keysym.lower() in ("a", "b", "c", "g", "h", "v", "x", "s"):
             return None
         if event.char and event.char in HEX_DIGITS:
             return "break"
