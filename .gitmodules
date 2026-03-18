@@ -1,0 +1,6 @@
+[submodule "editors/firered/pokefirered"]
+	path = editors/firered/pokefirered
+	url = https://github.com/pret/pokefirered
+[submodule "editors/wct06/ygowct06"]
+	path = editors/wct06/ygowct06
+	url = https://github.com/Soul-8691/ygowct06
