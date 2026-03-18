@@ -9,7 +9,7 @@ import re
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Set
 
 _CAPSTONE_AVAILABLE = False
 try:
@@ -129,6 +129,8 @@ class HexEditorFrame(ttk.Frame):
         self._encoding = default_encoding if default_encoding in ("ascii", "pcs") else "ascii"
         self._asm_mode = "thumb"  # thumb | arm for GBA ARM7TDMI
         self._asm_pane_visible = False
+        self._ldr_pc_targets: Optional[Set[int]] = None
+        self._ldr_pc_targets_valid = False
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -168,6 +170,8 @@ class HexEditorFrame(ttk.Frame):
         )
         self._encoding_combo.grid(row=0, column=6, sticky="w")
         self._encoding_combo.bind("<<ComboboxSelected>>", self._on_encoding_change)
+        self._selection_label = ttk.Label(top_row, text="", font=("Consolas", 9))
+        self._selection_label.grid(row=0, column=7, sticky="w", padx=(8, 0))
 
         # Main content: hex | ascii | asm (toggleable) | scrollbar | tools area
         body = ttk.Frame(outer)
@@ -177,9 +181,14 @@ class HexEditorFrame(ttk.Frame):
         body.columnconfigure(2, weight=0)
         body.columnconfigure(3, weight=0)
         body.columnconfigure(4, weight=1)
-        body.rowconfigure(0, weight=1)
+        body.rowconfigure(0, weight=0)
+        body.rowconfigure(1, weight=1)
 
         hex_width = 10 + 3 * BYTES_PER_ROW - 1
+        hex_header_text = " " * 10 + "  ".join(f"{i:X}" for i in range(BYTES_PER_ROW))
+        self._hex_header = ttk.Label(body, text=hex_header_text, font=("Consolas", 10))
+        self._hex_header.grid(row=0, column=0, sticky="w", padx=(0, 0), pady=(0, 0))
+
         self._scroll_y = tk.Scrollbar(body)
         self._text = tk.Text(
             body, font=("Consolas", 10), wrap=tk.NONE, borderwidth=0,
@@ -198,14 +207,17 @@ class HexEditorFrame(ttk.Frame):
         self._text.configure(yscrollcommand=self._on_text_yscroll)
         self._scroll_y.configure(command=self._on_scrollbar_command)
 
-        self._text.grid(row=0, column=0, sticky="nsew", padx=(0, 0))
-        self._text_ascii.grid(row=0, column=1, sticky="ns", padx=(0, 0))
-        self._scroll_y.grid(row=0, column=2, sticky="ns")
+        self._text.grid(row=1, column=0, sticky="nsew", padx=(0, 0))
+        self._text_ascii.grid(row=1, column=1, sticky="ns", padx=(0, 0))
+        self._scroll_y.grid(row=1, column=2, sticky="ns")
 
-        # ASM panel: to the right of hex scrollbar, toggleable, has its own scrollbar
+        # ASM panel: to the right of hex scrollbar, toggleable, has vertical and horizontal scrollbars
         self._asm_frame = ttk.LabelFrame(body, text=" Disassembly ", padding=2)
-        self._asm_frame.grid(row=0, column=3, sticky="nsew", padx=(4, 0))
+        self._asm_frame.grid(row=1, column=3, sticky="nsew", padx=(4, 0))
+        self._asm_frame.columnconfigure(0, weight=1)
+        self._asm_frame.rowconfigure(0, weight=1)
         self._scroll_asm = tk.Scrollbar(self._asm_frame)
+        self._scroll_asm_h = tk.Scrollbar(self._asm_frame, orient=tk.HORIZONTAL)
         self._text_asm = tk.Text(
             self._asm_frame, font=("Consolas", 10), wrap=tk.NONE, width=58,
             borderwidth=1, relief=tk.SOLID, padx=4, pady=2,
@@ -213,10 +225,12 @@ class HexEditorFrame(ttk.Frame):
             background="#f8f8f8",
             insertbackground="black",
         )
-        self._text_asm.configure(yscrollcommand=self._scroll_asm.set)
+        self._text_asm.configure(yscrollcommand=self._scroll_asm.set, xscrollcommand=self._scroll_asm_h.set)
         self._scroll_asm.configure(command=self._text_asm.yview)
-        self._text_asm.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self._scroll_asm.pack(side=tk.RIGHT, fill=tk.Y)
+        self._scroll_asm_h.configure(command=self._text_asm.xview)
+        self._text_asm.grid(row=0, column=0, sticky="nsew")
+        self._scroll_asm.grid(row=0, column=1, sticky="ns")
+        self._scroll_asm_h.grid(row=1, column=0, sticky="ew")
 
         def _asm_scroll(delta: int) -> None:
             self._text_asm.yview_scroll(-delta, "units")
@@ -227,7 +241,7 @@ class HexEditorFrame(ttk.Frame):
             w.bind("<Button-5>", lambda e: _asm_scroll(-3))
 
         self._tools_frame = ttk.Frame(body, width=1)
-        self._tools_frame.grid(row=0, column=4, sticky="nsew", padx=(4, 0))
+        self._tools_frame.grid(row=1, column=4, sticky="nsew", padx=(4, 0))
 
         if not self._asm_pane_visible:
             self._asm_frame.grid_remove()
@@ -297,7 +311,7 @@ class HexEditorFrame(ttk.Frame):
         self._text.focus_set()
         self._asm_pane_visible = not self._asm_pane_visible
         if self._asm_pane_visible:
-            self._asm_frame.grid(row=0, column=3, sticky="nsew", padx=(4, 0))
+            self._asm_frame.grid(row=1, column=3, sticky="nsew", padx=(4, 0))
             self._refresh_asm_selection()
         else:
             self._asm_frame.grid_remove()
@@ -378,6 +392,7 @@ class HexEditorFrame(ttk.Frame):
                 byte_val = ord(event.char) % 256
             self._data[off] = byte_val
             self._modified = True
+            self._ldr_pc_targets_valid = False
             self._refresh_visible()
             self._update_scrollbar()
             next_off = min(off + 1, len(self._data) - 1)
@@ -436,6 +451,7 @@ class HexEditorFrame(ttk.Frame):
                 if old != new_count:
                     self._refresh_visible()
                     self._update_scrollbar()
+                    self._refresh_asm_selection()
 
     # ── File I/O ─────────────────────────────────────────────────────
 
@@ -454,6 +470,7 @@ class HexEditorFrame(ttk.Frame):
             return False
         self._file_path = path
         self._modified = False
+        self._ldr_pc_targets_valid = False
         self._cursor_byte_offset = 0
         self._selection_start = self._selection_end = None
         self._nibble_pos = 0
@@ -543,6 +560,7 @@ class HexEditorFrame(ttk.Frame):
         try:
             self._refresh_visible()
             self._update_scrollbar()
+            self._refresh_asm_selection()
         finally:
             self._syncing_scroll = False
 
@@ -576,13 +594,16 @@ class HexEditorFrame(ttk.Frame):
             end = max(self._selection_start, self._selection_end) + 1
             start = (start // align) * align
         else:
-            start = (self._cursor_byte_offset // align) * align
-            end = min(start + align, len(self._data))
+            vis_start = self._visible_row_start * BYTES_PER_ROW
+            vis_end = min(vis_start + self._visible_row_count * BYTES_PER_ROW, len(self._data))
+            start = (vis_start // align) * align
+            end = vis_end
         if start >= len(self._data):
             self._text_asm.insert(tk.END, "(No bytes selected)")
             self._text_asm.configure(state=tk.DISABLED)
             return
         end = min(end, len(self._data))
+        ldr_targets = self._get_ldr_pc_targets(mode)
         chunk = bytes(self._data[start:end])
         base = GBA_ROM_BASE + start
         cs = Cs(CS_ARCH_ARM, mode)
@@ -590,16 +611,33 @@ class HexEditorFrame(ttk.Frame):
         insn_map: Dict[int, object] = {}
         try:
             for i in cs.disasm(chunk, base):
-                insn_map[i.address - GBA_ROM_BASE] = i
+                file_off = i.address - GBA_ROM_BASE
+                if file_off not in ldr_targets:
+                    insn_map[file_off] = i
         except Exception:
             pass
         offset = start
         lines: List[str] = []
         while offset < end:
             file_off = offset
-            if file_off in insn_map:
+            if file_off in ldr_targets:
+                b0 = self._data[file_off]
+                b1 = self._data[file_off + 1] if file_off + 1 < len(self._data) else 0
+                b2 = self._data[file_off + 2] if file_off + 2 < len(self._data) else 0
+                b3 = self._data[file_off + 3] if file_off + 3 < len(self._data) else 0
+                val = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+                hex_bytes = f"{b0:02x} {b1:02x} {b2:02x} {b3:02x}"
+                lines.append(f"{GBA_ROM_BASE + file_off:08X}:  {hex_bytes:12s}  .word #0x{val:08X}\n")
+                offset += 4
+            elif file_off in insn_map:
                 insn = insn_map[file_off]
-                raw, mnemonic, op_str = insn.bytes, insn.mnemonic, insn.op_str
+                raw = insn.bytes
+                insn_end = file_off + len(raw)
+                overlaps_target = any(t in ldr_targets for t in range(file_off + 1, insn_end))
+                if overlaps_target:
+                    offset += align
+                    continue
+                mnemonic, op_str = insn.mnemonic, insn.op_str
                 hex_bytes = " ".join(f"{b:02x}" for b in raw)
                 operands = f" {op_str}" if op_str else ""
                 comment = self._get_ldr_pc_comment(insn, mode)
@@ -624,8 +662,49 @@ class HexEditorFrame(ttk.Frame):
         self._text_asm.insert("1.0", "".join(lines) if lines else "(No instructions)")
         self._text_asm.configure(state=tk.DISABLED)
 
-    def _get_ldr_pc_comment(self, insn: object, mode: int) -> Optional[str]:
-        """If insn is LDR/LDRB/LDRH with [pc, #imm], return raw bytes at load target as comment (little endian)."""
+    def _get_ldr_pc_targets(self, mode: int) -> Set[int]:
+        """Set of file offsets that are load targets of LDR [pc, #imm].
+        Uses fast brute-force byte scan (no Capstone needed). Cached."""
+        if self._ldr_pc_targets_valid and self._ldr_pc_targets is not None:
+            return self._ldr_pc_targets
+        targets: Set[int] = set()
+        if not self._data:
+            self._ldr_pc_targets = targets
+            self._ldr_pc_targets_valid = True
+            return targets
+        data = self._data
+        data_len = len(data)
+
+        # Thumb-16 LDR Rd, [PC, #imm8*4]: encoding 0100_1xxx in high byte
+        for off in range(0, data_len - 1, 2):
+            hi = data[off + 1]
+            if 0x48 <= hi <= 0x4F:
+                imm8 = data[off]
+                insn_addr = GBA_ROM_BASE + off
+                target = ((insn_addr + 4) & ~3) + imm8 * 4
+                file_off = target - GBA_ROM_BASE
+                if 0 <= file_off and file_off + 3 < data_len:
+                    targets.add(file_off)
+
+        # ARM LDR/LDRB Rd, [PC, #±imm12]: cond 0101 UB01 1111 Rd imm12
+        for off in range(0, data_len - 3, 4):
+            word = data[off] | (data[off + 1] << 8) | (data[off + 2] << 16) | (data[off + 3] << 24)
+            if (word & 0x0F3F0000) == 0x051F0000:
+                imm12 = word & 0xFFF
+                u = (word >> 23) & 1
+                disp = imm12 if u else -imm12
+                insn_addr = GBA_ROM_BASE + off
+                target = insn_addr + 8 + disp
+                file_off = target - GBA_ROM_BASE
+                if 0 <= file_off and file_off + 3 < data_len:
+                    targets.add(file_off)
+
+        self._ldr_pc_targets = targets
+        self._ldr_pc_targets_valid = True
+        return targets
+
+    def _get_ldr_pc_target_addr(self, insn: object, mode: int) -> Optional[int]:
+        """If insn is LDR/LDRB/LDRH with [pc, #imm], return the resolved load target address (GBA ROM addr)."""
         if not _CAPSTONE_AVAILABLE or insn.mnemonic not in ("ldr", "ldrb", "ldrh"):
             return None
         disp = None
@@ -638,10 +717,15 @@ class HexEditorFrame(ttk.Frame):
         addr = insn.address
         if mode == CS_MODE_ARM:
             pc = (addr + 8) & ~3
-            target_addr = pc + disp
-        else:
-            pc = (addr + 4) & ~2
-            target_addr = pc + disp
+            return pc + disp
+        pc = (addr + 4) & ~2
+        return pc + disp
+
+    def _get_ldr_pc_comment(self, insn: object, mode: int) -> Optional[str]:
+        """If insn is LDR/LDRB/LDRH with [pc, #imm], return target address and value: @ #0x08055040 = #0x02036DFC"""
+        target_addr = self._get_ldr_pc_target_addr(insn, mode)
+        if target_addr is None:
+            return None
         file_off = target_addr - GBA_ROM_BASE
         if file_off < 0:
             return None
@@ -649,7 +733,7 @@ class HexEditorFrame(ttk.Frame):
         if file_off + n > len(self._data):
             return None
         val = sum(self._data[file_off + i] << (i * 8) for i in range(n))
-        return f"#0x{val:0{n * 2}X}"
+        return f"#0x{target_addr:08X} = #0x{val:0{n * 2}X}"
 
     # ── Rendering ────────────────────────────────────────────────────
 
@@ -778,6 +862,8 @@ class HexEditorFrame(ttk.Frame):
         if self._selection_start is not None and self._selection_end is not None:
             s = min(self._selection_start, self._selection_end)
             e = max(self._selection_start, self._selection_end)
+            count = e - s + 1
+            self._selection_label.config(text=f"{count} bytes")
             for off in range(s, e + 1):
                 ix = self._offset_to_index(off)
                 if ix:
@@ -785,6 +871,8 @@ class HexEditorFrame(ttk.Frame):
                 aix = self._offset_to_ascii_index(off)
                 if aix:
                     self._text_ascii.tag_add("sel_ascii", aix, f"{aix}+1c")
+        else:
+            self._selection_label.config(text="")
 
         self._refresh_asm_selection()
 
@@ -978,6 +1066,7 @@ class HexEditorFrame(ttk.Frame):
             if self._insert_mode and self._nibble_pos == 0:
                 self._data.insert(self._cursor_byte_offset, 0)
                 self._modified = True
+                self._ldr_pc_targets_valid = False
             b = self._data[self._cursor_byte_offset]
             if self._nibble_pos == 0:
                 self._data[self._cursor_byte_offset] = (b & 0x0F) | (digit << 4)
@@ -987,6 +1076,7 @@ class HexEditorFrame(ttk.Frame):
                 self._nibble_pos = 0
                 self._cursor_byte_offset = min(self._cursor_byte_offset + 1, len(self._data) - 1)
             self._modified = True
+            self._ldr_pc_targets_valid = False
             self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
             self._ensure_cursor_visible()
             self._refresh_visible()
@@ -1008,6 +1098,7 @@ class HexEditorFrame(ttk.Frame):
                 del self._data[self._cursor_byte_offset]
                 self._cursor_byte_offset = min(self._cursor_byte_offset, len(self._data) - 1)
         self._modified = True
+        self._ldr_pc_targets_valid = False
         self._nibble_pos = 0
         self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
         self._ensure_cursor_visible()
@@ -1024,6 +1115,7 @@ class HexEditorFrame(ttk.Frame):
             del self._data[self._cursor_byte_offset - 1]
             self._cursor_byte_offset -= 1
             self._modified = True
+            self._ldr_pc_targets_valid = False
             self._nibble_pos = 0
             self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
             self._ensure_cursor_visible()
