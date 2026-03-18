@@ -2,12 +2,20 @@
 Shared hex editor for GBA ROM hacking.
 Supports pointer detection (0x08/0x09), follow, replace/insert mode, delete.
 ASCII/PCS (Pokemon GBA) encoding for the character pane.
+Optional Capstone disassembly (ARM7TDMI Thumb/ARM).
 """
 
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple
+
+_CAPSTONE_AVAILABLE = False
+try:
+    from capstone import Cs, CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_THUMB
+    _CAPSTONE_AVAILABLE = True
+except ImportError:
+    pass
 
 GBA_ROM_BASE = 0x08000000
 BYTES_PER_ROW = 16
@@ -117,6 +125,8 @@ class HexEditorFrame(ttk.Frame):
         self._total_rows = 0
         self._syncing_scroll = False
         self._encoding = default_encoding if default_encoding in ("ascii", "pcs") else "ascii"
+        self._asm_mode = "thumb"  # thumb | arm for GBA ARM7TDMI
+        self._asm_pane_visible = False
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -130,26 +140,41 @@ class HexEditorFrame(ttk.Frame):
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(1, weight=1)
 
-        # Top row: mode | encoding switcher
+        # Top row: mode | ASM mode | Goto | Chars
         top_row = ttk.Frame(outer)
         top_row.grid(row=0, column=0, sticky="w", pady=(0, 1))
         self._mode_label = ttk.Label(top_row, text="REPLACE", font=("Consolas", 9, "bold"))
         self._mode_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
-        ttk.Label(top_row, text="Chars:", font=("Consolas", 9)).grid(row=0, column=1, sticky="w", padx=(0, 2))
+        ttk.Label(top_row, text="ASM mode:", font=("Consolas", 9)).grid(row=0, column=1, sticky="w", padx=(8, 2))
+        self._asm_mode_var = tk.StringVar(value="Thumb")
+        self._asm_mode_combo = ttk.Combobox(
+            top_row, textvariable=self._asm_mode_var, values=["Thumb", "ARM"], width=6, state="readonly", font=("Consolas", 9)
+        )
+        self._asm_mode_combo.grid(row=0, column=2, sticky="w", padx=(0, 2))
+        self._asm_mode_combo.current(0)
+        self._asm_mode_combo.bind("<<ComboboxSelected>>", self._on_asm_mode_change)
+        ttk.Label(top_row, text="Goto:", font=("Consolas", 9)).grid(row=0, column=3, sticky="w", padx=(8, 2))
+        self._goto_var = tk.StringVar(value="")
+        self._goto_entry = ttk.Entry(top_row, textvariable=self._goto_var, width=10, font=("Consolas", 9))
+        self._goto_entry.grid(row=0, column=4, sticky="w", padx=(0, 8))
+        self._goto_entry.bind("<KeyRelease>", self._on_goto_entry_change)
+        self._goto_entry.bind("<FocusIn>", self._on_goto_focus_in)
+        ttk.Label(top_row, text="Chars:", font=("Consolas", 9)).grid(row=0, column=5, sticky="w", padx=(8, 2))
         self._encoding_var = tk.StringVar(value=self._encoding.upper())
         self._encoding_combo = ttk.Combobox(
             top_row, textvariable=self._encoding_var, values=["ASCII", "PCS"], width=8, state="readonly"
         )
-        self._encoding_combo.grid(row=0, column=2, sticky="w")
+        self._encoding_combo.grid(row=0, column=6, sticky="w")
         self._encoding_combo.bind("<<ComboboxSelected>>", self._on_encoding_change)
 
-        # Main content: hex (no trailing space) | ascii | scrollbar | tools area
+        # Main content: hex | ascii | asm (toggleable) | scrollbar | tools area
         body = ttk.Frame(outer)
         body.grid(row=1, column=0, sticky="nsew")
         body.columnconfigure(0, weight=0)
         body.columnconfigure(1, weight=0)
         body.columnconfigure(2, weight=0)
-        body.columnconfigure(3, weight=1)
+        body.columnconfigure(3, weight=0)
+        body.columnconfigure(4, weight=1)
         body.rowconfigure(0, weight=1)
 
         hex_width = 10 + 3 * BYTES_PER_ROW - 1
@@ -168,15 +193,42 @@ class HexEditorFrame(ttk.Frame):
             selectbackground="#add8e6", selectforeground="black",
             exportselection=False,
         )
-
         self._text.configure(yscrollcommand=self._on_text_yscroll)
         self._scroll_y.configure(command=self._on_scrollbar_command)
 
         self._text.grid(row=0, column=0, sticky="nsew", padx=(0, 0))
         self._text_ascii.grid(row=0, column=1, sticky="ns", padx=(0, 0))
         self._scroll_y.grid(row=0, column=2, sticky="ns")
+
+        # ASM panel: to the right of hex scrollbar, toggleable, has its own scrollbar
+        self._asm_frame = ttk.LabelFrame(body, text=" Disassembly ", padding=2)
+        self._asm_frame.grid(row=0, column=3, sticky="nsew", padx=(4, 0))
+        self._scroll_asm = tk.Scrollbar(self._asm_frame)
+        self._text_asm = tk.Text(
+            self._asm_frame, font=("Consolas", 10), wrap=tk.NONE, width=58,
+            borderwidth=1, relief=tk.SOLID, padx=4, pady=2,
+            state=tk.DISABLED,
+            background="#f8f8f8",
+            insertbackground="black",
+        )
+        self._text_asm.configure(yscrollcommand=self._scroll_asm.set)
+        self._scroll_asm.configure(command=self._text_asm.yview)
+        self._text_asm.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._scroll_asm.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _asm_scroll(delta: int) -> None:
+            self._text_asm.yview_scroll(-delta, "units")
+
+        for w in (self._text_asm, self._asm_frame):
+            w.bind("<MouseWheel>", lambda e: _asm_scroll(int((e.delta or 0) / 120)))
+            w.bind("<Button-4>", lambda e: _asm_scroll(3))
+            w.bind("<Button-5>", lambda e: _asm_scroll(-3))
+
         self._tools_frame = ttk.Frame(body, width=1)
-        self._tools_frame.grid(row=0, column=3, sticky="nsew", padx=(4, 0))
+        self._tools_frame.grid(row=0, column=4, sticky="nsew", padx=(4, 0))
+
+        if not self._asm_pane_visible:
+            self._asm_frame.grid_remove()
 
         self._text.tag_configure("pointer", foreground="red")
         self._text.tag_configure("sel_hex", background="#add8e6", foreground="black")
@@ -190,7 +242,21 @@ class HexEditorFrame(ttk.Frame):
         self._text.bind("<B1-Motion>", self._on_drag)
         self._text.bind("<Double-Button-1>", self._on_double_click)
         self._text.bind("<Button-3>", self._on_right_click)
-        self._text.bind("<Control-a>", lambda e: self._select_all())
+        def _bind_asm_toggle(w: tk.Misc) -> None:
+            w.bind("<Control-a>", self._toggle_asm_pane)
+            w.bind("<Control-A>", self._toggle_asm_pane)
+
+        _bind_asm_toggle(self._text)
+        _bind_asm_toggle(self._text_ascii)
+        _bind_asm_toggle(self._goto_entry)
+        _bind_asm_toggle(self._encoding_combo)
+        _bind_asm_toggle(self._asm_mode_combo)
+        _bind_asm_toggle(outer)
+        self.winfo_toplevel().bind("<Control-a>", self._toggle_asm_pane, add=True)
+        self.winfo_toplevel().bind("<Control-A>", self._toggle_asm_pane, add=True)
+
+        self._text.bind("<Control-Shift-A>", lambda e: self._select_all())
+        self._text_ascii.bind("<Control-Shift-A>", lambda e: self._select_all())
         self._text.bind("<Delete>", self._on_delete)
         self._text.bind("<Insert>", self._on_insert_key)
         self._text.bind("<BackSpace>", self._on_backspace)
@@ -203,7 +269,6 @@ class HexEditorFrame(ttk.Frame):
         self._text.bind("<Control-Home>", self._on_ctrl_home)
         self._text.bind("<Control-End>", self._on_ctrl_end)
         self._text.bind("<Configure>", self._on_text_configure)
-
         def _scroll_and_sync(amount: int, units: str = "units") -> Optional[str]:
             if self._data:
                 self._on_scrollbar_command("scroll", amount, units)
@@ -223,12 +288,63 @@ class HexEditorFrame(ttk.Frame):
 
         self._text.bind("<KeyPress>", self._prevent_unwanted, add=True)
 
+    def _toggle_asm_pane(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Toggle ASM disassembly pane visibility. Bound to Ctrl+A."""
+        self._asm_pane_visible = not self._asm_pane_visible
+        if self._asm_pane_visible:
+            self._asm_frame.grid(row=0, column=3, sticky="nsew", padx=(4, 0))
+            self._refresh_asm_selection()
+        else:
+            self._asm_frame.grid_remove()
+        return "break"
+
+    def _on_asm_mode_change(self, event: Optional[tk.Event] = None) -> None:
+        sel = self._asm_mode_var.get()
+        self._asm_mode = "thumb" if sel == "Thumb" else "arm"
+        if self._data:
+            self._refresh_asm_selection()
+
     def _on_encoding_change(self, event: Optional[tk.Event] = None) -> None:
         sel = self._encoding_var.get().upper()
         if sel in ("ASCII", "PCS"):
             self._encoding = "pcs" if sel == "PCS" else "ascii"
             if self._data:
                 self._refresh_visible()
+
+    def _on_goto_focus_in(self, event: Optional[tk.Event] = None) -> None:
+        if self._data:
+            self._goto_var.set(f"{self._cursor_byte_offset:08X}")
+            self._goto_entry.select_range(0, tk.END)
+
+    def _on_goto_entry_change(self, event: Optional[tk.Event] = None) -> None:
+        if not self._data:
+            return
+        s = self._goto_var.get().strip()
+        if s.startswith("0x") or s.startswith("0X"):
+            s = s[2:]
+        if not s:
+            return
+        try:
+            val = int(s, 16)
+            if val >= GBA_ROM_BASE and val < GBA_ROM_BASE + len(self._data):
+                val = val - GBA_ROM_BASE
+            if 0 <= val < len(self._data):
+                self._do_goto(val)
+        except ValueError:
+            pass
+
+    def _do_goto(self, offset: int) -> None:
+        """Jump to offset in hex editor. Puts target row at the very top of the view."""
+        if not self._data or offset < 0 or offset >= len(self._data):
+            return
+        self._cursor_byte_offset = offset
+        self._selection_start = self._selection_end = None
+        cr = offset // BYTES_PER_ROW
+        max_start = max(0, self._total_rows - self._visible_row_count)
+        self._visible_row_start = min(cr, max_start)
+        self._refresh_visible()
+        self._update_scrollbar()
+        self._refresh_asm_selection()
 
     def _byte_to_char(self, b: int) -> str:
         if self._encoding == "pcs":
@@ -237,6 +353,9 @@ class HexEditorFrame(ttk.Frame):
 
     def _on_ascii_key(self, event: tk.Event) -> Optional[str]:
         """Handle typing in character panel: update byte at cursor, refresh, advance."""
+        if event.state & 0x4 and event.keysym.lower() == "a":
+            self._toggle_asm_pane(event)
+            return "break"
         if not self._data:
             return None
         idx = self._text_ascii.index("insert")
@@ -285,6 +404,8 @@ class HexEditorFrame(ttk.Frame):
         if event.keysym in ("Delete", "Insert", "BackSpace"):
             return "break"
         if event.char or event.keysym in ("Return", "Tab", "space"):
+            if event.state & 0x4:
+                return None
             return "break"
         return None
 
@@ -335,6 +456,7 @@ class HexEditorFrame(ttk.Frame):
         self._visible_row_start = 0
         self._refresh_visible()
         self._update_scrollbar()
+        self._refresh_asm_selection()
         self._text.focus_set()
         return True
 
@@ -384,9 +506,14 @@ class HexEditorFrame(ttk.Frame):
             self._update_scrollbar()
 
     def _on_scrollbar_command(self, *args) -> None:
-        if not self._data or self._total_rows == 0:
+        if not self._data:
             return
         if self._syncing_scroll:
+            return
+        self._on_scrollbar_command_hex(*args)
+
+    def _on_scrollbar_command_hex(self, *args) -> None:
+        if self._total_rows == 0:
             return
         max_start = max(0, self._total_rows - self._visible_row_count)
         if max_start == 0:
@@ -405,7 +532,7 @@ class HexEditorFrame(ttk.Frame):
             if units == "pages":
                 amount *= self._visible_row_count
             else:
-                amount *= max(3, self._visible_row_count // 10)
+                amount *= 1
             self._visible_row_start = max(0, min(max_start, self._visible_row_start + amount))
         self._syncing_scroll = True
         try:
@@ -426,6 +553,67 @@ class HexEditorFrame(ttk.Frame):
         first = (self._visible_row_start / max_start) * (1.0 - thumb_size) if max_start > 0 else 0
         last = first + thumb_size
         self._scroll_y.set(first, min(last, 1.0))
+
+    def _refresh_asm_selection(self) -> None:
+        """Disassemble selected/highlighted bytes (or cursor instruction) into ASM panel."""
+        if not self._asm_pane_visible:
+            return
+        self._text_asm.configure(state=tk.NORMAL)
+        self._text_asm.delete("1.0", tk.END)
+        if not self._data or not _CAPSTONE_AVAILABLE:
+            self._text_asm.insert(tk.END, "(No data or Capstone not available)")
+            self._text_asm.configure(state=tk.DISABLED)
+            return
+        mode = CS_MODE_THUMB if self._asm_mode == "thumb" else CS_MODE_ARM
+        align = 2 if self._asm_mode == "thumb" else 4
+        if self._selection_start is not None and self._selection_end is not None:
+            start = min(self._selection_start, self._selection_end)
+            end = max(self._selection_start, self._selection_end) + 1
+            start = (start // align) * align
+        else:
+            start = (self._cursor_byte_offset // align) * align
+            end = min(start + align, len(self._data))
+        if start >= len(self._data):
+            self._text_asm.insert(tk.END, "(No bytes selected)")
+            self._text_asm.configure(state=tk.DISABLED)
+            return
+        end = min(end, len(self._data))
+        chunk = bytes(self._data[start:end])
+        base = GBA_ROM_BASE + start
+        cs = Cs(CS_ARCH_ARM, mode)
+        cs.detail = False
+        insn_map: Dict[int, Tuple[bytes, str, str]] = {}
+        try:
+            for i in cs.disasm(chunk, base):
+                insn_map[i.address - GBA_ROM_BASE] = (i.bytes, i.mnemonic, i.op_str)
+        except Exception:
+            pass
+        offset = start
+        lines: List[str] = []
+        while offset < end:
+            file_off = offset
+            if file_off in insn_map:
+                raw, mnemonic, op_str = insn_map[file_off]
+                hex_bytes = " ".join(f"{b:02x}" for b in raw)
+                operands = f" {op_str}" if op_str else ""
+                lines.append(f"{GBA_ROM_BASE + file_off:08X}:  {hex_bytes:12s}  {mnemonic}{operands}\n")
+                offset += len(raw)
+            else:
+                if align == 2:
+                    b0 = self._data[offset]
+                    b1 = self._data[offset + 1] if offset + 1 < len(self._data) else 0
+                    hex_bytes = f"{b0:02x} {b1:02x}"
+                    lines.append(f"{GBA_ROM_BASE + offset:08X}:  {hex_bytes:12s}  .byte 0x{b0:02x}, 0x{b1:02x}\n")
+                else:
+                    b0 = self._data[offset]
+                    b1 = self._data[offset + 1] if offset + 1 < len(self._data) else 0
+                    b2 = self._data[offset + 2] if offset + 2 < len(self._data) else 0
+                    b3 = self._data[offset + 3] if offset + 3 < len(self._data) else 0
+                    hex_bytes = f"{b0:02x} {b1:02x} {b2:02x} {b3:02x}"
+                    lines.append(f"{GBA_ROM_BASE + offset:08X}:  {hex_bytes:12s}  .word 0x{b3:02x}{b2:02x}{b1:02x}{b0:02x}\n")
+                offset += align
+        self._text_asm.insert("1.0", "".join(lines) if lines else "(No instructions)")
+        self._text_asm.configure(state=tk.DISABLED)
 
     # ── Rendering ────────────────────────────────────────────────────
 
@@ -562,6 +750,8 @@ class HexEditorFrame(ttk.Frame):
                 if aix:
                     self._text_ascii.tag_add("sel_ascii", aix, f"{aix}+1c")
 
+        self._refresh_asm_selection()
+
     # ── Mouse interaction ────────────────────────────────────────────
 
     def _on_click(self, event: tk.Event) -> Optional[str]:
@@ -627,6 +817,7 @@ class HexEditorFrame(ttk.Frame):
                 ptr_start = s
         if ptr_start is not None:
             menu.add_command(label="Follow pointer", command=lambda: self._follow_pointer_at(ptr_start))
+        menu.add_command(label="Select all", command=lambda: self._select_all())
         menu.add_command(label="Go to offset...", command=self._on_goto_offset)
         menu.tk_popup(event.x_root, event.y_root)
 
@@ -678,11 +869,7 @@ class HexEditorFrame(ttk.Frame):
             try:
                 val = int(entry.get(), 16)
                 if 0 <= val < len(self._data):
-                    self._cursor_byte_offset = val
-                    self._selection_start = self._selection_end = None
-                    self._ensure_cursor_visible()
-                    self._refresh_visible()
-                    self._update_scrollbar()
+                    self._do_goto(val)
                 dialog.destroy()
             except ValueError:
                 pass
@@ -701,6 +888,9 @@ class HexEditorFrame(ttk.Frame):
         return "break"
 
     def _on_key(self, event: tk.Event) -> Optional[str]:
+        if event.state & 0x4 and event.keysym.lower() == "a":
+            self._toggle_asm_pane(event)
+            return "break"
         if not self._data:
             return None
         if event.keysym == "Delete":

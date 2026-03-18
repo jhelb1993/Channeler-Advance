@@ -1,3 +1,4 @@
 # Channeler Advance - ROM Hacking Tool
 # Python 3.8+
 # Tkinter is included with Python; no extra deps for base UI
+capstone>=5.0
