@@ -542,8 +542,10 @@ class HexEditorFrame(ttk.Frame):
         with tempfile.TemporaryDirectory() as tmpdir:
             asm_path = os.path.join(tmpdir, "edit.asm")
             bin_path = os.path.join(tmpdir, "edit.bin")
+            origin = GBA_ROM_BASE + self._hackmew_asm_start
+            preamble = f".thumb\n.org 0x{origin:X}\n\n"
             with open(asm_path, "w", encoding="utf-8") as f:
-                f.write(asm_text + "\n")
+                f.write(preamble + asm_text + "\n")
 
             result = subprocess.run(
                 [thumb_bat, asm_path, bin_path],
@@ -559,6 +561,17 @@ class HexEditorFrame(ttk.Frame):
 
             with open(bin_path, "rb") as f:
                 compiled = f.read()
+
+            # Skip bytes before .org origin (padding inserted by assembler)
+            if len(compiled) > origin:
+                compiled = compiled[origin:]
+            elif len(compiled) < origin:
+                messagebox.showerror(
+                    "Compile Error",
+                    f"Assembler output ({len(compiled)} bytes) smaller than "
+                    f"origin (0x{origin:X}); cannot clip.",
+                )
+                return "break"
 
         if len(compiled) > original_size:
             messagebox.showerror(
@@ -695,6 +708,7 @@ class HexEditorFrame(ttk.Frame):
             self._ldr_pc_targets_valid = False
             self._refresh_visible()
             self._update_scrollbar()
+            self._refresh_asm_selection()
             next_off = min(off + 1, len(self._data) - 1)
             next_idx = self._offset_to_ascii_index(next_off) if next_off != off else idx
             if next_idx:
@@ -1376,6 +1390,7 @@ Format = "`f|u8`[u8 arg0]"
                 self._refresh_pseudo_c_selection()
             return
         if self._hackmew_mode:
+            self._refresh_asm_hackmew()
             if self._pseudo_c_pane_visible:
                 self._refresh_pseudo_c_selection()
             return
@@ -1896,28 +1911,26 @@ Format = "`f|u8`[u8 arg0]"
         insn_map: Dict[int, object],
         ldr_targets: Set[int],
     ) -> Set[int]:
-        """First scan: collect all file offsets that are jumped to (branch targets)."""
+        """Collect file offsets that are actually jumped to by branch instructions.
+        Does NOT add .word pointees (those are data, not branch targets).
+        Skips instructions that overlap .word pools (misdisassembled data)."""
         targets: Set[int] = set()
         data_len = len(self._data)
         for file_off, insn in insn_map.items():
             if file_off < start or file_off >= end:
                 continue
+            # Skip "instructions" that overlap .word data - Capstone misdisassembles data as code
+            if self._is_ldr_word_pool(file_off, ldr_targets):
+                continue
+            insn_end = file_off + len(insn.bytes)
+            if any(
+                self._is_ldr_word_pool(t, ldr_targets)
+                for t in range(file_off, insn_end)
+            ):
+                continue
             t = self._get_branch_target_from_insn(insn, mode)
             if t is not None and 0 <= t < data_len:
                 targets.add(t)
-        for file_off in ldr_targets:
-            if file_off < start or file_off >= end or file_off + 4 > data_len:
-                continue
-            val = (
-                self._data[file_off]
-                | (self._data[file_off + 1] << 8)
-                | (self._data[file_off + 2] << 16)
-                | (self._data[file_off + 3] << 24)
-            )
-            if (val >> 24) in (0x08, 0x09):
-                fo = val - GBA_ROM_BASE
-                if 0 <= fo < data_len:
-                    targets.add(fo)
         return targets
 
     def _build_asm_export_lines_with_labels(self, hackmew: bool = False) -> List[str]:
@@ -1965,10 +1978,12 @@ Format = "`f|u8`[u8 arg0]"
             fo: f"loc_{GBA_ROM_BASE + fo:08X}" for fo in label_offsets
         }
 
-        def replace_addrs_with_labels(text: str) -> str:
+        def replace_addrs_with_labels(text: str, local_only: bool = False) -> str:
             def repl(m: re.Match) -> str:
                 addr = int(m.group(1), 16)
                 fo = addr - GBA_ROM_BASE
+                if local_only and (fo < start or fo >= end):
+                    return m.group(0)
                 return target_to_label.get(fo, m.group(0))
             return re.sub(r"#0x([0-9A-Fa-f]+)\b", repl, text)
 
@@ -1990,7 +2005,7 @@ Format = "`f|u8`[u8 arg0]"
                     line = f".word 0x{val:X}"
                 else:
                     line = f".word #0x{val:08X}"
-                line = replace_addrs_with_labels(line)
+                line = replace_addrs_with_labels(line, local_only=hackmew)
                 output.append(line)
                 offset += 4
             elif file_off in insn_map:
@@ -2010,7 +2025,7 @@ Format = "`f|u8`[u8 arg0]"
                 if comment:
                     operands += f"  @ {comment}"
                 line = f"{mnemonic}{operands}"
-                line = replace_addrs_with_labels(line)
+                line = replace_addrs_with_labels(line, local_only=hackmew)
                 if hackmew:
                     ldr_target = self._get_ldr_pc_target_addr(insn, mode)
                     if ldr_target is not None:
@@ -2557,6 +2572,7 @@ Format = "`f|u8`[u8 arg0]"
             self._ensure_cursor_visible()
             self._refresh_visible()
             self._update_scrollbar()
+            self._refresh_asm_selection()
             return "break"
         return None
 
