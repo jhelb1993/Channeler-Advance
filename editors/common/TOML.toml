@@ -1,0 +1,12 @@
+[[Constants]]
+Name = "NUM_TASK_DATA"
+Value = 16
+
+[[Structs]]
+Name = "Task"
+Format = "`s`{TaskFunc|*u8}{isActive|b8}{prev|u8}{next|u8}{priority|u8}{data[NUM_TASK_DATA]|s16}"
+
+[[FunctionAnchors]]
+Name = "funcs.trainer_card.Task_SetCardFlipped"
+Address = 0x8b4d8
+Format = "`f|b8`[struct Task* task]"

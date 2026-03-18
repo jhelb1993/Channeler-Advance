@@ -5,12 +5,21 @@ ASCII/PCS (Pokemon GBA) encoding for the character pane.
 Optional Capstone disassembly (ARM7TDMI Thumb/ARM).
 """
 
+import os
 import re
+import shutil
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
-from typing import Optional, Dict, List, Tuple, Set
+from typing import Optional, Dict, List, Tuple, Set, Any
+
+_TOML_AVAILABLE = False
+try:
+    import tomli
+    _TOML_AVAILABLE = True
+except ImportError:
+    pass
 
 _ANGR_AVAILABLE = False
 try:
@@ -140,6 +149,8 @@ class HexEditorFrame(ttk.Frame):
         self._pseudo_c_pane_visible = False
         self._ldr_pc_targets: Optional[Set[int]] = None
         self._ldr_pc_targets_valid = False
+        self._toml_path: Optional[str] = None
+        self._toml_data: Dict[str, Any] = {}
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -546,6 +557,7 @@ class HexEditorFrame(ttk.Frame):
         self._nibble_pos = 0
         self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW if self._data else 0
         self._visible_row_start = 0
+        self._load_toml_for_rom()
         self._refresh_visible()
         self._update_scrollbar()
         self._refresh_asm_selection()
@@ -572,11 +584,339 @@ class HexEditorFrame(ttk.Frame):
         )
         if not path:
             return False
+        if self._toml_path and self._file_path and os.path.normpath(path) != os.path.normpath(self._file_path):
+            self._copy_toml_for_save_as(path)
         self._file_path = path
         return self.save_file()
 
     def get_file_path(self) -> Optional[str]:
         return self._file_path
+
+    def _get_toml_path(self, rom_path: str) -> str:
+        """Return path to TOML file (same name as ROM, .toml extension)."""
+        base = os.path.splitext(os.path.basename(rom_path))[0]
+        return os.path.join(os.path.dirname(rom_path), base + ".toml")
+
+    def _load_toml_for_rom(self) -> None:
+        """Load TOML for current ROM. Create default if missing."""
+        if not self._file_path or not _TOML_AVAILABLE:
+            self._toml_path = None
+            self._toml_data = {}
+            return
+        toml_path = self._get_toml_path(self._file_path)
+        if os.path.isfile(toml_path):
+            try:
+                with open(toml_path, "rb") as f:
+                    self._toml_data = tomli.load(f)
+                self._toml_path = toml_path
+            except Exception:
+                self._toml_data = {}
+                self._toml_path = toml_path
+        else:
+            self._create_default_toml(toml_path)
+
+    def _create_default_toml(self, toml_path: str) -> None:
+        """Create default TOML file with template structure."""
+        default = """# Structure definitions for this ROM
+# Add [[FunctionAnchors]], [[Structs]], [[Constants]] as needed.
+
+[[Constants]]
+Name = "EXAMPLE_CONST"
+Value = 0
+
+[[Structs]]
+Name = "structs.Example"
+Format = "`s`{field|u8}"
+
+[[FunctionAnchors]]
+Name = "funcs.example.FuncName"
+Address = 0x8000000
+Format = "`f|u8`[u8 arg0]"
+"""
+        try:
+            with open(toml_path, "w", encoding="utf-8") as f:
+                f.write(default)
+            self._toml_path = toml_path
+            self._toml_data = {}
+            if _TOML_AVAILABLE:
+                with open(toml_path, "rb") as f:
+                    self._toml_data = tomli.load(f)
+        except OSError:
+            self._toml_path = None
+            self._toml_data = {}
+
+    def _copy_toml_for_save_as(self, new_rom_path: str) -> None:
+        """Copy current TOML to new ROM's TOML path."""
+        if not self._toml_path or not os.path.isfile(self._toml_path):
+            return
+        new_toml = self._get_toml_path(new_rom_path)
+        try:
+            shutil.copy2(self._toml_path, new_toml)
+            self._toml_path = new_toml
+            if _TOML_AVAILABLE:
+                with open(new_toml, "rb") as f:
+                    self._toml_data = tomli.load(f)
+        except OSError:
+            pass
+
+    def _get_function_anchor_for_addr(self, gba_addr: int) -> Optional[Dict[str, Any]]:
+        """Return FunctionAnchor dict if gba_addr matches any anchor Address."""
+        if not self._toml_data:
+            return None
+        for anchor in self._toml_data.get("FunctionAnchors", []):
+            addr = anchor.get("Address")
+            if addr is None:
+                continue
+            if isinstance(addr, int):
+                anchor_addr = addr
+            else:
+                try:
+                    anchor_addr = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+                except (ValueError, TypeError):
+                    continue
+            if anchor_addr < GBA_ROM_BASE:
+                anchor_addr += GBA_ROM_BASE
+            if (anchor_addr & 0x01) != (gba_addr & 0x01):
+                anchor_addr &= ~1
+                gba_check = gba_addr & ~1
+            else:
+                gba_check = gba_addr
+            if anchor_addr == gba_check or anchor_addr == gba_addr:
+                return anchor
+        return None
+
+    def _extract_extern_lines(self, text: str) -> List[str]:
+        """Extract lines that are extern declarations from decompiler output."""
+        lines: List[str] = []
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith("extern "):
+                lines.append(s)
+        return lines
+
+    def _extract_angr_function_body(self, text: str) -> str:
+        """Extract the function body (from opening brace to end) from angr decompilation."""
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            if re.search(r"\bsub_[a-fA-F0-9]+\s*\(", line):
+                rest = "\n".join(lines[i:])
+                match = re.search(r"\{", rest)
+                if match:
+                    return rest[match.start():]
+                break
+        return ""
+
+    def _format_struct_from_toml(self, struct_def: Dict[str, Any], constants: Dict[str, int]) -> Optional[str]:
+        """Convert Struct Format to C struct definition. Format: `s`{field|type}..."""
+        fmt = struct_def.get("Format", "")
+        if not fmt or "`s`" not in fmt:
+            return None
+        name = struct_def.get("Name", "struct")
+        type_map = {"b8": "bool8", "u8": "u8", "s8": "s8", "u16": "u16", "s16": "s16", "u32": "u32", "s32": "s32"}
+        lines: List[str] = [f"struct {name}", "{"]
+        for m in re.finditer(r"\{([^|]+)\|([^}]+)\}", fmt):
+            field, typ = m.group(1).strip(), m.group(2).strip()
+            for k, v in constants.items():
+                field = re.sub(r"\b" + re.escape(str(k)) + r"\b", str(v), field)
+            ptr = typ.startswith("*")
+            core = typ.lstrip("*")
+            ctype = type_map.get(core, core)
+            if ptr:
+                ctype = ctype + "*"
+            lines.append(f"    {ctype} {field};")
+        lines.append("}")
+        return "\n".join(lines)
+
+    def _get_struct_names_from_anchor(self, anchor: Dict[str, Any]) -> List[str]:
+        """Return ordered list of struct names referenced in Format args (struct_0, struct_1, ...)."""
+        names: List[str] = []
+        if not self._toml_data:
+            return names
+        fmt = anchor.get("Format", "")
+        for bracket in re.findall(r"\[([^\]]+)\]", fmt):
+            m = re.search(r"struct\s+(\w+)", bracket)
+            if m:
+                name = m.group(1)
+                if name not in names:
+                    names.append(name)
+        return names
+
+    def _get_param_names_from_anchor(self, anchor: Dict[str, Any]) -> List[str]:
+        """Return ordered list of parameter names from Format args (a0, a1, ... mapping)."""
+        names: List[str] = []
+        fmt = anchor.get("Format", "")
+        for bracket in re.findall(r"\[([^\]]+)\]", fmt):
+            s = bracket.strip()
+            m = re.search(r"(\w+)\s*$", s)
+            if m and m.group(1) != "void":
+                names.append(m.group(1))
+        return names
+
+    def _rewrite_angr_param_refs(self, text: str, param_names: List[str]) -> str:
+        """Replace angr's a0, a1, a2, ... with TOML parameter names in body."""
+        if not param_names:
+            return text
+        result = text
+        for i, name in enumerate(param_names):
+            angr_param = f"a{i}"
+            result = re.sub(r"\b" + re.escape(angr_param) + r"\b", name, result)
+        return result
+
+    def _get_struct_defs_from_anchor(self, anchor: Dict[str, Any], constants: Dict[str, int]) -> List[str]:
+        """Return C struct definitions for structs referenced in Format args (deduped by struct name)."""
+        seen: Set[str] = set()
+        result: List[str] = []
+        if not self._toml_data:
+            return result
+        fmt = anchor.get("Format", "")
+        struct_by_name = {s.get("Name"): s for s in self._toml_data.get("Structs", []) if s.get("Name")}
+        for bracket in re.findall(r"\[([^\]]+)\]", fmt):
+            m = re.search(r"struct\s+(\w+)", bracket)
+            if m:
+                name = m.group(1)
+                if name in seen:
+                    continue
+                st = struct_by_name.get(name)
+                if st and st.get("Format"):
+                    seen.add(name)
+                    formatted = self._format_struct_from_toml(st, constants)
+                    if formatted:
+                        result.append(formatted)
+        return result
+
+    def _rewrite_angr_struct_refs(self, text: str, struct_names: List[str]) -> str:
+        """Replace angr's struct_0, struct_1, ... with TOML struct names in body."""
+        if not struct_names:
+            return text
+        result = text
+        for i, name in enumerate(struct_names):
+            angr_name = f"struct_{i}"
+            full_type = f"struct {name}"
+            result = re.sub(r"struct\s+" + re.escape(angr_name) + r"\b", full_type, result)
+            result = re.sub(r"\b" + re.escape(angr_name) + r"\b", full_type, result)
+        return result
+
+    def _get_struct_offset_to_field(
+        self, struct_def: Dict[str, Any], constants: Dict[str, int]
+    ) -> Dict[int, str]:
+        """Build offset->field_access map for a struct. E.g. 8->'data[0]', 10->'data[1]'."""
+        type_info = {
+            "*u8": (4, 4), "*u16": (4, 4), "*s16": (4, 4), "*u32": (4, 4), "*s32": (4, 4),
+            "u8": (1, 1), "s8": (1, 1), "b8": (1, 1),
+            "u16": (2, 2), "s16": (2, 2),
+            "u32": (4, 4), "s32": (4, 4),
+        }
+        fmt = struct_def.get("Format", "")
+        if not fmt or "`s`" not in fmt:
+            return {}
+        offset = 0
+        result: Dict[int, str] = {}
+        for m in re.finditer(r"\{([^|]+)\|([^}]+)\}", fmt):
+            field_raw, typ = m.group(1).strip(), m.group(2).strip()
+            ptr = typ.startswith("*")
+            core = typ.lstrip("*")
+            key = f"*{core}" if ptr else core
+            size, align = type_info.get(key, type_info.get(core, (4, 4)))
+            offset = (offset + align - 1) & ~(align - 1)
+            field = field_raw
+            for k, v in constants.items():
+                field = re.sub(r"\b" + re.escape(str(k)) + r"\b", str(v), field)
+            arr_match = re.match(r"(\w+)\[(\d+)\]", field)
+            if arr_match:
+                base_name, count = arr_match.group(1), int(arr_match.group(2))
+                for i in range(count):
+                    result[offset + i * size] = f"{base_name}[{i}]"
+                offset += size * count
+            else:
+                result[offset] = field
+                offset += size
+        return result
+
+    def _rewrite_struct_offsets_to_fields(
+        self, text: str, param_names: List[str], anchor: Dict[str, Any], constants: Dict[str, int]
+    ) -> str:
+        """Replace (param + offset) with (&param->field) based on struct layout."""
+        if not self._toml_data or not param_names:
+            return text
+        fmt = anchor.get("Format", "")
+        struct_by_name = {s.get("Name"): s for s in self._toml_data.get("Structs", []) if s.get("Name")}
+        result = text
+        for bracket in re.findall(r"\[([^\]]+)\]", fmt):
+            m = re.search(r"struct\s+(\w+)\s*\*\s*(\w+)", bracket)
+            if not m:
+                continue
+            struct_name, param_name = m.group(1), m.group(2)
+            if param_name not in param_names:
+                continue
+            st = struct_by_name.get(struct_name)
+            if not st or not st.get("Format"):
+                continue
+            offset_map = self._get_struct_offset_to_field(st, constants)
+            for off in sorted(offset_map.keys(), reverse=True):
+                field = offset_map[off]
+                esc_param = re.escape(param_name)
+                result = re.sub(
+                    r"\(" + esc_param + r"\s*\+\s*" + str(off) + r"\s*\)",
+                    f"(&{param_name}->{field})",
+                    result,
+                )
+        result = re.sub(
+            r"\*\(\s*\(\s*[^)]+\s*\)\s*\(\s*&\s*(\w+)\s*->\s*(\w+(?:\[\d+\])?)\s*\)\s*\)",
+            r"\1->\2",
+            result,
+        )
+        return result
+
+    def _remove_unused_assignments(self, text: str) -> str:
+        """Remove lines 'var = expr;' where var is never used after."""
+        lines = text.splitlines()
+        keep: List[int] = []
+        for i, line in enumerate(lines):
+            m = re.match(r"^\s*(\w+)\s*=\s*(.+);\s*(?://.*)?$", line.strip())
+            if m:
+                var = m.group(1)
+                rest = "\n".join(lines[i + 1:])
+                if not re.search(r"\b" + re.escape(var) + r"\b", rest):
+                    continue
+            keep.append(i)
+        return "\n".join(lines[i] for i in keep)
+
+    def _rewrite_decimal_addresses_to_hex(self, text: str) -> str:
+        """Convert decimal numbers that look like addresses (0x02000000-0x09FFFFFF) to hex."""
+        def repl(m: re.Match) -> str:
+            n = int(m.group(1))
+            if 0x02000000 <= n <= 0x09FFFFFF or 0x08000000 <= n <= 0x09FFFFFF:
+                return f"0x{n:08X}"
+            return m.group(0)
+        return re.sub(r"\b([12]\d{8}|[3-9]\d{7})\b", repl, text)
+
+    def _format_sig_from_anchor(self, anchor: Dict[str, Any], constants: Dict[str, int]) -> str:
+        """Convert TOML Format to C-like signature string."""
+        name = anchor.get("Name", "sub")
+        if "." in str(name):
+            name = str(name).rsplit(".", 1)[-1]
+        fmt = anchor.get("Format", "")
+        if not fmt:
+            return f"/* {anchor.get('Name', name)} */"
+        ret_type = "void"
+        args: List[str] = []
+        m = re.search(r"`f\|?([^`]*)`", fmt)
+        if m:
+            ret_part = m.group(1).strip()
+            if ret_part:
+                ptr = ret_part.startswith("*")
+                core = ret_part.lstrip("*")
+                type_map = {"b8": "bool8", "u8": "u8", "s8": "s8", "u16": "u16", "s16": "s16", "u32": "u32", "s32": "s32"}
+                ret_type = type_map.get(core, core)
+                if ptr:
+                    ret_type = ret_type + "*"
+        for bracket in re.findall(r"\[([^\]]+)\]", fmt):
+            args.append(bracket.strip())
+        for k, v in constants.items():
+            for i, a in enumerate(args):
+                args[i] = re.sub(r"\b" + re.escape(str(k)) + r"\b", str(v), a)
+        args_str = ", ".join(args) if args else "void"
+        return f"{ret_type} {name}({args_str})"
 
     def is_modified(self) -> bool:
         return self._modified
@@ -838,12 +1178,39 @@ class HexEditorFrame(ttk.Frame):
         ]
         if not funcs_in_region:
             funcs_in_region = list(cfg.kb.functions.items())
+        constants = {c["Name"]: c.get("Value", 0) for c in self._toml_data.get("Constants", [])}
         for addr, func in sorted(funcs_in_region, key=lambda x: x[0]):
             try:
                 dec = proj.analyses.Decompiler(func, cfg=cfg)
                 if dec and dec.codegen and dec.codegen.text:
-                    out_lines.append(f"/* sub_{addr:08X} */")
-                    out_lines.append(dec.codegen.text.strip())
+                    anchor = self._get_function_anchor_for_addr(addr)
+                    if anchor:
+                        # Replace angr output with TOML-derived struct(s) + externs + signature
+                        repl: List[str] = []
+                        for struct_def in self._get_struct_defs_from_anchor(anchor, constants):
+                            repl.append(struct_def)
+                        if repl:
+                            repl.append("")
+                        externs = self._extract_extern_lines(dec.codegen.text)
+                        if externs:
+                            repl.extend(externs)
+                            repl.append("")
+                        sig = self._format_sig_from_anchor(anchor, constants)
+                        repl.append(sig)
+                        body = self._extract_angr_function_body(dec.codegen.text)
+                        if body:
+                            struct_names = self._get_struct_names_from_anchor(anchor)
+                            body = self._rewrite_angr_struct_refs(body, struct_names)
+                            param_names = self._get_param_names_from_anchor(anchor)
+                            body = self._rewrite_angr_param_refs(body, param_names)
+                            body = self._rewrite_struct_offsets_to_fields(body, param_names, anchor, constants)
+                            body = self._remove_unused_assignments(body)
+                            body = self._rewrite_decimal_addresses_to_hex(body)
+                            repl.append(body)
+                        out_lines.extend(repl)
+                    else:
+                        out_lines.append(f"/* sub_{addr:08X} */")
+                        out_lines.append(dec.codegen.text.strip())
                     out_lines.append("")
             except Exception as e:
                 err_msg = str(e).replace("\n", " ")[:120]
