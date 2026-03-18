@@ -382,6 +382,11 @@ class HexEditorFrame(ttk.Frame):
         if off is None:
             return None
         if event.keysym in ("BackSpace", "Delete"):
+            self._cursor_byte_offset = off
+            if event.keysym == "Delete":
+                self._on_delete(event)
+            else:
+                self._on_backspace(event)
             return "break"
         if event.char and len(event.char) == 1:
             if self._encoding == "pcs":
@@ -1104,6 +1109,7 @@ class HexEditorFrame(ttk.Frame):
         self._ensure_cursor_visible()
         self._refresh_visible()
         self._update_scrollbar()
+        self._refresh_asm_selection()
         return "break"
 
     def _on_backspace(self, event: tk.Event) -> Optional[str]:
@@ -1121,6 +1127,7 @@ class HexEditorFrame(ttk.Frame):
             self._ensure_cursor_visible()
             self._refresh_visible()
             self._update_scrollbar()
+            self._refresh_asm_selection()
         return "break"
 
     # ── Cursor movement ──────────────────────────────────────────────
