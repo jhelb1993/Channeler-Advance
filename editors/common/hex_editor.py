@@ -1146,10 +1146,28 @@ Format = "`f|u8`[u8 arg0]"
                     insn_map[file_off] = i
         except Exception:
             pass
+        branch_targets = self._collect_branch_targets(
+            start, end, mode, insn_map, ldr_targets
+        )
+        target_to_label: Dict[int, str] = {
+            fo: f"loc_{GBA_ROM_BASE + fo:08X}" for fo in branch_targets
+        }
+
+        def _replace_addrs(text: str) -> str:
+            def _repl(m: re.Match) -> str:
+                addr = int(m.group(1), 16)
+                fo = addr - GBA_ROM_BASE
+                return target_to_label.get(fo, m.group(0))
+            return re.sub(r"#0x([0-9A-Fa-f]+)\b", _repl, text)
+
         offset = start
         lines: List[str] = []
         while offset < end:
             file_off = offset
+            if file_off in target_to_label and lines:
+                lines.append("\n")
+            if file_off in target_to_label:
+                lines.append(f"{target_to_label[file_off]}:\n")
             if file_off in ldr_targets:
                 b0 = self._data[file_off]
                 b1 = self._data[file_off + 1] if file_off + 1 < len(self._data) else 0
@@ -1157,7 +1175,9 @@ Format = "`f|u8`[u8 arg0]"
                 b3 = self._data[file_off + 3] if file_off + 3 < len(self._data) else 0
                 val = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
                 hex_bytes = f"{b0:02x} {b1:02x} {b2:02x} {b3:02x}"
-                lines.append(f"{GBA_ROM_BASE + file_off:08X}:  {hex_bytes:12s}  .word #0x{val:08X}\n")
+                word_line = f".word #0x{val:08X}"
+                word_line = _replace_addrs(word_line)
+                lines.append(f"{GBA_ROM_BASE + file_off:08X}:  {hex_bytes:12s}  {word_line}\n")
                 offset += 4
             elif file_off in insn_map:
                 insn = insn_map[file_off]
@@ -1173,7 +1193,8 @@ Format = "`f|u8`[u8 arg0]"
                 comment = self._get_ldr_pc_comment(insn, mode)
                 if comment:
                     operands += f"  @ {comment}"
-                lines.append(f"{GBA_ROM_BASE + file_off:08X}:  {hex_bytes:12s}  {mnemonic}{operands}\n")
+                insn_text = _replace_addrs(f"{mnemonic}{operands}")
+                lines.append(f"{GBA_ROM_BASE + file_off:08X}:  {hex_bytes:12s}  {insn_text}\n")
                 offset += len(raw)
             else:
                 if align == 2:
@@ -1513,6 +1534,28 @@ Format = "`f|u8`[u8 arg0]"
         pc = (addr + 4) & ~2
         return pc + disp
 
+    _BRANCH_MNEMONICS = frozenset((
+        "b", "bl", "beq", "bne", "bgt", "bge", "blt", "ble",
+        "bhi", "bls", "bhs", "blo", "bmi", "bpl", "bvs", "bvc",
+    ))
+
+    def _get_branch_target_from_insn(self, insn: object, mode: int) -> Optional[int]:
+        """If instruction is a branch with immediate target or LDR [pc], return file offset of target."""
+        if not _CAPSTONE_AVAILABLE:
+            return None
+        m = insn.mnemonic
+        if m in self._BRANCH_MNEMONICS:
+            match = re.search(r"#0x([0-9A-Fa-f]+)\b", insn.op_str)
+            if match:
+                addr = int(match.group(1), 16)
+                if (addr >> 24) in (0x08, 0x09):
+                    return addr - GBA_ROM_BASE
+        if m in ("ldr", "ldrb", "ldrh"):
+            addr = self._get_ldr_pc_target_addr(insn, mode)
+            if addr is not None:
+                return addr - GBA_ROM_BASE
+        return None
+
     def _get_ldr_pc_comment(self, insn: object, mode: int) -> Optional[str]:
         """If insn is LDR/LDRB/LDRH with [pc, #imm], return target address and value: @ #0x08055040 = #0x02036DFC"""
         target_addr = self._get_ldr_pc_target_addr(insn, mode)
@@ -1526,6 +1569,151 @@ Format = "`f|u8`[u8 arg0]"
             return None
         val = sum(self._data[file_off + i] << (i * 8) for i in range(n))
         return f"#0x{target_addr:08X} = #0x{val:0{n * 2}X}"
+
+    def _collect_branch_targets(
+        self,
+        start: int,
+        end: int,
+        mode: int,
+        insn_map: Dict[int, object],
+        ldr_targets: Set[int],
+    ) -> Set[int]:
+        """First scan: collect all file offsets that are jumped to (branch targets)."""
+        targets: Set[int] = set()
+        data_len = len(self._data)
+        for file_off, insn in insn_map.items():
+            if file_off < start or file_off >= end:
+                continue
+            t = self._get_branch_target_from_insn(insn, mode)
+            if t is not None and 0 <= t < data_len:
+                targets.add(t)
+        for file_off in ldr_targets:
+            if file_off < start or file_off >= end or file_off + 4 > data_len:
+                continue
+            val = (
+                self._data[file_off]
+                | (self._data[file_off + 1] << 8)
+                | (self._data[file_off + 2] << 16)
+                | (self._data[file_off + 3] << 24)
+            )
+            if (val >> 24) in (0x08, 0x09):
+                fo = val - GBA_ROM_BASE
+                if 0 <= fo < data_len:
+                    targets.add(fo)
+        return targets
+
+    def _build_asm_export_lines_with_labels(self, hackmew: bool = False) -> List[str]:
+        """Build ASM export lines with labels at branch targets and label refs instead of raw offsets."""
+        if not self._data or not _CAPSTONE_AVAILABLE:
+            return []
+        mode = CS_MODE_THUMB if self._asm_mode == "thumb" else CS_MODE_ARM
+        align = 2 if self._asm_mode == "thumb" else 4
+        if self._selection_start is not None and self._selection_end is not None:
+            start = min(self._selection_start, self._selection_end)
+            end = max(self._selection_start, self._selection_end) + 1
+            start = (start // align) * align
+        else:
+            vis_start = self._visible_row_start * BYTES_PER_ROW
+            vis_end = min(
+                vis_start + self._visible_row_count * BYTES_PER_ROW, len(self._data)
+            )
+            start = (vis_start // align) * align
+            end = vis_end
+        if start >= len(self._data):
+            return []
+        end = min(end, len(self._data))
+
+        ldr_targets = self._get_ldr_pc_targets(mode)
+        chunk = bytes(self._data[start:end])
+        base = GBA_ROM_BASE + start
+        cs = Cs(CS_ARCH_ARM, mode)
+        cs.detail = True
+        insn_map: Dict[int, object] = {}
+        try:
+            for i in cs.disasm(chunk, base):
+                file_off = i.address - GBA_ROM_BASE
+                if file_off not in ldr_targets:
+                    insn_map[file_off] = i
+        except Exception:
+            pass
+
+        branch_targets = self._collect_branch_targets(
+            start, end, mode, insn_map, ldr_targets
+        )
+        target_to_label: Dict[int, str] = {
+            fo: f"loc_{GBA_ROM_BASE + fo:08X}" for fo in branch_targets
+        }
+
+        def replace_addrs_with_labels(text: str) -> str:
+            def repl(m: re.Match) -> str:
+                addr = int(m.group(1), 16)
+                fo = addr - GBA_ROM_BASE
+                return target_to_label.get(fo, m.group(0))
+            return re.sub(r"#0x([0-9A-Fa-f]+)\b", repl, text)
+
+        output: List[str] = []
+        offset = start
+        while offset < end:
+            file_off = offset
+            if file_off in target_to_label:
+                if output:
+                    output.append("")
+                output.append(f"{target_to_label[file_off]}:")
+            if file_off in ldr_targets:
+                b0 = self._data[file_off]
+                b1 = self._data[file_off + 1] if file_off + 1 < len(self._data) else 0
+                b2 = self._data[file_off + 2] if file_off + 2 < len(self._data) else 0
+                b3 = self._data[file_off + 3] if file_off + 3 < len(self._data) else 0
+                val = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+                line = f".word #0x{val:08X}"
+                line = replace_addrs_with_labels(line)
+                if hackmew:
+                    line = line.replace("#", "")
+                output.append(line)
+                offset += 4
+            elif file_off in insn_map:
+                insn = insn_map[file_off]
+                raw = insn.bytes
+                insn_end = file_off + len(raw)
+                overlaps_target = any(t in ldr_targets for t in range(file_off + 1, insn_end))
+                if overlaps_target:
+                    offset += align
+                    continue
+                mnemonic, op_str = insn.mnemonic, insn.op_str
+                operands = f" {op_str}" if op_str else ""
+                comment = self._get_ldr_pc_comment(insn, mode)
+                if comment:
+                    operands += f"  @ {comment}"
+                line = f"{mnemonic}{operands}"
+                line = replace_addrs_with_labels(line)
+                if hackmew:
+                    line = re.sub(r"\badds\b", "add", line)
+                    line = re.sub(r"\bsubs\b", "sub", line)
+                    line = re.sub(r"\blsls\b", "lsl", line)
+                    line = re.sub(r"\blsrs\b", "lsr", line)
+                    line = re.sub(r"\bmuls\b", "mul", line)
+                    line = re.sub(r"\basrs\b", "asr", line)
+                    if re.match(
+                        r"(?:b|bl|bx|blx|beq|bne|bgt|bge|blt|ble|bhi|bls|bhs|blo|bmi|bpl|bvs|bvc)\b",
+                        line,
+                    ):
+                        line = line.replace("#", "")
+                output.append(line.strip())
+                offset += len(raw)
+            else:
+                if align == 2:
+                    b0 = self._data[offset]
+                    b1 = self._data[offset + 1] if offset + 1 < len(self._data) else 0
+                    line = f".byte 0x{b0:02x}, 0x{b1:02x}"
+                else:
+                    b0 = self._data[offset]
+                    b1 = self._data[offset + 1] if offset + 1 < len(self._data) else 0
+                    b2 = self._data[offset + 2] if offset + 2 < len(self._data) else 0
+                    b3 = self._data[offset + 3] if offset + 3 < len(self._data) else 0
+                    line = f".word 0x{b3:02x}{b2:02x}{b1:02x}{b0:02x}"
+                output.append(line)
+                offset += align
+        return output
 
     # ── Rendering ────────────────────────────────────────────────────
 
@@ -1863,6 +2051,7 @@ Format = "`f|u8`[u8 arg0]"
         export_menu = tk.Menu(menu, tearoff=0)
         export_menu.add_command(label="ASM to clipboard", command=self._export_asm_clipboard)
         export_menu.add_command(label="ASM to file...", command=self._export_asm_file)
+        export_menu.add_command(label="HackMew ASM to clipboard", command=self._export_hackmew_clipboard)
         export_menu.add_command(label="Pseudo-C to clipboard", command=self._export_pseudo_c_clipboard)
         export_menu.add_command(label="Pseudo-C to file...", command=self._export_pseudo_c_file)
         menu.add_cascade(label="Export", menu=export_menu)
@@ -1871,18 +2060,9 @@ Format = "`f|u8`[u8 arg0]"
     # ── Export helpers ────────────────────────────────────────────────
 
     def _get_asm_text_clean(self) -> str:
-        """Get ASM pane content with offsets and raw bytes stripped."""
-        raw = self._text_asm.get("1.0", tk.END).strip()
-        if not raw or raw.startswith("("):
-            return ""
-        lines: List[str] = []
-        for line in raw.splitlines():
-            m = re.match(r"^[0-9A-Fa-f]{8}:\s+(?:[0-9a-f]{2}\s+)+\s*(.+)$", line)
-            if m:
-                lines.append(m.group(1))
-            else:
-                lines.append(line)
-        return "\n".join(lines)
+        """Get ASM export with labels at branch targets and label refs instead of raw offsets."""
+        lines = self._build_asm_export_lines_with_labels(hackmew=False)
+        return "\n".join(lines) if lines else ""
 
     def _get_pseudo_c_text(self) -> str:
         """Get pseudo-C pane content."""
@@ -1890,6 +2070,11 @@ Format = "`f|u8`[u8 arg0]"
         if not raw or raw.startswith("("):
             return ""
         return raw
+
+    def _get_asm_text_hackmew(self) -> str:
+        """Get ASM in HackMew style with labels: adds->add, subs->sub, strip # from branches and .word."""
+        lines = self._build_asm_export_lines_with_labels(hackmew=True)
+        return "\n".join(lines) if lines else ""
 
     def _export_asm_clipboard(self) -> None:
         text = self._get_asm_text_clean()
@@ -1910,6 +2095,13 @@ Format = "`f|u8`[u8 arg0]"
         if path:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
+
+    def _export_hackmew_clipboard(self) -> None:
+        text = self._get_asm_text_hackmew()
+        if not text:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
 
     def _export_pseudo_c_clipboard(self) -> None:
         text = self._get_pseudo_c_text()
