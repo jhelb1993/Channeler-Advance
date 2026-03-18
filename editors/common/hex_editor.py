@@ -432,6 +432,12 @@ class HexEditorFrame(ttk.Frame):
         if not self._data:
             return
         s = self._goto_var.get().strip()
+        if not s:
+            return
+        sym_offset = self._get_function_anchor_offset_by_name(s)
+        if sym_offset is not None and 0 <= sym_offset < len(self._data):
+            self._do_goto(sym_offset)
+            return
         if s.startswith("0x") or s.startswith("0X"):
             s = s[2:]
         if not s:
@@ -677,6 +683,26 @@ Format = "`f|u8`[u8 arg0]"
                     self._toml_data = tomli.load(f)
         except OSError:
             pass
+
+    def _get_function_anchor_offset_by_name(self, name: str) -> Optional[int]:
+        """Return file offset for FunctionAnchor with given Name, or None if not found."""
+        if not self._toml_data or not name:
+            return None
+        name_lo = name.strip().lower()
+        for anchor in self._toml_data.get("FunctionAnchors", []):
+            anchor_name = anchor.get("Name")
+            if anchor_name and str(anchor_name).lower() == name_lo:
+                addr = anchor.get("Address")
+                if addr is None:
+                    return None
+                try:
+                    val = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+                except (ValueError, TypeError):
+                    return None
+                if val < GBA_ROM_BASE:
+                    val += GBA_ROM_BASE
+                return val - GBA_ROM_BASE
+        return None
 
     def _get_function_anchor_for_addr(self, gba_addr: int) -> Optional[Dict[str, Any]]:
         """Return FunctionAnchor dict if gba_addr matches any anchor Address."""
@@ -971,13 +997,11 @@ Format = "`f|u8`[u8 arg0]"
         return "\n".join(lines[i] for i in keep)
 
     def _rewrite_decimal_addresses_to_hex(self, text: str) -> str:
-        """Convert decimal numbers that look like addresses (0x02000000-0x09FFFFFF) to hex."""
+        """Convert all decimal numbers to hex. Skips numbers already in 0x... form."""
         def repl(m: re.Match) -> str:
             n = int(m.group(1))
-            if 0x02000000 <= n <= 0x09FFFFFF or 0x08000000 <= n <= 0x09FFFFFF:
-                return f"0x{n:08X}"
-            return m.group(0)
-        return re.sub(r"\b([12]\d{8}|[3-9]\d{7})\b", repl, text)
+            return "0" if n == 0 else f"0x{n:X}"
+        return re.sub(r"(?<!0x)\b(\d+)\b", repl, text)
 
     def _format_sig_from_anchor(self, anchor: Dict[str, Any], constants: Dict[str, int]) -> str:
         """Convert TOML Format to C-like signature string."""
