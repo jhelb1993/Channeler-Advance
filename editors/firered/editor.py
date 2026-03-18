@@ -51,8 +51,8 @@ class FireRedEditor:
         self._main_paned = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
         self._main_paned.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
-        # Top: hex editor (takes most space)
-        self._hex_editor = HexEditorFrame(self._main_paned)
+        # Top: hex editor (takes most space), default to PCS for Pokemon GBA text
+        self._hex_editor = HexEditorFrame(self._main_paned, default_encoding="pcs")
         self._main_paned.add(self._hex_editor)
 
         # Bottom: placeholder for future tools (resizable)

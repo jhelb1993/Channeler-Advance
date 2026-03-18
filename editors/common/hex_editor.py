@@ -1,22 +1,108 @@
 """
 Shared hex editor for GBA ROM hacking.
 Supports pointer detection (0x08/0x09), follow, replace/insert mode, delete.
+ASCII/PCS (Pokemon GBA) encoding for the character pane.
 """
 
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
-from typing import Optional
+from typing import Optional, Dict
 
 GBA_ROM_BASE = 0x08000000
 BYTES_PER_ROW = 16
 HEX_DIGITS = "0123456789ABCDEFabcdef"
 
+# Pokemon GBA (PCS) character set - byte to display char. Based on HexManiacAdvance PCSString.
+# https://github.com/haven1433/HexManiacAdvance/blob/master/src/HexManiac.Core/Models/PCSString.cs
+_PCS_BYTE_TO_CHAR: Dict[int, str] = {}
+
+
+def _fill_pcs(chars: str, start: int) -> None:
+    for i, c in enumerate(chars):
+        _PCS_BYTE_TO_CHAR[start + i] = c
+
+
+def _init_pcs() -> None:
+    if _PCS_BYTE_TO_CHAR:
+        return
+    _PCS_BYTE_TO_CHAR[0x00] = " "
+    _fill_pcs("ÀÁÂÇÈÉÊËÌÎÏ", 0x01)
+    _fill_pcs("ÒÓÔŒÙÚÛÑßàá", 0x0B)
+    _fill_pcs("çèéêëìîïòóôœùúûñºª", 0x10)
+    _PCS_BYTE_TO_CHAR[0x2C] = "·"  # \e
+    _PCS_BYTE_TO_CHAR[0x2D] = "&"
+    _PCS_BYTE_TO_CHAR[0x2E] = "+"   # \+
+    _fill_pcs("Lv=;", 0x34)  # \Lv = ;
+    for i in range(0x38, 0x48):
+        if i not in _PCS_BYTE_TO_CHAR:
+            _PCS_BYTE_TO_CHAR[i] = "·"
+    _PCS_BYTE_TO_CHAR[0x48] = "·"  # \r
+    for i in range(0x49, 0x51):
+        if i not in _PCS_BYTE_TO_CHAR:
+            _PCS_BYTE_TO_CHAR[i] = "·"
+    _fill_pcs("¿¡PmPKBLoCÍ", 0x51)  # \pk \mn \Po \Ke \Bl \Lo \Ck Í (10 chars)
+    _fill_pcs("%()", 0x5B)
+    for i in range(0x5E, 0x68):
+        if i not in _PCS_BYTE_TO_CHAR:
+            _PCS_BYTE_TO_CHAR[i] = "·"
+    _PCS_BYTE_TO_CHAR[0x68] = "â"
+    for i in range(0x69, 0x6F):
+        if i not in _PCS_BYTE_TO_CHAR:
+            _PCS_BYTE_TO_CHAR[i] = "·"
+    _PCS_BYTE_TO_CHAR[0x6F] = "í"
+    _fill_pcs("↑↓←→", 0x79)  # \au \ad \al \ar
+    for i in range(0x7D, 0x84):
+        if i not in _PCS_BYTE_TO_CHAR:
+            _PCS_BYTE_TO_CHAR[i] = "·"
+    _PCS_BYTE_TO_CHAR[0x84] = "·"  # \d
+    _fill_pcs("<>", 0x85)  # \< \>
+    for i in range(0x87, 0xA1):
+        if i not in _PCS_BYTE_TO_CHAR:
+            _PCS_BYTE_TO_CHAR[i] = "·"
+    _fill_pcs("0123456789", 0xA1)
+    _fill_pcs("!?.-·'°$,*//", 0xAB)  # \. \qo \qc \sm \sf
+    _fill_pcs("ABCDEFGHIJKLMNOPQRSTUVWXYZ", 0xBB)
+    _fill_pcs("abcdefghijklmnopqrstuvwxyz", 0xD5)
+    for i in range(0xEF, 0xF0):
+        if i not in _PCS_BYTE_TO_CHAR:
+            _PCS_BYTE_TO_CHAR[i] = "·"
+    _fill_pcs(":ÄÖÜäöü", 0xF0)
+    _PCS_BYTE_TO_CHAR[0xF7] = "·"  # \?
+    _PCS_BYTE_TO_CHAR[0xF8] = "·"  # \btn
+    _PCS_BYTE_TO_CHAR[0xF9] = "·"  # \9
+    _PCS_BYTE_TO_CHAR[0xFA] = "\u00B6"  # \l (¶ pilcrow)
+    _PCS_BYTE_TO_CHAR[0xFB] = "\u00B6"  # \pn
+    _PCS_BYTE_TO_CHAR[0xFC] = "·"  # \CC
+    _PCS_BYTE_TO_CHAR[0xFD] = "\\"  # \\
+    _PCS_BYTE_TO_CHAR[0xFE] = "\u00B6"  # \n (¶)
+    _PCS_BYTE_TO_CHAR[0xFF] = '"'
+    for i in range(0x100):
+        if i not in _PCS_BYTE_TO_CHAR:
+            _PCS_BYTE_TO_CHAR[i] = "·"
+
+
+# Reverse map for typing: display char -> PCS byte (lowest byte wins for duplicates)
+_PCS_CHAR_TO_BYTE: Dict[str, int] = {}
+
+
+def _init_pcs_reverse() -> None:
+    if _PCS_CHAR_TO_BYTE:
+        return
+    for b in range(0x100):
+        c = _PCS_BYTE_TO_CHAR.get(b, "·")
+        if c not in _PCS_CHAR_TO_BYTE:
+            _PCS_CHAR_TO_BYTE[c] = b
+
+
+_init_pcs()
+_init_pcs_reverse()
+
 
 class HexEditorFrame(ttk.Frame):
     """Embeddable hex editor with 16 bytes/row, pointer highlighting, follow, save, delete, insert mode."""
 
-    def __init__(self, parent: tk.Misc, **kwargs) -> None:
+    def __init__(self, parent: tk.Misc, default_encoding: str = "ascii", **kwargs) -> None:
         super().__init__(parent, **kwargs)
         self._data = bytearray()
         self._file_path: Optional[str] = None
@@ -30,6 +116,7 @@ class HexEditorFrame(ttk.Frame):
         self._visible_row_count = 1  # Updated dynamically from widget height
         self._total_rows = 0
         self._syncing_scroll = False
+        self._encoding = default_encoding if default_encoding in ("ascii", "pcs") else "ascii"
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -43,9 +130,18 @@ class HexEditorFrame(ttk.Frame):
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(1, weight=1)
 
-        # Mode label (compact, single row)
-        self._mode_label = ttk.Label(outer, text="REPLACE", font=("Consolas", 9, "bold"))
-        self._mode_label.grid(row=0, column=0, sticky="w", pady=(0, 1))
+        # Top row: mode | encoding switcher
+        top_row = ttk.Frame(outer)
+        top_row.grid(row=0, column=0, sticky="w", pady=(0, 1))
+        self._mode_label = ttk.Label(top_row, text="REPLACE", font=("Consolas", 9, "bold"))
+        self._mode_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(top_row, text="Chars:", font=("Consolas", 9)).grid(row=0, column=1, sticky="w", padx=(0, 2))
+        self._encoding_var = tk.StringVar(value=self._encoding.upper())
+        self._encoding_combo = ttk.Combobox(
+            top_row, textvariable=self._encoding_var, values=["ASCII", "PCS"], width=8, state="readonly"
+        )
+        self._encoding_combo.grid(row=0, column=2, sticky="w")
+        self._encoding_combo.bind("<<ComboboxSelected>>", self._on_encoding_change)
 
         # Main content: hex (no trailing space) | ascii | scrollbar | tools area
         body = ttk.Frame(outer)
@@ -127,8 +223,20 @@ class HexEditorFrame(ttk.Frame):
 
         self._text.bind("<KeyPress>", self._prevent_unwanted, add=True)
 
+    def _on_encoding_change(self, event: Optional[tk.Event] = None) -> None:
+        sel = self._encoding_var.get().upper()
+        if sel in ("ASCII", "PCS"):
+            self._encoding = "pcs" if sel == "PCS" else "ascii"
+            if self._data:
+                self._refresh_visible()
+
+    def _byte_to_char(self, b: int) -> str:
+        if self._encoding == "pcs":
+            return _PCS_BYTE_TO_CHAR.get(b, "·")
+        return chr(b) if 32 <= b < 127 else "."
+
     def _on_ascii_key(self, event: tk.Event) -> Optional[str]:
-        """Handle typing in ASCII panel: update byte at cursor, refresh, advance."""
+        """Handle typing in character panel: update byte at cursor, refresh, advance."""
         if not self._data:
             return None
         idx = self._text_ascii.index("insert")
@@ -138,7 +246,13 @@ class HexEditorFrame(ttk.Frame):
         if event.keysym in ("BackSpace", "Delete"):
             return "break"
         if event.char and len(event.char) == 1:
-            self._data[off] = ord(event.char) % 256
+            if self._encoding == "pcs":
+                byte_val = _PCS_CHAR_TO_BYTE.get(event.char)
+                if byte_val is None:
+                    byte_val = ord(event.char) % 256
+            else:
+                byte_val = ord(event.char) % 256
+            self._data[off] = byte_val
             self._modified = True
             self._refresh_visible()
             self._update_scrollbar()
@@ -334,7 +448,7 @@ class HexEditorFrame(ttk.Frame):
             rs = row * BYTES_PER_ROW
             rb = self._data[rs: rs + BYTES_PER_ROW]
             hx = " ".join(f"{b:02X}" for b in rb)
-            asc = "".join(chr(b) if 32 <= b < 127 else "." for b in rb)
+            asc = "".join(self._byte_to_char(b) for b in rb)
             hex_lines.append(f"{rs:08X}  {hx.ljust(3 * BYTES_PER_ROW - 1)}\n")
             ascii_lines.append(f"|{asc}|\n")
         self._text.insert("1.0", "".join(hex_lines))
