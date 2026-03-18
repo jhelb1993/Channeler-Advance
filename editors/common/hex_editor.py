@@ -1168,7 +1168,7 @@ class HexEditorFrame(ttk.Frame):
             s = min(self._selection_start, self._selection_end)
             e = max(self._selection_start, self._selection_end)
             count = e - s + 1
-            self._selection_label.config(text=f"{count} bytes")
+            self._selection_label.config(text=f"{count} bytes (0x{count:X})")
             for off in range(s, e + 1):
                 ix = self._offset_to_index(off)
                 if ix:
