@@ -6,10 +6,18 @@ Optional Capstone disassembly (ARM7TDMI Thumb/ARM).
 """
 
 import re
+import threading
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
 from typing import Optional, Dict, List, Tuple, Set
+
+_ANGR_AVAILABLE = False
+try:
+    import angr
+    _ANGR_AVAILABLE = True
+except ImportError:
+    pass
 
 _CAPSTONE_AVAILABLE = False
 try:
@@ -129,6 +137,7 @@ class HexEditorFrame(ttk.Frame):
         self._encoding = default_encoding if default_encoding in ("ascii", "pcs") else "ascii"
         self._asm_mode = "thumb"  # thumb | arm for GBA ARM7TDMI
         self._asm_pane_visible = False
+        self._pseudo_c_pane_visible = False
         self._ldr_pc_targets: Optional[Set[int]] = None
         self._ldr_pc_targets_valid = False
         self._build_ui()
@@ -180,7 +189,8 @@ class HexEditorFrame(ttk.Frame):
         body.columnconfigure(1, weight=0)
         body.columnconfigure(2, weight=0)
         body.columnconfigure(3, weight=0)
-        body.columnconfigure(4, weight=1)
+        body.columnconfigure(4, weight=0)
+        body.columnconfigure(5, weight=1)
         body.rowconfigure(0, weight=0)
         body.rowconfigure(1, weight=1)
 
@@ -240,11 +250,42 @@ class HexEditorFrame(ttk.Frame):
             w.bind("<Button-4>", lambda e: _asm_scroll(3))
             w.bind("<Button-5>", lambda e: _asm_scroll(-3))
 
+        # Pseudo-C pane: to the right of ASM, hidden by default, toggleable with Ctrl+B
+        self._pseudo_c_frame = ttk.LabelFrame(body, text=" Pseudo-C ", padding=2)
+        self._pseudo_c_frame.grid(row=1, column=4, sticky="nsew", padx=(4, 0))
+        self._pseudo_c_frame.columnconfigure(0, weight=1)
+        self._pseudo_c_frame.rowconfigure(0, weight=1)
+        self._scroll_pseudo_c = tk.Scrollbar(self._pseudo_c_frame)
+        self._scroll_pseudo_c_h = tk.Scrollbar(self._pseudo_c_frame, orient=tk.HORIZONTAL)
+        self._text_pseudo_c = tk.Text(
+            self._pseudo_c_frame, font=("Consolas", 10), wrap=tk.NONE, width=48,
+            borderwidth=1, relief=tk.SOLID, padx=4, pady=2,
+            state=tk.DISABLED,
+            background="#fafaf8",
+            insertbackground="black",
+        )
+        self._text_pseudo_c.configure(yscrollcommand=self._scroll_pseudo_c.set, xscrollcommand=self._scroll_pseudo_c_h.set)
+        self._scroll_pseudo_c.configure(command=self._text_pseudo_c.yview)
+        self._scroll_pseudo_c_h.configure(command=self._text_pseudo_c.xview)
+        self._text_pseudo_c.grid(row=0, column=0, sticky="nsew")
+        self._scroll_pseudo_c.grid(row=0, column=1, sticky="ns")
+        self._scroll_pseudo_c_h.grid(row=1, column=0, sticky="ew")
+
+        def _pseudo_c_scroll(delta: int) -> None:
+            self._text_pseudo_c.yview_scroll(-delta, "units")
+
+        for w in (self._text_pseudo_c, self._pseudo_c_frame):
+            w.bind("<MouseWheel>", lambda e: _pseudo_c_scroll(int((e.delta or 0) / 120)))
+            w.bind("<Button-4>", lambda e: _pseudo_c_scroll(3))
+            w.bind("<Button-5>", lambda e: _pseudo_c_scroll(-3))
+
         self._tools_frame = ttk.Frame(body, width=1)
-        self._tools_frame.grid(row=1, column=4, sticky="nsew", padx=(4, 0))
+        self._tools_frame.grid(row=1, column=5, sticky="nsew", padx=(4, 0))
 
         if not self._asm_pane_visible:
             self._asm_frame.grid_remove()
+        if not self._pseudo_c_pane_visible:
+            self._pseudo_c_frame.grid_remove()
 
         self._text.tag_configure("pointer", foreground="red")
         self._text.tag_configure("sel_hex", background="#add8e6", foreground="black")
@@ -262,6 +303,10 @@ class HexEditorFrame(ttk.Frame):
             w.bind("<Control-a>", self._toggle_asm_pane)
             w.bind("<Control-A>", self._toggle_asm_pane)
 
+        def _bind_pseudo_c_toggle(w: tk.Misc) -> None:
+            w.bind("<Control-b>", self._toggle_pseudo_c_pane)
+            w.bind("<Control-B>", self._toggle_pseudo_c_pane)
+
         _bind_asm_toggle(self._text)
         _bind_asm_toggle(self._text_ascii)
         _bind_asm_toggle(self._goto_entry)
@@ -270,6 +315,14 @@ class HexEditorFrame(ttk.Frame):
         _bind_asm_toggle(outer)
         self.winfo_toplevel().bind("<Control-a>", self._toggle_asm_pane, add=True)
         self.winfo_toplevel().bind("<Control-A>", self._toggle_asm_pane, add=True)
+        _bind_pseudo_c_toggle(self._text)
+        _bind_pseudo_c_toggle(self._text_ascii)
+        _bind_pseudo_c_toggle(self._goto_entry)
+        _bind_pseudo_c_toggle(self._encoding_combo)
+        _bind_pseudo_c_toggle(self._asm_mode_combo)
+        _bind_pseudo_c_toggle(outer)
+        self.winfo_toplevel().bind("<Control-b>", self._toggle_pseudo_c_pane, add=True)
+        self.winfo_toplevel().bind("<Control-B>", self._toggle_pseudo_c_pane, add=True)
 
         self._text.bind("<Control-Shift-A>", lambda e: self._select_all())
         self._text_ascii.bind("<Control-Shift-A>", lambda e: self._select_all())
@@ -315,6 +368,18 @@ class HexEditorFrame(ttk.Frame):
             self._refresh_asm_selection()
         else:
             self._asm_frame.grid_remove()
+        return "break"
+
+    def _toggle_pseudo_c_pane(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Toggle Pseudo-C pane visibility. Bound to Ctrl+B."""
+        self._goto_entry.selection_clear()
+        self._text.focus_set()
+        self._pseudo_c_pane_visible = not self._pseudo_c_pane_visible
+        if self._pseudo_c_pane_visible:
+            self._pseudo_c_frame.grid(row=1, column=4, sticky="nsew", padx=(4, 0))
+            self._refresh_pseudo_c_selection()
+        else:
+            self._pseudo_c_frame.grid_remove()
         return "break"
 
     def _on_asm_mode_change(self, event: Optional[tk.Event] = None) -> None:
@@ -585,6 +650,8 @@ class HexEditorFrame(ttk.Frame):
     def _refresh_asm_selection(self) -> None:
         """Disassemble selected/highlighted bytes (or cursor instruction) into ASM panel."""
         if not self._asm_pane_visible:
+            if self._pseudo_c_pane_visible:
+                self._refresh_pseudo_c_selection()
             return
         self._text_asm.configure(state=tk.NORMAL)
         self._text_asm.delete("1.0", tk.END)
@@ -666,6 +733,239 @@ class HexEditorFrame(ttk.Frame):
                 offset += align
         self._text_asm.insert("1.0", "".join(lines) if lines else "(No instructions)")
         self._text_asm.configure(state=tk.DISABLED)
+        if self._pseudo_c_pane_visible:
+            self._refresh_pseudo_c_selection()
+
+    def _refresh_pseudo_c_selection(self) -> None:
+        """Decompile selected/visible bytes into pseudo-C. Uses angr when available."""
+        if not self._pseudo_c_pane_visible:
+            return
+        self._text_pseudo_c.configure(state=tk.NORMAL)
+        self._text_pseudo_c.delete("1.0", tk.END)
+        if not self._data:
+            self._text_pseudo_c.insert(tk.END, "(No data)")
+            self._text_pseudo_c.configure(state=tk.DISABLED)
+            return
+        align = 2 if self._asm_mode == "thumb" else 4
+        if self._selection_start is not None and self._selection_end is not None:
+            start = min(self._selection_start, self._selection_end)
+            end = max(self._selection_start, self._selection_end) + 1
+            start = (start // align) * align
+        else:
+            vis_start = self._visible_row_start * BYTES_PER_ROW
+            vis_end = min(vis_start + self._visible_row_count * BYTES_PER_ROW, len(self._data))
+            start = (vis_start // align) * align
+            end = vis_end
+        if start >= len(self._data):
+            self._text_pseudo_c.insert(tk.END, "(No bytes selected)")
+            self._text_pseudo_c.configure(state=tk.DISABLED)
+            return
+        end = min(end, len(self._data))
+        data_copy = bytes(self._data)
+        if _ANGR_AVAILABLE:
+            self._text_pseudo_c.insert(tk.END, "Decompiling with angr (CFG + Decompiler)...")
+            self._text_pseudo_c.configure(state=tk.DISABLED)
+            thread = threading.Thread(
+                target=self._angr_decompile_worker,
+                args=(start, end, data_copy),
+                daemon=True,
+            )
+            thread.start()
+        else:
+            self._refresh_pseudo_c_capstone_fallback(start, end, align)
+
+    def _angr_decompile_worker(self, start: int, end: int, data_copy: bytes) -> None:
+        """Background worker: run angr CFG + Decompiler, then schedule UI update."""
+        result: Optional[str] = None
+        try:
+            result = self._angr_decompile_impl(start, end, data_copy)
+        except Exception as e:
+            result = f"(angr failed: {e})"
+        if result and not result.startswith("(angr "):
+            self.after(0, lambda: self._angr_decompile_done(result))
+        else:
+            align = 2 if self._asm_mode == "thumb" else 4
+            self.after(0, lambda: self._angr_fallback_to_capstone(start, end, align, result))
+
+    def _angr_decompile_done(self, text: str) -> None:
+        """Called on main thread after angr decompilation completes."""
+        if not self._pseudo_c_pane_visible:
+            return
+        self._text_pseudo_c.configure(state=tk.NORMAL)
+        self._text_pseudo_c.delete("1.0", tk.END)
+        self._text_pseudo_c.insert(tk.END, text)
+        self._text_pseudo_c.configure(state=tk.DISABLED)
+
+    def _angr_fallback_to_capstone(self, start: int, end: int, align: int, angr_error: Optional[str]) -> None:
+        """When angr fails, show error + Capstone pseudo-C fallback."""
+        if not self._pseudo_c_pane_visible:
+            return
+        self._text_pseudo_c.configure(state=tk.NORMAL)
+        self._text_pseudo_c.delete("1.0", tk.END)
+        if angr_error:
+            self._text_pseudo_c.insert(tk.END, angr_error + "\n\n--- Capstone pseudo-C fallback ---\n\n")
+        self._refresh_pseudo_c_capstone_fallback(start, end, align)
+
+    def _angr_decompile_impl(self, start: int, end: int, data_copy: bytes) -> Optional[str]:
+        """Full angr decompilation: load binary, CFG, Decompiler per function."""
+        use_thumb = self._asm_mode == "thumb"
+        entry_addr = GBA_ROM_BASE + start
+        if use_thumb:
+            entry_addr |= 1
+        proj = angr.load_shellcode(
+            data_copy,
+            "armel",
+            start_offset=start,
+            load_address=GBA_ROM_BASE,
+            thumb=use_thumb,
+            auto_load_libs=False,
+        )
+        region_start = GBA_ROM_BASE + start
+        region_end = GBA_ROM_BASE + end
+        cfg = proj.analyses.CFGFast(
+            regions=[(region_start, region_end)],
+            function_starts=[entry_addr],
+            start_at_entry=True,
+            normalize=True,  # required for Decompiler
+            switch_mode_on_nodecode=True,  # helps with ARM/Thumb mixed code
+        )
+        out_lines: List[str] = []
+        errors: List[str] = []
+        funcs_in_region = [
+            (addr, func)
+            for addr, func in cfg.kb.functions.items()
+            if func.addr < region_end and (func.addr + (func.size or 0)) > region_start
+        ]
+        if not funcs_in_region:
+            funcs_in_region = list(cfg.kb.functions.items())
+        for addr, func in sorted(funcs_in_region, key=lambda x: x[0]):
+            try:
+                dec = proj.analyses.Decompiler(func, cfg=cfg)
+                if dec and dec.codegen and dec.codegen.text:
+                    out_lines.append(f"/* sub_{addr:08X} */")
+                    out_lines.append(dec.codegen.text.strip())
+                    out_lines.append("")
+            except Exception as e:
+                err_msg = str(e).replace("\n", " ")[:120]
+                errors.append(f"sub_{addr:08X}: {err_msg}")
+        if errors and not out_lines:
+            return "(angr decompilation failed)\n\n" + "\n".join(errors[:8]) + (
+                "\n\n(... more)" if len(errors) > 8 else ""
+            )
+        if out_lines:
+            if errors:
+                out_lines.insert(0, "/* Some functions failed: " + "; ".join(errors[:2]) + " */\n")
+            return "\n".join(out_lines)
+        return None
+
+    def _refresh_pseudo_c_capstone_fallback(self, start: int, end: int, align: int) -> None:
+        """Fallback: pattern-based pseudo-C when angr unavailable."""
+        if not _CAPSTONE_AVAILABLE:
+            self._text_pseudo_c.insert(tk.END, "(Capstone not available)")
+            self._text_pseudo_c.configure(state=tk.DISABLED)
+            return
+        mode = CS_MODE_THUMB if self._asm_mode == "thumb" else CS_MODE_ARM
+        ldr_targets = self._get_ldr_pc_targets(mode)
+        chunk = bytes(self._data[start:end])
+        base = GBA_ROM_BASE + start
+        cs = Cs(CS_ARCH_ARM, mode)
+        cs.detail = True
+        lines: List[str] = []
+        try:
+            for i in cs.disasm(chunk, base):
+                file_off = i.address - GBA_ROM_BASE
+                if file_off in ldr_targets:
+                    continue
+                if file_off >= end:
+                    break
+                line = self._insn_to_pseudo_c(i, mode)
+                if line:
+                    lines.append(line + "\n")
+        except Exception:
+            pass
+        self._text_pseudo_c.insert(tk.END, "".join(lines) if lines else "(No instructions)")
+        self._text_pseudo_c.configure(state=tk.DISABLED)
+
+    def _insn_to_pseudo_c(self, insn: object, mode: int) -> str:
+        """Convert a Capstone instruction to pseudo-C line."""
+        m = insn.mnemonic
+        ops = insn.op_str
+        if not ops:
+            return f"// {m}"
+        parts = [p.strip() for p in ops.split(",")]
+        dst = parts[0] if parts else ""
+        if m in ("mov", "movs", "movw", "mvn", "mvns"):
+            return f"{dst} = {self._op_to_c(parts[1] if len(parts) > 1 else '')};"
+        if m in ("add", "adds", "adc", "adcs"):
+            if len(parts) >= 3:
+                return f"{dst} = {self._op_to_c(parts[1])} + {self._op_to_c(parts[2])};"
+            return f"{dst} += {self._op_to_c(parts[1])};"
+        if m in ("sub", "subs", "sbc", "sbcs"):
+            if len(parts) >= 3:
+                return f"{dst} = {self._op_to_c(parts[1])} - {self._op_to_c(parts[2])};"
+            return f"{dst} -= {self._op_to_c(parts[1])};"
+        if m in ("and", "ands", "orr", "orrs", "eor", "eors", "bic", "bics"):
+            op_map = {"and": "&", "ands": "&", "orr": "|", "orrs": "|", "eor": "^", "eors": "^", "bic": "& ~", "bics": "& ~"}
+            sym = op_map.get(m, "&")
+            if len(parts) >= 3:
+                return f"{dst} = {self._op_to_c(parts[1])} {sym} {self._op_to_c(parts[2])};"
+            return f"{dst} {sym}= {self._op_to_c(parts[1])};"
+        if m in ("lsl", "lsls", "lsr", "lsrs", "asr", "asrs", "ror", "rors"):
+            shift_map = {"lsl": "<<", "lsls": "<<", "lsr": ">>", "lsrs": ">>", "asr": ">>", "asrs": ">>", "ror": ">>>", "rors": ">>>"}
+            sym = shift_map.get(m, "<<")
+            if len(parts) >= 3:
+                return f"{dst} = {self._op_to_c(parts[1])} {sym} {self._op_to_c(parts[2])};"
+            return f"{dst} {sym}= {self._op_to_c(parts[1])};"
+        if m in ("mul", "muls"):
+            if len(parts) >= 3:
+                return f"{dst} = {self._op_to_c(parts[1])} * {self._op_to_c(parts[2])};"
+        if m in ("mla", "mlas") and len(parts) >= 4:
+            return f"{dst} = {self._op_to_c(parts[1])} * {self._op_to_c(parts[2])} + {self._op_to_c(parts[3])};"
+        if m == "mls" and len(parts) >= 4:
+            return f"{dst} = {self._op_to_c(parts[3])} - {self._op_to_c(parts[1])} * {self._op_to_c(parts[2])};"
+        if m in ("ldr", "ldrb", "ldrh"):
+            if "[" in ops and len(parts) > 1:
+                return f"{dst} = *({self._mem_to_c(parts[1])});"
+            if len(parts) > 1:
+                return f"{dst} = {self._op_to_c(parts[1])};"
+        if m in ("str", "strb", "strh"):
+            if "[" in ops and len(parts) > 1:
+                return f"*({self._mem_to_c(parts[1])}) = {dst};"
+            if len(parts) > 1:
+                return f"*({self._op_to_c(parts[1])}) = {dst};"
+        if m in ("cmp", "cmn", "tst", "teq"):
+            return f"// {m} {ops} (flags)"
+        if m in ("b", "bl", "bx", "blx"):
+            if m == "bl":
+                return f"call {self._op_to_c(parts[0])};"
+            if m == "bx":
+                return f"return {self._op_to_c(parts[0])};"
+            return f"goto {self._op_to_c(parts[0])};"
+        if m in ("push", "pop"):
+            return f"// {m} {{{ops}}}"
+        if m in ("bhi", "bls", "bhs", "blo", "bmi", "bpl", "bvs", "bvc", "bgt", "ble", "bge", "blt", "bne", "beq"):
+            return f"if (cond) goto {self._op_to_c(parts[0])};  // {m}"
+        return f"// {m} {ops}"
+
+    def _op_to_c(self, s: str) -> str:
+        """Convert operand string to C-like form."""
+        s = s.strip()
+        s = re.sub(r"#0x([0-9a-fA-F]+)", r"0x\1", s)
+        s = re.sub(r"#(\d+)", r"\1", s)
+        return s
+
+    def _mem_to_c(self, ops: str) -> str:
+        """Convert memory operand [base, #offs] or [base] to C pointer form."""
+        m = re.search(r"\[([^\]]+)\]", ops)
+        if not m:
+            return ops
+        inner = m.group(1).strip()
+        inner = re.sub(r"#0x([0-9a-fA-F]+)", r"0x\1", inner)
+        inner = re.sub(r"#(-?\d+)", r"\1", inner)
+        if ", " in inner:
+            base, off = inner.split(", ", 1)
+            return f"({base} + {off})"
+        return inner
 
     def _get_ldr_pc_targets(self, mode: int) -> Set[int]:
         """Set of file offsets that are load targets of LDR [pc, #imm].
