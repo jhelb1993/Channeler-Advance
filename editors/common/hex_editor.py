@@ -5,6 +5,7 @@ ASCII/PCS (Pokemon GBA) encoding for the character pane.
 Optional Capstone disassembly (ARM7TDMI Thumb/ARM).
 """
 
+import re
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
@@ -13,6 +14,7 @@ from typing import Optional, Dict, List, Tuple
 _CAPSTONE_AVAILABLE = False
 try:
     from capstone import Cs, CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_THUMB
+    from capstone.arm import ARM_OP_MEM, ARM_REG_PC
     _CAPSTONE_AVAILABLE = True
 except ImportError:
     pass
@@ -289,7 +291,10 @@ class HexEditorFrame(ttk.Frame):
         self._text.bind("<KeyPress>", self._prevent_unwanted, add=True)
 
     def _toggle_asm_pane(self, event: Optional[tk.Event] = None) -> Optional[str]:
-        """Toggle ASM disassembly pane visibility. Bound to Ctrl+A."""
+        """Toggle ASM disassembly pane visibility. Bound to Ctrl+A.
+        When opening, uses highlighted bytes if any."""
+        self._goto_entry.selection_clear()
+        self._text.focus_set()
         self._asm_pane_visible = not self._asm_pane_visible
         if self._asm_pane_visible:
             self._asm_frame.grid(row=0, column=3, sticky="nsew", padx=(4, 0))
@@ -581,11 +586,11 @@ class HexEditorFrame(ttk.Frame):
         chunk = bytes(self._data[start:end])
         base = GBA_ROM_BASE + start
         cs = Cs(CS_ARCH_ARM, mode)
-        cs.detail = False
-        insn_map: Dict[int, Tuple[bytes, str, str]] = {}
+        cs.detail = True
+        insn_map: Dict[int, object] = {}
         try:
             for i in cs.disasm(chunk, base):
-                insn_map[i.address - GBA_ROM_BASE] = (i.bytes, i.mnemonic, i.op_str)
+                insn_map[i.address - GBA_ROM_BASE] = i
         except Exception:
             pass
         offset = start
@@ -593,9 +598,13 @@ class HexEditorFrame(ttk.Frame):
         while offset < end:
             file_off = offset
             if file_off in insn_map:
-                raw, mnemonic, op_str = insn_map[file_off]
+                insn = insn_map[file_off]
+                raw, mnemonic, op_str = insn.bytes, insn.mnemonic, insn.op_str
                 hex_bytes = " ".join(f"{b:02x}" for b in raw)
                 operands = f" {op_str}" if op_str else ""
+                comment = self._get_ldr_pc_comment(insn, mode)
+                if comment:
+                    operands += f"  @ {comment}"
                 lines.append(f"{GBA_ROM_BASE + file_off:08X}:  {hex_bytes:12s}  {mnemonic}{operands}\n")
                 offset += len(raw)
             else:
@@ -614,6 +623,33 @@ class HexEditorFrame(ttk.Frame):
                 offset += align
         self._text_asm.insert("1.0", "".join(lines) if lines else "(No instructions)")
         self._text_asm.configure(state=tk.DISABLED)
+
+    def _get_ldr_pc_comment(self, insn: object, mode: int) -> Optional[str]:
+        """If insn is LDR/LDRB/LDRH with [pc, #imm], return raw bytes at load target as comment (little endian)."""
+        if not _CAPSTONE_AVAILABLE or insn.mnemonic not in ("ldr", "ldrb", "ldrh"):
+            return None
+        disp = None
+        for op in insn.operands:
+            if op.type == ARM_OP_MEM and op.value.mem.base == ARM_REG_PC:
+                disp = op.value.mem.disp
+                break
+        if disp is None:
+            return None
+        addr = insn.address
+        if mode == CS_MODE_ARM:
+            pc = (addr + 8) & ~3
+            target_addr = pc + disp
+        else:
+            pc = (addr + 4) & ~2
+            target_addr = pc + disp
+        file_off = target_addr - GBA_ROM_BASE
+        if file_off < 0:
+            return None
+        n = 4 if insn.mnemonic == "ldr" else (2 if insn.mnemonic == "ldrh" else 1)
+        if file_off + n > len(self._data):
+            return None
+        val = sum(self._data[file_off + i] << (i * 8) for i in range(n))
+        return f"#0x{val:0{n * 2}X}"
 
     # ── Rendering ────────────────────────────────────────────────────
 
@@ -766,8 +802,29 @@ class HexEditorFrame(ttk.Frame):
         return "break"
 
     def _on_drag(self, event: tk.Event) -> Optional[str]:
-        idx = self._text.index(f"@{event.x},{event.y}")
-        off = self._index_to_offset(idx)
+        if not self._data:
+            return "break"
+        h = self._text.winfo_height()
+        margin = 24
+        off = None
+        if event.y < margin and self._visible_row_start > 0:
+            step = max(1, (margin - event.y) // 8)
+            self._visible_row_start = max(0, self._visible_row_start - step)
+            off = self._visible_row_start * BYTES_PER_ROW
+            self._refresh_visible()
+            self._update_scrollbar()
+        elif event.y > h - margin:
+            max_start = max(0, self._total_rows - self._visible_row_count)
+            if self._visible_row_start < max_start:
+                step = max(1, (event.y - (h - margin)) // 8)
+                self._visible_row_start = min(max_start, self._visible_row_start + step)
+                off = min(len(self._data) - 1,
+                         (self._visible_row_start + self._visible_row_count - 1) * BYTES_PER_ROW + BYTES_PER_ROW - 1)
+                self._refresh_visible()
+                self._update_scrollbar()
+        if off is None:
+            idx = self._text.index(f"@{event.x},{event.y}")
+            off = self._index_to_offset(idx)
         if off is not None:
             if self._selection_start is None:
                 self._selection_start = self._cursor_byte_offset
@@ -788,8 +845,29 @@ class HexEditorFrame(ttk.Frame):
         return "break"
 
     def _on_ascii_drag(self, event: tk.Event) -> Optional[str]:
-        idx = self._text_ascii.index(f"@{event.x},{event.y}")
-        off = self._ascii_index_to_offset(idx)
+        if not self._data:
+            return "break"
+        h = self._text_ascii.winfo_height()
+        margin = 24
+        off = None
+        if event.y < margin and self._visible_row_start > 0:
+            step = max(1, (margin - event.y) // 8)
+            self._visible_row_start = max(0, self._visible_row_start - step)
+            off = self._visible_row_start * BYTES_PER_ROW
+            self._refresh_visible()
+            self._update_scrollbar()
+        elif event.y > h - margin:
+            max_start = max(0, self._total_rows - self._visible_row_count)
+            if self._visible_row_start < max_start:
+                step = max(1, (event.y - (h - margin)) // 8)
+                self._visible_row_start = min(max_start, self._visible_row_start + step)
+                off = min(len(self._data) - 1,
+                         (self._visible_row_start + self._visible_row_count - 1) * BYTES_PER_ROW + BYTES_PER_ROW - 1)
+                self._refresh_visible()
+                self._update_scrollbar()
+        if off is None:
+            idx = self._text_ascii.index(f"@{event.x},{event.y}")
+            off = self._ascii_index_to_offset(idx)
         if off is not None:
             if self._selection_start is None:
                 self._selection_start = self._cursor_byte_offset
