@@ -265,7 +265,7 @@ class HexEditorFrame(ttk.Frame):
             w.bind("<Button-4>", lambda e: _asm_scroll(3))
             w.bind("<Button-5>", lambda e: _asm_scroll(-3))
 
-        # Pseudo-C pane: to the right of ASM, hidden by default, toggleable with Ctrl+B
+        # Pseudo-C pane: to the right of ASM, hidden by default, toggleable with Ctrl+G
         self._pseudo_c_frame = ttk.LabelFrame(body, text=" Pseudo-C ", padding=2)
         self._pseudo_c_frame.grid(row=1, column=4, sticky="nsew", padx=(4, 0))
         self._pseudo_c_frame.columnconfigure(0, weight=1)
@@ -319,8 +319,8 @@ class HexEditorFrame(ttk.Frame):
             w.bind("<Control-A>", self._toggle_asm_pane)
 
         def _bind_pseudo_c_toggle(w: tk.Misc) -> None:
-            w.bind("<Control-b>", self._toggle_pseudo_c_pane)
-            w.bind("<Control-B>", self._toggle_pseudo_c_pane)
+            w.bind("<Control-g>", self._toggle_pseudo_c_pane)
+            w.bind("<Control-G>", self._toggle_pseudo_c_pane)
 
         _bind_asm_toggle(self._text)
         _bind_asm_toggle(self._text_ascii)
@@ -335,22 +335,22 @@ class HexEditorFrame(ttk.Frame):
         _bind_pseudo_c_toggle(self._goto_entry)
         _bind_pseudo_c_toggle(self._encoding_combo)
         _bind_pseudo_c_toggle(self._asm_mode_combo)
+        _bind_pseudo_c_toggle(self._asm_frame)
+        _bind_pseudo_c_toggle(self._text_asm)
+        _bind_pseudo_c_toggle(self._pseudo_c_frame)
+        _bind_pseudo_c_toggle(self._text_pseudo_c)
         _bind_pseudo_c_toggle(outer)
-        self.winfo_toplevel().bind("<Control-b>", self._toggle_pseudo_c_pane, add=True)
-        self.winfo_toplevel().bind("<Control-B>", self._toggle_pseudo_c_pane, add=True)
+        self.winfo_toplevel().bind("<Control-g>", self._toggle_pseudo_c_pane, add=True)
+        self.winfo_toplevel().bind("<Control-G>", self._toggle_pseudo_c_pane, add=True)
         for w in (
             self._text, self._text_ascii, self._goto_entry, self._encoding_combo,
             self._asm_mode_combo, self._asm_frame, self._text_asm,
             self._pseudo_c_frame, self._text_pseudo_c, outer,
         ):
-            w.bind("<Control-g>", self._focus_goto_entry)
-            w.bind("<Control-G>", self._focus_goto_entry)
             w.bind("<Control-d>", self._toggle_hackmew_mode)
             w.bind("<Control-D>", self._toggle_hackmew_mode)
             w.bind("<Control-e>", self._compile_hackmew_asm)
             w.bind("<Control-E>", self._compile_hackmew_asm)
-        self.winfo_toplevel().bind("<Control-g>", self._focus_goto_entry, add=True)
-        self.winfo_toplevel().bind("<Control-G>", self._focus_goto_entry, add=True)
         self.winfo_toplevel().bind("<Control-d>", self._toggle_hackmew_mode, add=True)
         self.winfo_toplevel().bind("<Control-D>", self._toggle_hackmew_mode, add=True)
         self.winfo_toplevel().bind("<Control-e>", self._compile_hackmew_asm, add=True)
@@ -358,6 +358,16 @@ class HexEditorFrame(ttk.Frame):
 
         self._text.bind("<Control-Shift-A>", lambda e: self._select_all())
         self._text_ascii.bind("<Control-Shift-A>", lambda e: self._select_all())
+        self._text.bind("<Control-v>", self._paste_insert)
+        self._text.bind("<Control-V>", self._paste_insert)
+        self._text.bind("<Control-b>", self._paste_write)
+        self._text.bind("<Control-B>", self._paste_write)
+        self._text.bind("<<Paste>>", lambda e: self._paste_insert(e) or "break")
+        self._text_ascii.bind("<Control-v>", self._paste_insert)
+        self._text_ascii.bind("<Control-V>", self._paste_insert)
+        self._text_ascii.bind("<Control-b>", self._paste_write)
+        self._text_ascii.bind("<Control-B>", self._paste_write)
+        self._text_ascii.bind("<<Paste>>", lambda e: self._paste_insert(e) or "break")
         self._text.bind("<Delete>", self._on_delete)
         self._text.bind("<Insert>", self._on_insert_key)
         self._text.bind("<BackSpace>", self._on_backspace)
@@ -390,7 +400,7 @@ class HexEditorFrame(ttk.Frame):
         self._text.bind("<KeyPress>", self._prevent_unwanted, add=True)
 
     def _focus_goto_entry(self, event: Optional[tk.Event] = None) -> Optional[str]:
-        """Focus the Goto (offset) entry box. Bound to Ctrl+G."""
+        """Focus the Goto (offset) entry box."""
         self._goto_entry.focus_set()
         self._goto_entry.select_range(0, tk.END)
         return "break"
@@ -562,7 +572,7 @@ class HexEditorFrame(ttk.Frame):
         return "break"
 
     def _toggle_pseudo_c_pane(self, event: Optional[tk.Event] = None) -> Optional[str]:
-        """Toggle Pseudo-C pane visibility. Bound to Ctrl+B."""
+        """Toggle Pseudo-C pane visibility. Bound to Ctrl+G."""
         self._goto_entry.selection_clear()
         self._text.focus_set()
         self._pseudo_c_pane_visible = not self._pseudo_c_pane_visible
@@ -689,10 +699,85 @@ class HexEditorFrame(ttk.Frame):
         bc = offset % BYTES_PER_ROW
         return f"{dr}.{1 + bc}"
 
+    def _parse_paste_hex(self, text: str) -> bytearray:
+        """Parse clipboard as hex; only hex digits used, invalid chars skipped."""
+        digits = "".join(c for c in text if c in HEX_DIGITS)
+        out = bytearray()
+        for i in range(0, len(digits) - 1, 2):
+            out.append(int(digits[i : i + 2], 16))
+        return out
+
+    def _parse_paste_ascii(self, text: str) -> bytearray:
+        """Parse clipboard as ASCII; only printable chars (32–126) used, invalid skipped."""
+        out = bytearray()
+        for c in text:
+            if self._encoding == "pcs":
+                b = _PCS_CHAR_TO_BYTE.get(c)
+                if b is not None:
+                    out.append(b)
+                elif 32 <= ord(c) <= 126:
+                    out.append(ord(c))
+            else:
+                if 32 <= ord(c) <= 126:
+                    out.append(ord(c))
+        return out
+
+    def _paste_write(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Paste clipboard over bytes at cursor. Ctrl+V. Hex pane: hex string; ASCII pane: text."""
+        if not self._data:
+            return "break"
+        try:
+            raw = self.clipboard_get()
+        except tk.TclError:
+            return "break"
+        focus = self.winfo_toplevel().focus_get()
+        data = self._parse_paste_hex(raw) if focus == self._text else self._parse_paste_ascii(raw)
+        if not data:
+            return "break"
+        pos = self._cursor_byte_offset
+        end = min(pos + len(data), len(self._data))
+        count = end - pos
+        self._data[pos:end] = data[:count]
+        self._modified = True
+        self._ldr_pc_targets_valid = False
+        self._nibble_pos = 0
+        self._cursor_byte_offset = min(pos + count, len(self._data) - 1) if self._data else 0
+        self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
+        self._ensure_cursor_visible()
+        self._refresh_visible()
+        self._update_scrollbar()
+        self._refresh_asm_selection()
+        return "break"
+
+    def _paste_insert(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Insert clipboard bytes at cursor, shifting existing bytes. Ctrl+B."""
+        if not self._data:
+            return "break"
+        try:
+            raw = self.clipboard_get()
+        except tk.TclError:
+            return "break"
+        focus = self.winfo_toplevel().focus_get()
+        data = self._parse_paste_hex(raw) if focus == self._text else self._parse_paste_ascii(raw)
+        if not data:
+            return "break"
+        pos = self._cursor_byte_offset
+        self._data[pos:pos] = data
+        self._modified = True
+        self._ldr_pc_targets_valid = False
+        self._nibble_pos = 0
+        self._cursor_byte_offset = min(pos + len(data), len(self._data) - 1)
+        self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
+        self._ensure_cursor_visible()
+        self._refresh_visible()
+        self._update_scrollbar()
+        self._refresh_asm_selection()
+        return "break"
+
     def _prevent_unwanted(self, event: tk.Event) -> Optional[str]:
         if event.keysym in ("Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next"):
             return None
-        if event.state & 0x4 and event.keysym.lower() in ("a", "c", "v", "x", "s"):
+        if event.state & 0x4 and event.keysym.lower() in ("a", "b", "c", "v", "x", "s"):
             return None
         if event.char and event.char in HEX_DIGITS:
             return "break"
