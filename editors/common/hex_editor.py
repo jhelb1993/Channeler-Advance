@@ -431,6 +431,11 @@ class HexEditorFrame(ttk.Frame):
     def _on_goto_entry_change(self, event: Optional[tk.Event] = None) -> None:
         if not self._data:
             return
+        if event and event.keysym in (
+            "Control_L", "Control_R", "Shift_L", "Shift_R",
+            "Alt_L", "Alt_R", "Caps_Lock", "Num_Lock",
+        ):
+            return
         s = self._goto_var.get().strip()
         if not s:
             return
@@ -1664,14 +1669,19 @@ Format = "`f|u8`[u8 arg0]"
             first_vis = max(s, vis_start)
             last_vis = min(e, vis_end - 1) if vis_end > 0 else e
             if first_vis <= last_vis:
-                start_ix = self._offset_to_index(first_vis)
-                end_ix = self._offset_to_index(last_vis)
-                if start_ix and end_ix:
-                    self._text.tag_add("sel_hex", start_ix, f"{end_ix}+2c")
-                start_aix = self._offset_to_ascii_index(first_vis)
-                end_aix = self._offset_to_ascii_index(last_vis)
-                if start_aix and end_aix:
-                    self._text_ascii.tag_add("sel_ascii", start_aix, f"{end_aix}+1c")
+                first_row = first_vis // BYTES_PER_ROW
+                last_row = last_vis // BYTES_PER_ROW
+                for row in range(first_row, last_row + 1):
+                    row_start_off = max(s, row * BYTES_PER_ROW)
+                    row_end_off = min(e, row * BYTES_PER_ROW + BYTES_PER_ROW - 1)
+                    ix_s = self._offset_to_index(row_start_off)
+                    ix_e = self._offset_to_index(row_end_off)
+                    if ix_s and ix_e:
+                        self._text.tag_add("sel_hex", ix_s, f"{ix_e}+2c")
+                    aix_s = self._offset_to_ascii_index(row_start_off)
+                    aix_e = self._offset_to_ascii_index(row_end_off)
+                    if aix_s and aix_e:
+                        self._text_ascii.tag_add("sel_ascii", aix_s, f"{aix_e}+1c")
         else:
             self._selection_label.config(text="")
 
@@ -1849,7 +1859,77 @@ Format = "`f|u8`[u8 arg0]"
             menu.add_command(label="Follow pointer", command=lambda: self._follow_pointer_at(ptr_start))
         menu.add_command(label="Select all", command=lambda: self._select_all())
         menu.add_command(label="Go to offset...", command=self._on_goto_offset)
+        menu.add_separator()
+        export_menu = tk.Menu(menu, tearoff=0)
+        export_menu.add_command(label="ASM to clipboard", command=self._export_asm_clipboard)
+        export_menu.add_command(label="ASM to file...", command=self._export_asm_file)
+        export_menu.add_command(label="Pseudo-C to clipboard", command=self._export_pseudo_c_clipboard)
+        export_menu.add_command(label="Pseudo-C to file...", command=self._export_pseudo_c_file)
+        menu.add_cascade(label="Export", menu=export_menu)
         menu.tk_popup(event.x_root, event.y_root)
+
+    # ── Export helpers ────────────────────────────────────────────────
+
+    def _get_asm_text_clean(self) -> str:
+        """Get ASM pane content with offsets and raw bytes stripped."""
+        raw = self._text_asm.get("1.0", tk.END).strip()
+        if not raw or raw.startswith("("):
+            return ""
+        lines: List[str] = []
+        for line in raw.splitlines():
+            m = re.match(r"^[0-9A-Fa-f]{8}:\s+(?:[0-9a-f]{2}\s+)+\s*(.+)$", line)
+            if m:
+                lines.append(m.group(1))
+            else:
+                lines.append(line)
+        return "\n".join(lines)
+
+    def _get_pseudo_c_text(self) -> str:
+        """Get pseudo-C pane content."""
+        raw = self._text_pseudo_c.get("1.0", tk.END).strip()
+        if not raw or raw.startswith("("):
+            return ""
+        return raw
+
+    def _export_asm_clipboard(self) -> None:
+        text = self._get_asm_text_clean()
+        if not text:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+
+    def _export_asm_file(self) -> None:
+        text = self._get_asm_text_clean()
+        if not text:
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".asm",
+            filetypes=[("ASM files", "*.asm"), ("Text files", "*.txt"), ("All files", "*.*")],
+            title="Export ASM",
+        )
+        if path:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+
+    def _export_pseudo_c_clipboard(self) -> None:
+        text = self._get_pseudo_c_text()
+        if not text:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+
+    def _export_pseudo_c_file(self) -> None:
+        text = self._get_pseudo_c_text()
+        if not text:
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".c",
+            filetypes=[("C files", "*.c"), ("Text files", "*.txt"), ("All files", "*.*")],
+            title="Export Pseudo-C",
+        )
+        if path:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
 
     # ── Pointer helpers ──────────────────────────────────────────────
 
