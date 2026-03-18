@@ -428,6 +428,69 @@ class HexEditorFrame(ttk.Frame):
             self._refresh_asm_selection()
         return "break"
 
+    def _preprocess_hackmew_asm_for_compile(self, asm_text: str) -> str:
+        """Convert ldr rX, [pc, <label>] to ldr rX, [pc, #0xYY] by resolving label positions within the ASM."""
+        lines = asm_text.splitlines()
+        base = self._hackmew_asm_start
+        align = 2 if self._asm_mode == "thumb" else 4
+
+        def _insn_size(raw_line: str) -> int:
+            s = raw_line.split("@")[0].strip()
+            if not s or s.endswith(":"):
+                return 0
+            if s.startswith(".word"):
+                return 4
+            if s.startswith(".byte"):
+                return 2
+            if re.match(r"(?:bl|blx)\b", s):
+                return 4
+            return align
+
+        label_to_file_off: Dict[str, int] = {}
+        addr = base
+        for raw in lines:
+            line = raw.split("@")[0].strip()
+            if not line:
+                continue
+            if line.endswith(":"):
+                label_to_file_off[line[:-1].strip()] = addr
+                continue
+            addr += _insn_size(raw)
+
+        addr = base
+        for i, raw in enumerate(lines):
+            line = raw.split("@")[0].strip()
+            if not line:
+                continue
+            if line.endswith(":"):
+                continue
+            if line.startswith(".word") or line.startswith(".byte"):
+                addr += _insn_size(raw)
+                continue
+
+            match = re.search(
+                r"(ldr[bh]?\s+\w+\s*,\s*\[\s*pc\s*,\s*)"
+                r"((?:<\s*)?loc_[0-9A-Fa-f]{8}(?:\s*>)?)\s*(\])",
+                raw,
+                re.IGNORECASE,
+            )
+            if match:
+                prefix, label_ref, closer = match.groups()
+                label_name = label_ref.strip().strip("<>").strip()
+                target_file_off = label_to_file_off.get(label_name)
+                if target_file_off is not None:
+                    target_rom = GBA_ROM_BASE + target_file_off
+                    if self._asm_mode == "thumb":
+                        pc_val = GBA_ROM_BASE + ((addr + 4) & ~3)
+                    else:
+                        pc_val = GBA_ROM_BASE + addr + 8
+                    offset = target_rom - pc_val
+                    new_operand = f"{prefix}#0x{offset & 0xFFFFFFFF:x}{closer}"
+                    lines[i] = raw[: match.start()] + new_operand + raw[match.end() :]
+            addr += _insn_size(raw)
+
+        return "\n".join(lines)
+
     def _compile_hackmew_asm(self, event: Optional[tk.Event] = None) -> Optional[str]:
         """Compile edited HackMew ASM via deps/thumb.bat and insert .bin into ROM. Bound to Ctrl+E."""
         if not self._hackmew_mode or not self._asm_pane_visible:
@@ -439,6 +502,7 @@ class HexEditorFrame(ttk.Frame):
         if not asm_text:
             messagebox.showerror("Compile Error", "ASM pane is empty.")
             return "break"
+        asm_text = self._preprocess_hackmew_asm_for_compile(asm_text)
 
         original_size = self._hackmew_asm_end - self._hackmew_asm_start
 
@@ -1666,7 +1730,7 @@ Format = "`f|u8`[u8 arg0]"
         if mode == CS_MODE_ARM:
             pc = (addr + 8) & ~3
             return pc + disp
-        pc = (addr + 4) & ~2
+        pc = (addr + 4) & ~3
         return pc + disp
 
     _BRANCH_MNEMONICS = frozenset((
@@ -1691,8 +1755,8 @@ Format = "`f|u8`[u8 arg0]"
                 return addr - GBA_ROM_BASE
         return None
 
-    def _get_ldr_pc_comment(self, insn: object, mode: int) -> Optional[str]:
-        """If insn is LDR/LDRB/LDRH with [pc, #imm], return target address and value: @ #0x08055040 = #0x02036DFC"""
+    def _get_ldr_pc_comment(self, insn: object, mode: int, hackmew: bool = False) -> Optional[str]:
+        """If insn is LDR/LDRB/LDRH with [pc, #imm], return comment. Standard: @ <loc_X> = #val. HackMew: @ #offset = #val."""
         target_addr = self._get_ldr_pc_target_addr(insn, mode)
         if target_addr is None:
             return None
@@ -1703,7 +1767,14 @@ Format = "`f|u8`[u8 arg0]"
         if file_off + n > len(self._data):
             return None
         val = sum(self._data[file_off + i] << (i * 8) for i in range(n))
-        return f"#0x{target_addr:08X} = #0x{val:0{n * 2}X}"
+        if hackmew:
+            if mode == CS_MODE_THUMB:
+                pc_val = (insn.address + 4) & ~3
+            else:
+                pc_val = insn.address + 8
+            offset = target_addr - pc_val
+            return f"#0x{offset & 0xFFFFFFFF:x} = #0x{val:0{n * 2}X}"
+        return f"<loc_{target_addr:08X}> = #0x{val:0{n * 2}X}"
 
     def _is_ldr_word_pool(self, file_off: int, ldr_targets: Set[int]) -> bool:
         """True if file_off is an LDR [pc] target and the 4-byte value is a ROM pointer (<=0x09FFFFFF)."""
@@ -1786,8 +1857,12 @@ Format = "`f|u8`[u8 arg0]"
         branch_targets = self._collect_branch_targets(
             start, end, mode, insn_map, ldr_targets
         )
+        label_offsets = branch_targets | {
+            fo for fo in ldr_targets
+            if start <= fo < end and self._is_ldr_word_pool(fo, ldr_targets)
+        }
         target_to_label: Dict[int, str] = {
-            fo: f"loc_{GBA_ROM_BASE + fo:08X}" for fo in branch_targets
+            fo: f"loc_{GBA_ROM_BASE + fo:08X}" for fo in label_offsets
         }
 
         def replace_addrs_with_labels(text: str) -> str:
@@ -1811,10 +1886,11 @@ Format = "`f|u8`[u8 arg0]"
                 b2 = self._data[file_off + 2] if file_off + 2 < len(self._data) else 0
                 b3 = self._data[file_off + 3] if file_off + 3 < len(self._data) else 0
                 val = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-                line = f".word #0x{val:08X}"
-                line = replace_addrs_with_labels(line)
                 if hackmew:
-                    line = line.replace("#", "")
+                    line = f".word 0x{val:X}"
+                else:
+                    line = f".word #0x{val:08X}"
+                line = replace_addrs_with_labels(line)
                 output.append(line)
                 offset += 4
             elif file_off in insn_map:
@@ -1830,12 +1906,23 @@ Format = "`f|u8`[u8 arg0]"
                     continue
                 mnemonic, op_str = insn.mnemonic, insn.op_str
                 operands = f" {op_str}" if op_str else ""
-                comment = self._get_ldr_pc_comment(insn, mode)
+                comment = self._get_ldr_pc_comment(insn, mode, hackmew=hackmew)
                 if comment:
                     operands += f"  @ {comment}"
                 line = f"{mnemonic}{operands}"
                 line = replace_addrs_with_labels(line)
                 if hackmew:
+                    ldr_target = self._get_ldr_pc_target_addr(insn, mode)
+                    if ldr_target is not None:
+                        fo = ldr_target - GBA_ROM_BASE
+                        label = target_to_label.get(fo)
+                        if label and "[" in op_str and "pc" in op_str.lower():
+                            line = re.sub(
+                                r"\[\s*pc\s*,\s*#?0x[0-9A-Fa-f]+\s*\]",
+                                f"[pc, <{label}>]",
+                                line,
+                                count=1,
+                            )
                     line = re.sub(r"\badds\b", "add", line)
                     line = re.sub(r"\bsubs\b", "sub", line)
                     line = re.sub(r"\blsls\b", "lsl", line)
@@ -1859,7 +1946,11 @@ Format = "`f|u8`[u8 arg0]"
                     b1 = self._data[offset + 1] if offset + 1 < len(self._data) else 0
                     b2 = self._data[offset + 2] if offset + 2 < len(self._data) else 0
                     b3 = self._data[offset + 3] if offset + 3 < len(self._data) else 0
-                    line = f".word 0x{b3:02x}{b2:02x}{b1:02x}{b0:02x}"
+                    val = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+                    if hackmew:
+                        line = f".word 0x{val:X}"
+                    else:
+                        line = f".word #0x{val:08X}"
                 output.append(line)
                 offset += align
         return output
