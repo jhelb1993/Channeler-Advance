@@ -334,6 +334,15 @@ class HexEditorFrame(ttk.Frame):
         _bind_pseudo_c_toggle(outer)
         self.winfo_toplevel().bind("<Control-b>", self._toggle_pseudo_c_pane, add=True)
         self.winfo_toplevel().bind("<Control-B>", self._toggle_pseudo_c_pane, add=True)
+        for w in (
+            self._text, self._text_ascii, self._goto_entry, self._encoding_combo,
+            self._asm_mode_combo, self._asm_frame, self._text_asm,
+            self._pseudo_c_frame, self._text_pseudo_c, outer,
+        ):
+            w.bind("<Control-g>", self._focus_goto_entry)
+            w.bind("<Control-G>", self._focus_goto_entry)
+        self.winfo_toplevel().bind("<Control-g>", self._focus_goto_entry, add=True)
+        self.winfo_toplevel().bind("<Control-G>", self._focus_goto_entry, add=True)
 
         self._text.bind("<Control-Shift-A>", lambda e: self._select_all())
         self._text_ascii.bind("<Control-Shift-A>", lambda e: self._select_all())
@@ -368,6 +377,12 @@ class HexEditorFrame(ttk.Frame):
 
         self._text.bind("<KeyPress>", self._prevent_unwanted, add=True)
 
+    def _focus_goto_entry(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Focus the Goto (offset) entry box. Bound to Ctrl+G."""
+        self._goto_entry.focus_set()
+        self._goto_entry.select_range(0, tk.END)
+        return "break"
+
     def _toggle_asm_pane(self, event: Optional[tk.Event] = None) -> Optional[str]:
         """Toggle ASM disassembly pane visibility. Bound to Ctrl+A.
         When opening, uses highlighted bytes if any."""
@@ -379,6 +394,7 @@ class HexEditorFrame(ttk.Frame):
             self._refresh_asm_selection()
         else:
             self._asm_frame.grid_remove()
+        self.after_idle(self._refresh_visible)
         return "break"
 
     def _toggle_pseudo_c_pane(self, event: Optional[tk.Event] = None) -> Optional[str]:
@@ -391,6 +407,7 @@ class HexEditorFrame(ttk.Frame):
             self._refresh_pseudo_c_selection()
         else:
             self._pseudo_c_frame.grid_remove()
+        self.after_idle(self._refresh_visible)
         return "break"
 
     def _on_asm_mode_change(self, event: Optional[tk.Event] = None) -> None:
@@ -429,11 +446,13 @@ class HexEditorFrame(ttk.Frame):
             pass
 
     def _do_goto(self, offset: int) -> None:
-        """Jump to offset in hex editor. Puts target row at the very top of the view."""
+        """Jump to offset in hex editor. Puts target row at the very top of the view.
+        Sets selection anchor so Shift+click extends from this offset."""
         if not self._data or offset < 0 or offset >= len(self._data):
             return
         self._cursor_byte_offset = offset
-        self._selection_start = self._selection_end = None
+        self._selection_start = offset
+        self._selection_end = offset
         cr = offset // BYTES_PER_ROW
         max_start = max(0, self._total_rows - self._visible_row_count)
         self._visible_row_start = min(cr, max_start)
@@ -706,6 +725,19 @@ Format = "`f|u8`[u8 arg0]"
                 break
         return ""
 
+    def _indent_function_body(self, text: str, spaces: int = 4) -> str:
+        """Indent function body lines. Opening { and closing } stay at column 0."""
+        indent = " " * spaces
+        lines = text.splitlines()
+        result: List[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped in ("{", "}"):
+                result.append(stripped)
+            else:
+                result.append(indent + stripped)
+        return "\n".join(result)
+
     def _format_struct_from_toml(self, struct_def: Dict[str, Any], constants: Dict[str, int]) -> Optional[str]:
         """Convert Struct Format to C struct definition. Format: `s`{field|type}..."""
         fmt = struct_def.get("Format", "")
@@ -760,6 +792,47 @@ Format = "`f|u8`[u8 arg0]"
         for i, name in enumerate(param_names):
             angr_param = f"a{i}"
             result = re.sub(r"\b" + re.escape(angr_param) + r"\b", name, result)
+        return result
+
+    def _rewrite_param_aliases(self, text: str, param_names: List[str]) -> str:
+        """Replace 'var = param;' aliases: substitute var with param, remove the assignment and declaration.
+        Only when var is assigned exactly once from a param (no reassignments)."""
+        if not param_names:
+            return text
+        param_set = set(param_names)
+        lines = text.splitlines()
+        alias_map: Dict[str, str] = {}  # var -> param
+        for i, line in enumerate(lines):
+            m = re.match(r"^\s*(\w+)\s*=\s*(\w+)\s*;\s*(?://.*)?$", line.strip())
+            if not m:
+                continue
+            var, rhs = m.group(1), m.group(2)
+            if rhs not in param_set:
+                continue
+            assigns_to_var = [
+                j for j, ln in enumerate(lines)
+                if re.search(r"\b" + re.escape(var) + r"\s*=", ln)
+            ]
+            if len(assigns_to_var) == 1:
+                alias_map[var] = rhs
+        if not alias_map:
+            return text
+        result = text
+        for var, param in alias_map.items():
+            result = re.sub(
+                r"^\s*" + re.escape(var) + r"\s*=\s*" + re.escape(param) + r"\s*;\s*(?://.*)?\s*\n?",
+                "",
+                result,
+                flags=re.MULTILINE,
+            )
+            result = re.sub(
+                r"^\s*[^=\n]*\b" + re.escape(var) + r"\s*;\s*(?://.*)?\s*\n?",
+                "",
+                result,
+                flags=re.MULTILINE,
+            )
+        for var, param in alias_map.items():
+            result = re.sub(r"\b" + re.escape(var) + r"\b", param, result)
         return result
 
     def _get_struct_defs_from_anchor(self, anchor: Dict[str, Any], constants: Dict[str, int]) -> List[str]:
@@ -835,7 +908,7 @@ Format = "`f|u8`[u8 arg0]"
     def _rewrite_struct_offsets_to_fields(
         self, text: str, param_names: List[str], anchor: Dict[str, Any], constants: Dict[str, int]
     ) -> str:
-        """Replace (param + offset) with (&param->field) based on struct layout."""
+        """Replace (param + offset) with (&param->field) and param->field_N with param->field based on struct layout."""
         if not self._toml_data or not param_names:
             return text
         fmt = anchor.get("Format", "")
@@ -858,6 +931,22 @@ Format = "`f|u8`[u8 arg0]"
                 result = re.sub(
                     r"\(" + esc_param + r"\s*\+\s*" + str(off) + r"\s*\)",
                     f"(&{param_name}->{field})",
+                    result,
+                )
+            for off in sorted(offset_map.keys(), reverse=True):
+                field = offset_map[off]
+                esc_param = re.escape(param_name)
+                result = re.sub(
+                    r"\b" + esc_param + r"\s*->\s*field_" + str(off) + r"\b",
+                    f"{param_name}->{field}",
+                    result,
+                )
+            for off in sorted(offset_map.keys(), reverse=True):
+                field = offset_map[off]
+                esc_param = re.escape(param_name)
+                result = re.sub(
+                    r"\b" + esc_param + r"\s*->\s*field_0x" + hex(off)[2:].lower() + r"\b",
+                    f"{param_name}->{field}",
                     result,
                 )
         result = re.sub(
@@ -1203,9 +1292,11 @@ Format = "`f|u8`[u8 arg0]"
                             body = self._rewrite_angr_struct_refs(body, struct_names)
                             param_names = self._get_param_names_from_anchor(anchor)
                             body = self._rewrite_angr_param_refs(body, param_names)
+                            body = self._rewrite_param_aliases(body, param_names)
                             body = self._rewrite_struct_offsets_to_fields(body, param_names, anchor, constants)
                             body = self._remove_unused_assignments(body)
                             body = self._rewrite_decimal_addresses_to_hex(body)
+                            body = self._indent_function_body(body)
                             repl.append(body)
                         out_lines.extend(repl)
                     else:
@@ -1473,15 +1564,18 @@ Format = "`f|u8`[u8 arg0]"
             cn = int(col)
         except (ValueError, TypeError):
             return None
-        if ln < 1:
+        if ln < 1 or not self._data:
             return None
         fr = self._visible_row_start + (ln - 1)
         if cn < 10:
-            return fr * BYTES_PER_ROW
-        bc = (cn - 10) // 3
-        if bc >= BYTES_PER_ROW:
-            return fr * BYTES_PER_ROW + BYTES_PER_ROW - 1
-        return fr * BYTES_PER_ROW + bc
+            off = fr * BYTES_PER_ROW
+        else:
+            bc = (cn - 10) // 3
+            if bc >= BYTES_PER_ROW:
+                off = fr * BYTES_PER_ROW + BYTES_PER_ROW - 1
+            else:
+                off = fr * BYTES_PER_ROW + bc
+        return max(0, min(off, len(self._data) - 1))
 
     def _ascii_index_to_offset(self, index: str) -> Optional[int]:
         """Map ASCII widget index to byte offset. Format: |..16 chars..| per line."""
@@ -1491,14 +1585,16 @@ Format = "`f|u8`[u8 arg0]"
             cn = int(col)
         except (ValueError, TypeError):
             return None
-        if ln < 1:
+        if ln < 1 or not self._data:
             return None
         fr = self._visible_row_start + (ln - 1)
         if cn < 1:
-            return fr * BYTES_PER_ROW
-        if cn > BYTES_PER_ROW:
-            return fr * BYTES_PER_ROW + BYTES_PER_ROW - 1
-        return fr * BYTES_PER_ROW + (cn - 1)
+            off = fr * BYTES_PER_ROW
+        elif cn > BYTES_PER_ROW:
+            off = fr * BYTES_PER_ROW + BYTES_PER_ROW - 1
+        else:
+            off = fr * BYTES_PER_ROW + (cn - 1)
+        return max(0, min(off, len(self._data) - 1))
 
     def _ensure_cursor_visible(self) -> bool:
         if not self._data:
@@ -1536,13 +1632,22 @@ Format = "`f|u8`[u8 arg0]"
             e = max(self._selection_start, self._selection_end)
             count = e - s + 1
             self._selection_label.config(text=f"{count} bytes (0x{count:X})")
-            for off in range(s, e + 1):
-                ix = self._offset_to_index(off)
-                if ix:
-                    self._text.tag_add("sel_hex", ix, f"{ix}+2c")
-                aix = self._offset_to_ascii_index(off)
-                if aix:
-                    self._text_ascii.tag_add("sel_ascii", aix, f"{aix}+1c")
+            vis_start = self._visible_row_start * BYTES_PER_ROW
+            vis_end = min(
+                (self._visible_row_start + self._visible_row_count) * BYTES_PER_ROW,
+                len(self._data),
+            )
+            first_vis = max(s, vis_start)
+            last_vis = min(e, vis_end - 1) if vis_end > 0 else e
+            if first_vis <= last_vis:
+                start_ix = self._offset_to_index(first_vis)
+                end_ix = self._offset_to_index(last_vis)
+                if start_ix and end_ix:
+                    self._text.tag_add("sel_hex", start_ix, f"{end_ix}+2c")
+                start_aix = self._offset_to_ascii_index(first_vis)
+                end_aix = self._offset_to_ascii_index(last_vis)
+                if start_aix and end_aix:
+                    self._text_ascii.tag_add("sel_ascii", start_aix, f"{end_aix}+1c")
         else:
             self._selection_label.config(text="")
 
@@ -1555,8 +1660,17 @@ Format = "`f|u8`[u8 arg0]"
         off = self._index_to_offset(idx)
         if off is not None:
             self._cursor_byte_offset = off
-            self._selection_start = None
-            self._selection_end = None
+            if event.state & 0x1:  # Shift held - extend selection
+                if self._selection_start is not None and self._selection_end is not None:
+                    s, e = self._selection_start, self._selection_end
+                    self._selection_start = min(s, e, off)
+                    self._selection_end = max(s, e, off)
+                else:
+                    self._selection_start = off
+                    self._selection_end = off
+            else:
+                self._selection_start = None
+                self._selection_end = None
             self._nibble_pos = 0
             self._update_cursor_display()
         return "break"
@@ -1566,25 +1680,22 @@ Format = "`f|u8`[u8 arg0]"
             return "break"
         h = self._text.winfo_height()
         margin = 24
-        off = None
         if event.y < margin and self._visible_row_start > 0:
             step = max(1, (margin - event.y) // 8)
             self._visible_row_start = max(0, self._visible_row_start - step)
-            off = self._visible_row_start * BYTES_PER_ROW
             self._refresh_visible()
             self._update_scrollbar()
-        elif event.y > h - margin:
+            return "break"
+        if event.y > h - margin:
             max_start = max(0, self._total_rows - self._visible_row_count)
             if self._visible_row_start < max_start:
                 step = max(1, (event.y - (h - margin)) // 8)
                 self._visible_row_start = min(max_start, self._visible_row_start + step)
-                off = min(len(self._data) - 1,
-                         (self._visible_row_start + self._visible_row_count - 1) * BYTES_PER_ROW + BYTES_PER_ROW - 1)
                 self._refresh_visible()
                 self._update_scrollbar()
-        if off is None:
-            idx = self._text.index(f"@{event.x},{event.y}")
-            off = self._index_to_offset(idx)
+                return "break"
+        idx = self._text.index(f"@{event.x},{event.y}")
+        off = self._index_to_offset(idx)
         if off is not None:
             if self._selection_start is None:
                 self._selection_start = self._cursor_byte_offset
@@ -1598,8 +1709,17 @@ Format = "`f|u8`[u8 arg0]"
         off = self._ascii_index_to_offset(idx)
         if off is not None:
             self._cursor_byte_offset = off
-            self._selection_start = None
-            self._selection_end = None
+            if event.state & 0x1:  # Shift held - extend selection
+                if self._selection_start is not None and self._selection_end is not None:
+                    s, e = self._selection_start, self._selection_end
+                    self._selection_start = min(s, e, off)
+                    self._selection_end = max(s, e, off)
+                else:
+                    self._selection_start = off
+                    self._selection_end = off
+            else:
+                self._selection_start = None
+                self._selection_end = None
             self._nibble_pos = 0
             self._update_cursor_display()
         return "break"
@@ -1609,25 +1729,22 @@ Format = "`f|u8`[u8 arg0]"
             return "break"
         h = self._text_ascii.winfo_height()
         margin = 24
-        off = None
         if event.y < margin and self._visible_row_start > 0:
             step = max(1, (margin - event.y) // 8)
             self._visible_row_start = max(0, self._visible_row_start - step)
-            off = self._visible_row_start * BYTES_PER_ROW
             self._refresh_visible()
             self._update_scrollbar()
-        elif event.y > h - margin:
+            return "break"
+        if event.y > h - margin:
             max_start = max(0, self._total_rows - self._visible_row_count)
             if self._visible_row_start < max_start:
                 step = max(1, (event.y - (h - margin)) // 8)
                 self._visible_row_start = min(max_start, self._visible_row_start + step)
-                off = min(len(self._data) - 1,
-                         (self._visible_row_start + self._visible_row_count - 1) * BYTES_PER_ROW + BYTES_PER_ROW - 1)
                 self._refresh_visible()
                 self._update_scrollbar()
-        if off is None:
-            idx = self._text_ascii.index(f"@{event.x},{event.y}")
-            off = self._ascii_index_to_offset(idx)
+                return "break"
+        idx = self._text_ascii.index(f"@{event.x},{event.y}")
+        off = self._ascii_index_to_offset(idx)
         if off is not None:
             if self._selection_start is None:
                 self._selection_start = self._cursor_byte_offset
@@ -1635,12 +1752,63 @@ Format = "`f|u8`[u8 arg0]"
             self._update_cursor_display()
         return "break"
 
+    def _find_function_extent(self, offset: int) -> Optional[Tuple[int, int]]:
+        """From a byte offset (assumed function start), find extent: (start, end_inclusive).
+        End is the byte after the bx instruction plus any tailing LDR pool words used in the function.
+        Returns None if Capstone unavailable or no bx found."""
+        if not self._data or not _CAPSTONE_AVAILABLE:
+            return None
+        align = 2 if self._asm_mode == "thumb" else 4
+        start = (offset // align) * align
+        if start >= len(self._data):
+            return None
+        mode = CS_MODE_THUMB if self._asm_mode == "thumb" else CS_MODE_ARM
+        ldr_targets = self._get_ldr_pc_targets(mode)
+        cs = Cs(CS_ARCH_ARM, mode)
+        cs.detail = True
+        bx_end: Optional[int] = None
+        ldr_file_offsets: List[int] = []
+        try:
+            chunk = bytes(self._data[start : min(start + 0x2000, len(self._data))])
+            for i in cs.disasm(chunk, GBA_ROM_BASE + start):
+                file_off = i.address - GBA_ROM_BASE
+                if file_off in ldr_targets:
+                    continue
+                if i.mnemonic == "bx":
+                    bx_end = file_off + len(i.bytes)
+                    break
+                target = self._get_ldr_pc_target_addr(i, mode)
+                if target is not None:
+                    fo = target - GBA_ROM_BASE
+                    if 0 <= fo < len(self._data):
+                        ldr_file_offsets.append(fo)
+        except Exception:
+            return None
+        if bx_end is None:
+            return None
+        end = bx_end - 1
+        for fo in ldr_file_offsets:
+            if fo >= bx_end:
+                end = max(end, fo + 3)
+        return (start, end)
+
     def _on_double_click(self, event: tk.Event) -> None:
         idx = self._text.index(f"@{event.x},{event.y}")
         off = self._index_to_offset(idx)
         if off is not None:
             ptr_start = (off // 4) * 4
             if self._follow_pointer_at(ptr_start):
+                return
+            extent = self._find_function_extent(off)
+            if extent is not None:
+                func_start, func_end = extent
+                self._selection_start = func_start
+                self._selection_end = func_end
+                self._cursor_byte_offset = func_start
+                if self._ensure_cursor_visible():
+                    self._update_scrollbar()
+                self._refresh_visible()
+                self._update_cursor_display()
                 return
         self._on_click(event)
 
