@@ -37,6 +37,7 @@ except ImportError:
     pass
 
 GBA_ROM_BASE = 0x08000000
+GBA_ROM_MAX = 0x09FFFFFF  # addresses > this are not ROM code pointers; treat as code, not .word
 BYTES_PER_ROW = 16
 HEX_DIGITS = "0123456789ABCDEFabcdef"
 
@@ -146,6 +147,9 @@ class HexEditorFrame(ttk.Frame):
         self._encoding = default_encoding if default_encoding in ("ascii", "pcs") else "ascii"
         self._asm_mode = "thumb"  # thumb | arm for GBA ARM7TDMI
         self._asm_pane_visible = False
+        self._hackmew_mode = False
+        self._hackmew_asm_start: Optional[int] = None
+        self._hackmew_asm_end: Optional[int] = None
         self._pseudo_c_pane_visible = False
         self._ldr_pc_targets: Optional[Set[int]] = None
         self._ldr_pc_targets_valid = False
@@ -341,8 +345,16 @@ class HexEditorFrame(ttk.Frame):
         ):
             w.bind("<Control-g>", self._focus_goto_entry)
             w.bind("<Control-G>", self._focus_goto_entry)
+            w.bind("<Control-d>", self._toggle_hackmew_mode)
+            w.bind("<Control-D>", self._toggle_hackmew_mode)
+            w.bind("<Control-e>", self._compile_hackmew_asm)
+            w.bind("<Control-E>", self._compile_hackmew_asm)
         self.winfo_toplevel().bind("<Control-g>", self._focus_goto_entry, add=True)
         self.winfo_toplevel().bind("<Control-G>", self._focus_goto_entry, add=True)
+        self.winfo_toplevel().bind("<Control-d>", self._toggle_hackmew_mode, add=True)
+        self.winfo_toplevel().bind("<Control-D>", self._toggle_hackmew_mode, add=True)
+        self.winfo_toplevel().bind("<Control-e>", self._compile_hackmew_asm, add=True)
+        self.winfo_toplevel().bind("<Control-E>", self._compile_hackmew_asm, add=True)
 
         self._text.bind("<Control-Shift-A>", lambda e: self._select_all())
         self._text_ascii.bind("<Control-Shift-A>", lambda e: self._select_all())
@@ -391,10 +403,98 @@ class HexEditorFrame(ttk.Frame):
         self._asm_pane_visible = not self._asm_pane_visible
         if self._asm_pane_visible:
             self._asm_frame.grid(row=1, column=3, sticky="nsew", padx=(4, 0))
-            self._refresh_asm_selection()
+            if self._hackmew_mode:
+                self._refresh_asm_hackmew()
+            else:
+                self._refresh_asm_selection()
         else:
+            if self._hackmew_mode:
+                self._hackmew_mode = False
+                self._asm_frame.configure(text=" Disassembly ")
             self._asm_frame.grid_remove()
         self.after_idle(self._refresh_visible)
+        return "break"
+
+    def _toggle_hackmew_mode(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Toggle between standard ASM display and editable HackMew ASM. Bound to Ctrl+D."""
+        if not self._asm_pane_visible:
+            return "break"
+        self._hackmew_mode = not self._hackmew_mode
+        if self._hackmew_mode:
+            self._asm_frame.configure(text=" HackMew ASM (editable) ")
+            self._refresh_asm_hackmew()
+        else:
+            self._asm_frame.configure(text=" Disassembly ")
+            self._refresh_asm_selection()
+        return "break"
+
+    def _compile_hackmew_asm(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Compile edited HackMew ASM via deps/thumb.bat and insert .bin into ROM. Bound to Ctrl+E."""
+        if not self._hackmew_mode or not self._asm_pane_visible:
+            return "break"
+        if self._hackmew_asm_start is None or self._hackmew_asm_end is None:
+            messagebox.showerror("Compile Error", "No ASM region defined.")
+            return "break"
+        asm_text = self._text_asm.get("1.0", tk.END).strip()
+        if not asm_text:
+            messagebox.showerror("Compile Error", "ASM pane is empty.")
+            return "break"
+
+        original_size = self._hackmew_asm_end - self._hackmew_asm_start
+
+        deps_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "deps")
+        thumb_bat = os.path.join(deps_dir, "thumb.bat")
+        if not os.path.isfile(thumb_bat):
+            messagebox.showerror("Compile Error", f"thumb.bat not found at:\n{thumb_bat}")
+            return "break"
+
+        import tempfile
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmpdir:
+            asm_path = os.path.join(tmpdir, "edit.asm")
+            bin_path = os.path.join(tmpdir, "edit.bin")
+            with open(asm_path, "w", encoding="utf-8") as f:
+                f.write(asm_text + "\n")
+
+            result = subprocess.run(
+                [thumb_bat, asm_path, bin_path],
+                cwd=deps_dir,
+                capture_output=True,
+                text=True,
+                shell=True,
+            )
+            if result.returncode != 0 or not os.path.isfile(bin_path):
+                err = (result.stdout + "\n" + result.stderr).strip()
+                messagebox.showerror("Compile Error", f"Assembly failed:\n{err}")
+                return "break"
+
+            with open(bin_path, "rb") as f:
+                compiled = f.read()
+
+        if len(compiled) > original_size:
+            messagebox.showerror(
+                "Compile Error",
+                f"Compiled binary ({len(compiled)} bytes) exceeds "
+                f"original routine space ({original_size} bytes).",
+            )
+            return "break"
+
+        start = self._hackmew_asm_start
+        for i, b in enumerate(compiled):
+            self._data[start + i] = b
+        for i in range(len(compiled), original_size):
+            self._data[start + i] = 0xFF
+        self._modified = True
+        self._ldr_pc_targets_valid = False
+        self._hackmew_mode = False
+        self._asm_frame.configure(text=" Disassembly ")
+        self._refresh_asm_selection()
+        self._refresh_visible()
+        messagebox.showinfo(
+            "Compile Success",
+            f"Inserted {len(compiled)} bytes at 0x{start:08X} "
+            f"({original_size - len(compiled)} bytes remaining).",
+        )
         return "break"
 
     def _toggle_pseudo_c_pane(self, event: Optional[tk.Event] = None) -> Optional[str]:
@@ -1111,6 +1211,10 @@ Format = "`f|u8`[u8 arg0]"
             if self._pseudo_c_pane_visible:
                 self._refresh_pseudo_c_selection()
             return
+        if self._hackmew_mode:
+            if self._pseudo_c_pane_visible:
+                self._refresh_pseudo_c_selection()
+            return
         self._text_asm.configure(state=tk.NORMAL)
         self._text_asm.delete("1.0", tk.END)
         if not self._data or not _CAPSTONE_AVAILABLE:
@@ -1142,8 +1246,7 @@ Format = "`f|u8`[u8 arg0]"
         try:
             for i in cs.disasm(chunk, base):
                 file_off = i.address - GBA_ROM_BASE
-                if file_off not in ldr_targets:
-                    insn_map[file_off] = i
+                insn_map[file_off] = i
         except Exception:
             pass
         branch_targets = self._collect_branch_targets(
@@ -1168,7 +1271,7 @@ Format = "`f|u8`[u8 arg0]"
                 lines.append("\n")
             if file_off in target_to_label:
                 lines.append(f"{target_to_label[file_off]}:\n")
-            if file_off in ldr_targets:
+            if file_off in ldr_targets and self._is_ldr_word_pool(file_off, ldr_targets):
                 b0 = self._data[file_off]
                 b1 = self._data[file_off + 1] if file_off + 1 < len(self._data) else 0
                 b2 = self._data[file_off + 2] if file_off + 2 < len(self._data) else 0
@@ -1183,7 +1286,10 @@ Format = "`f|u8`[u8 arg0]"
                 insn = insn_map[file_off]
                 raw = insn.bytes
                 insn_end = file_off + len(raw)
-                overlaps_target = any(t in ldr_targets for t in range(file_off + 1, insn_end))
+                overlaps_target = any(
+                    self._is_ldr_word_pool(t, ldr_targets)
+                    for t in range(file_off + 1, insn_end)
+                )
                 if overlaps_target:
                     offset += align
                     continue
@@ -1212,6 +1318,35 @@ Format = "`f|u8`[u8 arg0]"
                 offset += align
         self._text_asm.insert("1.0", "".join(lines) if lines else "(No instructions)")
         self._text_asm.configure(state=tk.DISABLED)
+        if self._pseudo_c_pane_visible:
+            self._refresh_pseudo_c_selection()
+
+    def _refresh_asm_hackmew(self) -> None:
+        """Show editable HackMew-style ASM in the ASM pane. Records region for Ctrl+E compile."""
+        self._text_asm.configure(state=tk.NORMAL)
+        self._text_asm.delete("1.0", tk.END)
+        if not self._data or not _CAPSTONE_AVAILABLE:
+            self._text_asm.insert(tk.END, "(No data or Capstone not available)")
+            return
+        lines = self._build_asm_export_lines_with_labels(hackmew=True)
+        if not lines:
+            self._text_asm.insert(tk.END, "(No instructions)")
+            return
+        mode = CS_MODE_THUMB if self._asm_mode == "thumb" else CS_MODE_ARM
+        align = 2 if self._asm_mode == "thumb" else 4
+        if self._selection_start is not None and self._selection_end is not None:
+            start = min(self._selection_start, self._selection_end)
+            end = max(self._selection_start, self._selection_end) + 1
+            start = (start // align) * align
+        else:
+            vis_start = self._visible_row_start * BYTES_PER_ROW
+            vis_end = min(vis_start + self._visible_row_count * BYTES_PER_ROW, len(self._data))
+            start = (vis_start // align) * align
+            end = vis_end
+        end = min(end, len(self._data))
+        self._hackmew_asm_start = start
+        self._hackmew_asm_end = end
+        self._text_asm.insert("1.0", "\n".join(lines))
         if self._pseudo_c_pane_visible:
             self._refresh_pseudo_c_selection()
 
@@ -1382,7 +1517,7 @@ Format = "`f|u8`[u8 arg0]"
         try:
             for i in cs.disasm(chunk, base):
                 file_off = i.address - GBA_ROM_BASE
-                if file_off in ldr_targets:
+                if self._is_ldr_word_pool(file_off, ldr_targets):
                     continue
                 if file_off >= end:
                     break
@@ -1570,6 +1705,18 @@ Format = "`f|u8`[u8 arg0]"
         val = sum(self._data[file_off + i] << (i * 8) for i in range(n))
         return f"#0x{target_addr:08X} = #0x{val:0{n * 2}X}"
 
+    def _is_ldr_word_pool(self, file_off: int, ldr_targets: Set[int]) -> bool:
+        """True if file_off is an LDR [pc] target and the 4-byte value is a ROM pointer (<=0x09FFFFFF)."""
+        if file_off not in ldr_targets or file_off + 4 > len(self._data):
+            return False
+        val = (
+            self._data[file_off]
+            | (self._data[file_off + 1] << 8)
+            | (self._data[file_off + 2] << 16)
+            | (self._data[file_off + 3] << 24)
+        )
+        return val <= GBA_ROM_MAX
+
     def _collect_branch_targets(
         self,
         start: int,
@@ -1632,8 +1779,7 @@ Format = "`f|u8`[u8 arg0]"
         try:
             for i in cs.disasm(chunk, base):
                 file_off = i.address - GBA_ROM_BASE
-                if file_off not in ldr_targets:
-                    insn_map[file_off] = i
+                insn_map[file_off] = i
         except Exception:
             pass
 
@@ -1659,7 +1805,7 @@ Format = "`f|u8`[u8 arg0]"
                 if output:
                     output.append("")
                 output.append(f"{target_to_label[file_off]}:")
-            if file_off in ldr_targets:
+            if file_off in ldr_targets and self._is_ldr_word_pool(file_off, ldr_targets):
                 b0 = self._data[file_off]
                 b1 = self._data[file_off + 1] if file_off + 1 < len(self._data) else 0
                 b2 = self._data[file_off + 2] if file_off + 2 < len(self._data) else 0
@@ -1675,7 +1821,10 @@ Format = "`f|u8`[u8 arg0]"
                 insn = insn_map[file_off]
                 raw = insn.bytes
                 insn_end = file_off + len(raw)
-                overlaps_target = any(t in ldr_targets for t in range(file_off + 1, insn_end))
+                overlaps_target = any(
+                    self._is_ldr_word_pool(t, ldr_targets)
+                    for t in range(file_off + 1, insn_end)
+                )
                 if overlaps_target:
                     offset += align
                     continue
@@ -1994,7 +2143,7 @@ Format = "`f|u8`[u8 arg0]"
             chunk = bytes(self._data[start : min(start + 0x2000, len(self._data))])
             for i in cs.disasm(chunk, GBA_ROM_BASE + start):
                 file_off = i.address - GBA_ROM_BASE
-                if file_off in ldr_targets:
+                if self._is_ldr_word_pool(file_off, ldr_targets):
                     continue
                 if i.mnemonic == "bx":
                     bx_end = file_off + len(i.bytes)
