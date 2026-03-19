@@ -7,6 +7,16 @@ ShowRawIVByteForTrainer = false
 
 #################################
 [[NamedAnchors]]
+Name = '''graphics.cards.sprites'''
+Address = 0x510640
+Format = '''[ucs6x10x10|graphics.cards.palettes]cardgraphicsindexes'''
+
+[[NamedAnchors]]
+Name = '''graphics.cards.palettes'''
+Address = 0x4C76C0
+Format = '''[ucp8:0123]cardgraphicsindexes'''
+
+[[NamedAnchors]]
 Name = '''data.decks.offsets1'''
 Address = 0x1E63BEC
 Format = '''[offset<[card:cardnames]!0000>]deckinfo'''
@@ -41985,7 +41995,7 @@ DefaultHash = '''8CD64858'''
 [[NamedAnchors]]
 Name = '''data.cards.art'''
 Address = 0x15B5C00
-Format = '''[unknown:cardgraphicsindexes art:cardgraphicsindexes]cardnames2'''
+Format = '''[unknown:cardgraphicsindexes+1 art:cardgraphicsindexes+1]cardnames2'''
 DefaultHash = '''E48E8BB4'''
 
 [[NamedAnchors]]
@@ -65302,6 +65312,7 @@ DefaultHash = '''0A27C990'''
 Name = '''cardgraphicsindexes'''
 DefaultHash = '''7EF3B921'''
 0 = [
+   '''None''',
    '''Blue-Eyes White Dragon''',
    '''Blue-Eyes White Dragon''',
    '''Blue-Eyes White Dragon''',

@@ -274,6 +274,9 @@ Name = '''pocketid'''
    '''berry''',
 ]
 
+# Struct uint fields: ``name:listname`` or ``name:listname+3`` / ``name:pcs.table-1`` — optional trailing signed
+# integer shifts the index used for [[List]] / PCS labels (ROM stores idx; label row is idx + offset).
+
 # ── Graphics NamedAnchors (FireRed Tools → Graphics slot; decode = Python + Pillow, pret gfx.c–compatible) ──
 # Whole-anchor Format (no `[`…`]` struct wrapper). You may wrap the value in backticks in TOML, e.g.
 #   Format = '''`ucs4x8x8|graphics.items.fossils.palette1`'''
@@ -286,5 +289,12 @@ Name = '''pocketid'''
 #                   (when used as the palette for a 4bpp sprite, only the first 32 bytes are used for decode)
 #   ucs4xWxH      — uncompressed 4bpp sprite, W×H in 8×8 tiles
 #   ucs4xWxH|name — same, using palette from another graphics NamedAnchor (palette format)
+#   ucs6xWxH      — 6bpp packed tiles (48 bytes/tile): 3 bytes → 4×6-bit indices per row half; decode expands to 8bpp indices 0–63 (see sprite.c / YGO-style unpack). Prefer ucp8 palette (64 colors = 128 bytes).
+#   lzs6xWxH      — LZ77-compressed 6bpp sprite (same tile layout after decompress)
 #   lzs4xWxH      — LZ77-compressed 4bpp sprite (ucs8xWxH / lzs8xWxH for 8bpp tiles)
+#   [rowSpec]count — table of identical rows: rowSpec is any palette/sprite format above; count is a PCS table name,
+#                    [[List]] name (e.g. cardgraphicsindexes), or other count ref like struct formats. Tools → Graphics
+#                    shows a “Table row” spinbox; sprite+palette tables use the same row index for both. LZ-compressed
+#                    rows in tables are not supported (uc* only).
+#   ucp8:HEX+     — one hex digit: digit×32 bytes (unchanged). Multiple digits (e.g. ucp8:0123): len×32 bytes contiguous.
 # Struct field: sprite<`lzs4x2x6|graphics.items.ball.palettes`> — pointer + tile spec + optional palette anchor name.

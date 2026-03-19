@@ -21,9 +21,13 @@ from editors.common.gba_graphics import (
     decode_gba_palette32_to_rgb888,
     extract_palette_bytes,
     get_palette_4_slot_bytes,
+    palette_bytes_for_gbagfx,
     parse_graphics_anchor_format,
+    parse_graphics_table_format,
     parse_sprite_field_spec,
+    graphics_row_byte_size,
     compute_graphics_rom_span,
+    raw_gba_palette_to_rgb888_list,
     resolve_gba_pointer,
 )
 
@@ -504,6 +508,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._hex = hex_editor
         self._photo: Optional[Any] = None
         self._pal4_state: Optional[Tuple[Any, bytes]] = None  # (GraphicsAnchorSpec, extracted pal bytes)
+        self._pal8_colors: Optional[List[Tuple[int, int, int]]] = None
         self._build()
 
     def _build(self) -> None:
@@ -517,6 +522,24 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._combo.grid(row=0, column=1, sticky="ew", padx=(0, 4))
         self._combo.bind("<<ComboboxSelected>>", lambda e: self._decode_selected())
         ttk.Button(top, text="Decode", command=self._decode_selected).grid(row=0, column=2, sticky="e")
+
+        self._table_nav = ttk.Frame(top)
+        self._table_nav.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(2, 0))
+        self._table_nav.grid_remove()
+        ttk.Label(self._table_nav, text="Table row:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w")
+        self._table_idx_spin = ttk.Spinbox(
+            self._table_nav,
+            textvariable=self._hex.graphics_table_row_var,
+            from_=0,
+            to=0,
+            width=8,
+            font=("Consolas", 8),
+            command=self._decode_selected,
+        )
+        self._table_idx_spin.grid(row=0, column=1, sticky="w", padx=(4, 8))
+        self._table_idx_spin.bind("<Return>", lambda _e: self._decode_selected())
+        self._table_row_label = ttk.Label(self._table_nav, text="", font=("Consolas", 8), foreground="#666")
+        self._table_row_label.grid(row=0, column=2, sticky="w")
 
         self._pal4_row = ttk.Frame(self)
         self._pal4_row.grid(row=1, column=0, sticky="w", pady=(0, 2))
@@ -542,6 +565,18 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._pal4_canvas.grid(row=2, column=0, sticky="ew", pady=(0, 4))
         self._pal4_canvas.grid_remove()
 
+        self._pal8_row = ttk.Frame(self)
+        self._pal8_row.grid(row=1, column=0, sticky="w", pady=(0, 2))
+        self._pal8_row.grid_remove()
+        self._pal8_title = ttk.Label(self._pal8_row, text="8bpp palette:", font=("Consolas", 8))
+        self._pal8_title.grid(row=0, column=0, sticky="w", padx=(0, 4))
+
+        self._pal8_canvas = tk.Canvas(
+            self, height=44, bg="#1e1e1e", highlightthickness=1, highlightbackground="#555555"
+        )
+        self._pal8_canvas.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+        self._pal8_canvas.grid_remove()
+
         ttk.Label(self, text="Decode log:", font=("Consolas", 8)).grid(row=3, column=0, sticky="w")
         self._log = tk.Text(self, height=5, font=("Consolas", 8), wrap=tk.WORD, state=tk.DISABLED)
         self._log.grid(row=4, column=0, sticky="ew", pady=(0, 4))
@@ -563,6 +598,31 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._pal4_canvas.grid_remove()
         self._pal4_state = None
         self._pal4_toml_hint.configure(text="")
+
+    def _hide_palette_8_ui(self) -> None:
+        self._pal8_row.grid_remove()
+        self._pal8_canvas.grid_remove()
+        self._pal8_colors = None
+
+    def _refresh_palette_8_swatches(self) -> None:
+        if not self._pal8_colors:
+            return
+        rgbs = self._pal8_colors
+        c = self._pal8_canvas
+        c.delete("all")
+        cols = 16
+        pad, cell_w, cell_h, gap = 4, 18, 26, 2
+        n = len(rgbs)
+        nrow = (n + cols - 1) // cols
+        total_w = pad * 2 + cols * cell_w + max(0, cols - 1) * gap
+        total_h = pad * 2 + nrow * cell_h + max(0, nrow - 1) * gap
+        c.configure(width=total_w, height=total_h)
+        for i, rgb in enumerate(rgbs):
+            row, col = divmod(i, cols)
+            x0 = pad + col * (cell_w + gap)
+            y0 = pad + row * (cell_h + gap)
+            fill = "#%02x%02x%02x" % rgb
+            c.create_rectangle(x0, y0, x0 + cell_w, y0 + cell_h, fill=fill, outline="#666666")
 
     def _refresh_palette_4_swatches(self) -> None:
         if not self._pal4_state:
@@ -613,6 +673,8 @@ class GraphicsPreviewFrame(ttk.Frame):
         if not names:
             self._combo.set("")
             self._hide_palette_4_ui()
+            self._hide_palette_8_ui()
+            self._table_nav.grid_remove()
             self._set_log("Graphics: built-in decode (pret gfx.c palette/tiles + Pillow).\n(no graphics NamedAnchors in TOML)")
             self._clear_image()
 
@@ -627,6 +689,64 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._combo.current(i)
         self._decode_selected()
 
+    def _update_table_nav_for_info(self, info: Dict[str, Any]) -> None:
+        """Show row spinbox when this anchor or its linked palette uses ``[format]count``."""
+        need = bool(info.get("graphics_table"))
+        if not need and info["spec"].kind == "sprite":
+            pan = getattr(info["spec"], "palette_anchor_name", None)
+            if pan:
+                ga = self._hex.find_graphics_anchor_by_name(pan)
+                need = bool(ga and ga.get("graphics_table"))
+        if need:
+            _, eff, _ = self._effective_table_state(info)
+            self._table_idx_spin.configure(from_=0, to=max(0, eff - 1))
+            self._table_nav.grid()
+        else:
+            self._table_nav.grid_remove()
+            self._table_row_label.configure(text="")
+
+    def _effective_table_state(self, info: Dict[str, Any]) -> Tuple[int, int, str]:
+        """Clamp shared row index; return (index, effective_row_count, warnings)."""
+        counts: List[int] = []
+        if info.get("graphics_table"):
+            n = int(info.get("table_num_entries") or 0)
+            if n <= 0:
+                ref = info.get("table_count_ref") or ""
+                c = self._hex._resolve_struct_count(ref)
+                n = c if isinstance(c, int) and c > 0 else 1
+            counts.append(max(1, n))
+        spec = info["spec"]
+        if spec.kind == "sprite" and getattr(spec, "palette_anchor_name", None):
+            ga = self._hex.find_graphics_anchor_by_name(spec.palette_anchor_name)
+            if ga and ga.get("graphics_table"):
+                n = int(ga.get("table_num_entries") or 0)
+                if n <= 0:
+                    ref = ga.get("table_count_ref") or ""
+                    c = self._hex._resolve_struct_count(ref)
+                    n = c if isinstance(c, int) and c > 0 else 1
+                counts.append(max(1, n))
+        eff = min(counts) if counts else 1
+        warn = ""
+        if len(counts) > 1 and min(counts) != max(counts):
+            warn = f"Table size mismatch (sprite vs palette): using min length {eff}.\n"
+        try:
+            raw_i = int(self._hex.graphics_table_row_var.get())
+        except (ValueError, tk.TclError):
+            raw_i = 0
+        idx = max(0, min(raw_i, eff - 1))
+        self._hex.graphics_table_row_var.set(idx)
+        return idx, eff, warn
+
+    def _table_label_ref_name(self, info: Dict[str, Any]) -> str:
+        if info.get("graphics_table"):
+            return str(info.get("table_count_ref") or "")
+        spec = info["spec"]
+        if spec.kind == "sprite" and getattr(spec, "palette_anchor_name", None):
+            ga = self._hex.find_graphics_anchor_by_name(spec.palette_anchor_name)
+            if ga and ga.get("graphics_table"):
+                return str(ga.get("table_count_ref") or "")
+        return ""
+
     def _decode_selected(self, event: Optional[tk.Event] = None) -> None:
         idx = self._combo.current()
         vals = list(self._combo["values"])
@@ -640,15 +760,32 @@ class GraphicsPreviewFrame(ttk.Frame):
         if not info:
             self._set_log("Anchor missing.")
             return
+        self._update_table_nav_for_info(info)
         spec = info["spec"]
+        tbl_idx, _eff, tbl_warn = self._effective_table_state(info)
+        list_ref = self._table_label_ref_name(info)
+        lbl = self._hex.get_list_entry_label(list_ref, tbl_idx) if list_ref else None
+        if lbl:
+            disp = lbl if len(lbl) <= 56 else lbl[:53] + "..."
+            self._table_row_label.configure(text=disp)
+        else:
+            self._table_row_label.configure(text="")
+
+        pal_data_off = info["base_off"]
+        if info.get("graphics_table"):
+            pal_data_off = info["base_off"] + tbl_idx * int(info["row_byte_size"])
+
         logs: List[str] = []
+        if tbl_warn:
+            logs.append(tbl_warn)
         if spec.kind == "palette":
             self._hide_palette_4_ui()
+            self._hide_palette_8_ui()
             if spec.bpp == 4:
                 raw = bytes(
                     rom[
-                        info["base_off"] : info["base_off"]
-                        + min(len(rom) - info["base_off"], 1 << 20)
+                        pal_data_off : pal_data_off
+                        + min(len(rom) - pal_data_off, 1 << 20)
                     ]
                 )
                 try:
@@ -670,7 +807,27 @@ class GraphicsPreviewFrame(ttk.Frame):
                 self._pal4_row.grid()
                 self._pal4_canvas.grid()
                 self._refresh_palette_4_swatches()
-            pal_path, log = decode_palette_to_png_pal(bytes(rom), info["base_off"], spec)
+            elif spec.bpp == 8:
+                raw = bytes(
+                    rom[
+                        pal_data_off : pal_data_off
+                        + min(len(rom) - pal_data_off, 1 << 20)
+                    ]
+                )
+                try:
+                    pal_bytes = extract_palette_bytes(spec, raw)
+                except ValueError as e:
+                    self._set_log(f"Palette extract error: {e}")
+                    self._clear_image()
+                    return
+                pal_bytes = palette_bytes_for_gbagfx(spec, pal_bytes)
+                self._pal8_colors = raw_gba_palette_to_rgb888_list(pal_bytes)
+                n8 = len(self._pal8_colors)
+                self._pal8_title.configure(text=f"8bpp palette ({n8} colors):")
+                self._pal8_row.grid()
+                self._pal8_canvas.grid()
+                self._refresh_palette_8_swatches()
+            pal_path, log = decode_palette_to_png_pal(bytes(rom), pal_data_off, spec)
             logs.append(log)
             self._set_log("\n".join(logs))
             if pal_path:
@@ -679,23 +836,30 @@ class GraphicsPreviewFrame(ttk.Frame):
                 self._clear_image("(palette PNG not produced)")
             return
         self._hide_palette_4_ui()
+        self._hide_palette_8_ui()
         ext_ps: Optional[Any] = None
         ext_pb: Optional[int] = None
         log_pre = ""
+        sprite_off = info["base_off"]
+        if info.get("graphics_table"):
+            sprite_off = info["base_off"] + tbl_idx * int(info["row_byte_size"])
         if spec.kind == "sprite" and getattr(spec, "palette_anchor_name", None):
             pan = spec.palette_anchor_name
             ga = self._hex.find_graphics_anchor_by_name(pan)
             if ga is None or ga["spec"].kind != "palette":
+                dpal = "64-color (empty)" if spec.bpp == 6 else "16-color"
                 log_pre = (
                     f"Warning: palette NamedAnchor not found or not a palette format: {pan!r}\n"
-                    f"Using default 16-color palette.\n\n"
+                    f"Using default {dpal} palette.\n\n"
                 )
             else:
                 ext_ps = ga["spec"]
                 ext_pb = ga["base_off"]
+                if ga.get("graphics_table"):
+                    ext_pb = ga["base_off"] + tbl_idx * int(ga["row_byte_size"])
         png_path, log = decode_graphics_anchor_to_png(
             bytes(rom),
-            info["base_off"],
+            sprite_off,
             spec,
             external_palette_spec=ext_ps,
             external_palette_base_off=ext_pb,
@@ -706,6 +870,21 @@ class GraphicsPreviewFrame(ttk.Frame):
             self._try_show_image(png_path)
         else:
             self._clear_image("(sprite PNG not produced)")
+
+
+def _split_enum_field_ref(enum_ref: Optional[str]) -> Tuple[str, int]:
+    """
+    Parse ``listname`` or ``listname+3`` / ``foo.bar-2`` (trailing ``±`` integer only; base is ``[\\w.]+``).
+
+    ROM stores ``idx``; labels / PCS rows use ``idx + delta`` (forward with ``+``, backward with ``-``).
+    """
+    if not enum_ref:
+        return "", 0
+    s = str(enum_ref).strip()
+    m = re.match(r"^([\w.]+)([+-]\d+)$", s)
+    if m:
+        return m.group(1).strip(), int(m.group(2))
+    return s, 0
 
 
 def _parse_struct_fields(fmt: str) -> Optional[List[Dict[str, Any]]]:
@@ -767,7 +946,7 @@ def _parse_struct_fields(fmt: str) -> Optional[List[Dict[str, Any]]]:
 
 
 def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
-    """Parse a single field token like 'hp.', 'type1.enumname', 'name\"\"13', 'desc<\"\">', etc."""
+    """Parse a single field token like 'hp.', 'type1.enumname', 'unknown:cardgraphicsindexes+1', etc."""
     if "|=" in token:
         return None
     if "|t|" in token:
@@ -811,11 +990,14 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
         nm = re.match(r'^(\w+)', token)
         return {"name": nm.group(1) if nm else token, "size": 4, "type": "ptr", "enum": None, "hex": True}
 
-    m = re.match(r'^(\w+)([.:]+)([\w.]*)$', token)
+    # e.g. unknown:cardgraphicsindexes+1 — optional trailing +N / -N after the table name
+    m = re.match(r"^(\w+)([.:]+)([\w.]*)([+-]\d+)?$", token)
     if m:
         name = m.group(1)
         size_chars = m.group(2)
-        enum_ref = m.group(3) if m.group(3) else None
+        base = (m.group(3) or "").strip()
+        tail = m.group(4) or ""
+        enum_ref = (base + tail).strip() if base else None
         size = sum(1 if c == "." else 2 for c in size_chars)
         return {"name": name, "size": size, "type": "uint", "enum": enum_ref or None, "hex": hex_hint}
 
@@ -1215,13 +1397,23 @@ class StructEditorFrame(ttk.Frame):
         if pal_name:
             ga = self._hex.find_graphics_anchor_by_name(pal_name)
             if ga is None or ga["spec"].kind != "palette":
+                dpal = "64-color (empty)" if spec.bpp == 6 else "16-color"
                 log_extra = (
                     f"\nWarning: palette anchor missing or not palette format: {pal_name!r}\n"
-                    f"Using default 16-color palette.\n"
+                    f"Using default {dpal} palette.\n"
                 )
             else:
                 pal_spec = ga["spec"]
-                pal_base = ga["base_off"]
+                if ga.get("graphics_table"):
+                    nrow = int(ga.get("table_num_entries") or 0)
+                    if nrow <= 0:
+                        cref = ga.get("table_count_ref") or ""
+                        c = self._hex._resolve_struct_count(cref)
+                        nrow = c if isinstance(c, int) and c > 0 else 1
+                    row_i = max(0, min(entry_idx, nrow - 1))
+                    pal_base = ga["base_off"] + row_i * int(ga["row_byte_size"])
+                else:
+                    pal_base = ga["base_off"]
         png_path, log = decode_sprite_at_pointer(bytes(data), tgt, spec, pal_spec, pal_base)
         self._set_gfx_log(log_extra + log)
         self._gfx_photo = None
@@ -1470,19 +1662,26 @@ class StructEditorFrame(ttk.Frame):
             self._update_ptr_text_panel()
 
     def _find_pcs_anchor_info_for_enum(self, enum_name: str) -> Optional[Dict[str, Any]]:
-        ref = enum_name.strip()
+        base, _ = _split_enum_field_ref(enum_name)
+        ref = base.strip()
+        if not ref:
+            return None
         for info in self._hex.get_pcs_table_anchors():
             if info["name"] == ref:
                 return info
         return None
 
     def _is_toml_list_enum_field(self, fd: Dict[str, Any]) -> bool:
-        return fd.get("type") == "uint" and bool(fd.get("enum")) and fd["enum"] in self._lists
+        if fd.get("type") != "uint" or not fd.get("enum"):
+            return False
+        base, _ = _split_enum_field_ref(fd["enum"])
+        return bool(base) and base in self._lists
 
     def _is_pcs_table_enum_field(self, fd: Dict[str, Any]) -> bool:
         if fd.get("type") != "uint" or not fd.get("enum"):
             return False
-        if fd["enum"] in self._lists:
+        base, _ = _split_enum_field_ref(fd["enum"])
+        if not base or base in self._lists:
             return False
         return self._find_pcs_anchor_info_for_enum(fd["enum"]) is not None
 
@@ -1529,7 +1728,9 @@ class StructEditorFrame(ttk.Frame):
             self._list_enum_active_pcs = None
             self._list_enum_toml_block.grid()
             self._list_enum_pcs_block.grid_remove()
-            lm = self._lists.get(fd["enum"], {})
+            list_base, delta = _split_enum_field_ref(fd["enum"])
+            lm = self._lists.get(list_base, {})
+            list_row = cur + delta
             for idx in sorted(lm.keys()):
                 lab = lm[idx]
                 self._list_enum_idx_by_combo.append(idx)
@@ -1539,12 +1740,14 @@ class StructEditorFrame(ttk.Frame):
                 display_vals.append(f"{idx}: {short}")
             self._list_enum_rom_combo["values"] = tuple(display_vals)
             try:
-                pos = self._list_enum_idx_by_combo.index(cur)
+                pos = self._list_enum_idx_by_combo.index(list_row)
             except ValueError:
-                self._list_enum_rom_combo.set(f"(ROM index {cur} — not in [[List]])")
+                self._list_enum_rom_combo.set(
+                    f"(ROM {cur} → list row {list_row} — not in [[List]] {list_base!r})"
+                )
             else:
                 self._list_enum_rom_combo.current(pos)
-            self._list_enum_toml_var.set(lm.get(cur, ""))
+            self._list_enum_toml_var.set(lm.get(list_row, ""))
             return
 
         pcs_info = self._find_pcs_anchor_info_for_enum(fd["enum"])
@@ -1560,12 +1763,16 @@ class StructEditorFrame(ttk.Frame):
                 short = short[:49] + "…"
             display_vals.append(f"{idx}: {short}")
         self._list_enum_rom_combo["values"] = tuple(display_vals)
-        if 0 <= cur < count:
-            self._list_enum_rom_combo.current(cur)
+        _, delta = _split_enum_field_ref(fd["enum"])
+        list_row = cur + delta
+        if 0 <= list_row < count:
+            self._list_enum_rom_combo.current(list_row)
         else:
-            self._list_enum_rom_combo.set(f"(ROM index {cur} — past table)")
-        if pcs_info and 0 <= cur < count:
-            self._list_enum_pcs_var.set(self._pcs_decode_table_row(pcs_info, cur))
+            self._list_enum_rom_combo.set(
+                f"(ROM {cur} → PCS row {list_row} — past table or negative)"
+            )
+        if pcs_info and 0 <= list_row < count:
+            self._list_enum_pcs_var.set(self._pcs_decode_table_row(pcs_info, list_row))
         else:
             self._list_enum_pcs_var.set("")
 
@@ -1580,6 +1787,15 @@ class StructEditorFrame(ttk.Frame):
         if pos < 0 or pos >= len(self._list_enum_idx_by_combo):
             return
         new_idx = self._list_enum_idx_by_combo[pos]
+        _, delta = _split_enum_field_ref(fd.get("enum"))
+        rom_val = new_idx - delta
+        if rom_val < 0:
+            messagebox.showwarning("Struct", f"Selection would need ROM index {rom_val} (negative).")
+            return
+        max_u = (1 << (8 * fd["size"])) - 1 if fd["size"] <= 8 else (1 << 32) - 1
+        if rom_val > max_u:
+            messagebox.showwarning("Struct", f"ROM index {rom_val} does not fit field size.")
+            return
         data = self._hex.get_data()
         if not data:
             return
@@ -1590,14 +1806,15 @@ class StructEditorFrame(ttk.Frame):
         foff = self._base_off + entry_idx * self._struct_size + fd["offset"]
         if foff + fd["size"] > len(data):
             return
-        self._hex.write_bytes_at(foff, new_idx.to_bytes(fd["size"], "little"))
+        self._hex.write_bytes_at(foff, rom_val.to_bytes(fd["size"], "little"))
         iid = f"sf_{fi}"
         data2 = self._hex.get_data()
         if data2 and self._tree.exists(iid):
             raw = bytes(data2[foff:foff + fd["size"]])
             self._tree.set(iid, "val", self._format_value(raw, fd))
         if self._is_toml_list_enum_field(fd):
-            self._list_enum_toml_var.set(self._lists.get(fd["enum"], {}).get(new_idx, ""))
+            list_base, _ = _split_enum_field_ref(fd["enum"])
+            self._list_enum_toml_var.set(self._lists.get(list_base, {}).get(new_idx, ""))
         elif self._list_enum_active_pcs:
             self._list_enum_pcs_var.set(self._pcs_decode_table_row(self._list_enum_active_pcs, new_idx))
 
@@ -1619,9 +1836,10 @@ class StructEditorFrame(ttk.Frame):
         if foff + fd["size"] > len(data):
             return
         cur = int.from_bytes(data[foff:foff + fd["size"]], "little")
-        list_name = fd["enum"]
+        list_name, delta = _split_enum_field_ref(fd["enum"])
+        list_row = cur + delta
         new_s = self._list_enum_toml_var.get()
-        if not self._hex.update_toml_list_string_at_index(list_name, cur, new_s):
+        if not self._hex.update_toml_list_string_at_index(list_name, list_row, new_s):
             return
         self._reload_lists()
         self._update_list_enum_panel()
@@ -1651,11 +1869,16 @@ class StructEditorFrame(ttk.Frame):
         cur = int.from_bytes(data[foff:foff + fd["size"]], "little")
         pcs_info = self._list_enum_active_pcs
         count = int(pcs_info.get("count") or 0)
-        if cur < 0 or cur >= count:
-            messagebox.showwarning("Struct", "Current ROM index is outside the PCS table.")
+        _, delta = _split_enum_field_ref(fd.get("enum"))
+        list_row = cur + delta
+        if list_row < 0 or list_row >= count:
+            messagebox.showwarning(
+                "Struct",
+                f"Resolved PCS row {list_row} (ROM {cur} + offset {delta:+d}) is outside the table.",
+            )
             return
         new_text = self._list_enum_pcs_var.get()
-        if not self._write_pcs_table_row(pcs_info, cur, new_text):
+        if not self._write_pcs_table_row(pcs_info, list_row, new_text):
             messagebox.showerror("Struct", "Could not write PCS string (bad address or ROM bounds).")
             return
         self._update_list_enum_panel()
@@ -1910,13 +2133,15 @@ class StructEditorFrame(ttk.Frame):
         return "".join(chars)
 
     def _resolve_enum(self, value: int, enum_ref: str) -> Optional[str]:
-        lm = self._lists.get(enum_ref)
+        base, delta = _split_enum_field_ref(enum_ref)
+        idx = value + delta
+        lm = self._lists.get(base)
         if lm is not None:
-            label = lm.get(value)
+            label = lm.get(idx)
             if label is not None:
                 return f"{value} ({label})"
         for info in self._hex.get_pcs_table_anchors():
-            if info["name"] == enum_ref:
+            if info["name"] == base:
                 anchor = info["anchor"]
                 addr = anchor.get("Address")
                 if addr is None:
@@ -1925,13 +2150,13 @@ class StructEditorFrame(ttk.Frame):
                     gba = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
                     if gba < GBA_ROM_BASE:
                         gba += GBA_ROM_BASE
-                    base = gba - GBA_ROM_BASE
+                    rom_base = gba - GBA_ROM_BASE
                 except (ValueError, TypeError):
                     continue
                 data = self._hex.get_data()
                 if not data:
                     continue
-                entry_off = base + value * info["width"]
+                entry_off = rom_base + idx * info["width"]
                 if entry_off + info["width"] > len(data):
                     continue
                 chars = []
@@ -2131,6 +2356,8 @@ class HexEditorFrame(ttk.Frame):
         self._toml_data: Dict[str, Any] = {}
         # When set, this file is loaded instead of auto-resolving {ROM}.toml (until cleared).
         self._toml_manual_override: Optional[str] = None
+        # Row index for ``[format]count`` graphics / palette tables (spinbox in Tools → Graphics).
+        self.graphics_table_row_var = tk.IntVar(value=0)
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -4213,7 +4440,8 @@ Format = "`f|u8`[u8 arg0]"
         return self._get_pcs_table_anchors()
 
     def get_graphics_anchors(self) -> List[Dict[str, Any]]:
-        """NamedAnchors whose Format is a graphics palette/sprite spec (ucp4, lzs4xWxH, …)."""
+        """NamedAnchors whose Format is a graphics palette/sprite spec (ucp4, lzs4xWxH, …)
+        or a table ``[rowSpec]countRef`` of identical rows."""
         result: List[Dict[str, Any]] = []
         pcs_names = {a["name"] for a in self._get_pcs_table_anchors()}
         rom_len = len(self._data) if self._data else 0
@@ -4223,8 +4451,26 @@ Format = "`f|u8`[u8 arg0]"
                 continue
             fmt = str(anchor.get("Format", "")).strip().strip("'\"")
             spec = parse_graphics_anchor_format(fmt)
+            table_count_ref: Optional[str] = None
             if spec is None:
-                continue
+                tbl = parse_graphics_table_format(fmt)
+                if tbl is None:
+                    continue
+                spec, table_count_ref = tbl
+                try:
+                    if spec.lz:
+                        raise ValueError("LZ rows in graphics tables are not supported")
+                    row_byte_size = graphics_row_byte_size(spec)
+                except ValueError:
+                    continue
+                n_entries = self._resolve_struct_count(table_count_ref)
+                if n_entries is None or n_entries <= 0:
+                    continue
+                total_span = row_byte_size * n_entries
+            else:
+                row_byte_size = 0
+                n_entries = 0
+                total_span = 0
             addr = anchor.get("Address")
             if addr is None:
                 continue
@@ -4237,15 +4483,24 @@ Format = "`f|u8`[u8 arg0]"
                 continue
             if base_off < 0 or base_off >= rom_len:
                 continue
-            rom_span = compute_graphics_rom_span(spec, rom_len, base_off)
-            result.append({
+            rest = max(0, rom_len - base_off)
+            if table_count_ref is not None:
+                rom_span = min(rest, total_span)
+            else:
+                rom_span = compute_graphics_rom_span(spec, rom_len, base_off)
+            entry: Dict[str, Any] = {
                 "name": name,
                 "anchor": anchor,
                 "spec": spec,
                 "base_off": base_off,
                 "rom_span": rom_span,
                 "graphics_entry": True,
-            })
+                "graphics_table": table_count_ref is not None,
+                "table_count_ref": table_count_ref,
+                "row_byte_size": row_byte_size,
+                "table_num_entries": n_entries,
+            }
+            result.append(entry)
         return result
 
     def find_graphics_anchor_by_name(self, anchor_name: str) -> Optional[Dict[str, Any]]:
@@ -4386,6 +4641,34 @@ Format = "`f|u8`[u8 arg0]"
             messagebox.showerror("Struct", f"TOML write failed:\n{e}")
             return False
         return True
+
+    def get_list_entry_label(self, list_name: str, flat_index: int) -> Optional[str]:
+        """Return the string at ``flat_index`` in ``[[List]]`` with this Name, or None.
+        ``list_name`` may include a trailing ``+N`` / ``-N`` (struct-style); only the base name is used for [[List]].
+        """
+        base, _ = _split_enum_field_ref(list_name)
+        want = base.strip()
+        if not want:
+            return None
+        for row in self._toml_data.get("List", []) or []:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("Name", "")).strip().strip("'\"")
+            if name != want:
+                continue
+            coords = _list_row_key_and_offset(row, flat_index)
+            if coords is None:
+                return None
+            key, off = coords
+            val = row[key]
+            if isinstance(val, list):
+                if 0 <= off < len(val):
+                    return str(val[off]).strip().strip("'\"")
+                return None
+            if off == 0:
+                return str(val).strip().strip("'\"")
+            return None
+        return None
 
     def write_bytes_at(self, offset: int, data: bytes) -> None:
         if not self._data or offset < 0:

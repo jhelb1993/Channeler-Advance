@@ -2,7 +2,8 @@
 GBA graphics helpers: LZ77 decompress (pret ``lz.c``) and **pure-Python** palette/tile decode aligned with pret
 ``tools/gbagfx/gfx.c`` (``ReadGbaPalette``, 4bpp/8bpp tile layout). PNG output uses Pillow — no gbagfx binary.
 
-Palette formats: ucp4, lzp4, ucp4:HEX…, ucp8:N / lzp8:N. Sprite: ucs/lzs 4x8 tiles.
+Palette formats: ucp4, lzp4, ucp4:HEX…, ucp8:N / lzp8:N.
+Sprite: ucs/lzs 4bpp / 6bpp / 8bpp tiles (``ucs6`` = 48 bytes/tile packed 6bpp → indices 0–63, same row layout as ``sprite.c`` ``decode_6bpp_tiled_to_8bpp``).
 """
 
 from __future__ import annotations
@@ -128,16 +129,29 @@ def decompress_gba_lz77(data: bytes, max_out: int = 1 << 22) -> bytes:
     return bytes(out)
 
 
-def palette_byte_count_8_variant(hex_digit: str) -> int:
-    """ucp8:/lzp8: — user spec: palette count is one hex digit 0–F, times 32 bytes."""
-    n = int(hex_digit, 16)
-    if n == 0:
-        n = 1
-    return n * 32
+def palette_byte_count_8_variant(hex_digits: str) -> int:
+    """ucp8:/lzp8: ROM byte length for one palette blob.
+
+    - **One** hex digit ``N``: ``N * 32`` bytes (``N == 0`` is treated as ``1``), original rule.
+    - **Several** digits (e.g. ``0123``): ``len(digits) * 32`` bytes — contiguous 32-byte chunks (64 colors
+      when 4 chunks), used by card graphics tables.
+    """
+    s = (hex_digits or "1").strip().upper()
+    if len(s) == 1:
+        n = int(s, 16)
+        if n == 0:
+            n = 1
+        return n * 32
+    return len(s) * 32
 
 
 def tile_data_bytes(bpp: int, w_tiles: int, h_tiles: int) -> int:
-    per_tile = 32 if bpp == 4 else 64
+    if bpp == 4:
+        per_tile = 32
+    elif bpp == 6:
+        per_tile = 48  # 8×8 × 6 bits / 8
+    else:
+        per_tile = 64
     return w_tiles * h_tiles * per_tile
 
 
@@ -159,11 +173,11 @@ def compute_graphics_rom_span(spec: GraphicsAnchorSpec, rom_len: int, base: int)
 @dataclass
 class GraphicsAnchorSpec:
     kind: str  # "palette" | "sprite"
-    bpp: int  # 4 or 8
+    bpp: int  # palette: 4 or 8; sprite: 4, 6, or 8
     lz: bool
     # palette 4bpp: ``ucp4:`` hex digits = hardware indices; ``None`` = plain ucp4 → one chunk for index 0
     palette_4_indices: Optional[Tuple[int, ...]] = None
-    # palette 8bpp: ucp8:N / lzp8:N — one hex digit 0–F, byte length rule in palette_byte_count_8_variant
+    # palette 8bpp: ucp8:N / lzp8:N — one or more hex digits; byte length via palette_byte_count_8_variant
     palette_hex_digit: Optional[str] = None
     # sprite: tile dimensions
     width_tiles: int = 0
@@ -273,6 +287,23 @@ def decode_gba_tile_8bpp_indices(tile: bytes) -> Tuple[int, ...]:
     return tuple(tile.ljust(64, b"\x00")[:64])
 
 
+def decode_gba_tile_6bpp_indices(tile: bytes) -> Tuple[int, ...]:
+    """
+    One 8×8 6bpp tile (48 bytes). Each row is 6 bytes: two groups of 3 little-endian bytes form a 24-bit
+    value; four 6-bit palette indices are ``(v >> (k*6)) & 0x3F`` for k = 0..3 per group.
+    Matches ``decode_6bpp_tiled_to_8bpp`` in repo ``sprite.c`` (row-major pixels within the tile).
+    """
+    tile = tile.ljust(48, b"\x00")[:48]
+    out: List[int] = []
+    for ry in range(8):
+        row = tile[ry * 6 : ry * 6 + 6]
+        for g in range(2):
+            v = row[g * 3] | (row[g * 3 + 1] << 8) | (row[g * 3 + 2] << 16)
+            for k in range(4):
+                out.append((v >> (k * 6)) & 0x3F)
+    return tuple(out)
+
+
 def gba_tiles_to_rgba(
     tile_data: bytes,
     bpp: int,
@@ -282,11 +313,18 @@ def gba_tiles_to_rgba(
 ) -> bytes:
     """
     Row-major tile order with ``tiles_wide`` as gbagfx ``-mwidth`` (metatile 1×1), matching pret
-    ``ReadTileImage`` + ``ConvertFromTiles*``.
+    ``ReadTileImage`` + ``ConvertFromTiles*`` for 4bpp/8bpp/6bpp (6bpp: indices 0–63 per tile).
     """
     tw, th = tiles_wide, tiles_high
     pix_w, pix_h = tw * 8, th * 8
-    tile_sz = 32 if bpp == 4 else 64
+    if bpp == 4:
+        tile_sz = 32
+    elif bpp == 6:
+        tile_sz = 48
+    elif bpp == 8:
+        tile_sz = 64
+    else:
+        raise ValueError(f"Unsupported tile bpp for decode: {bpp}")
     n_tiles = tw * th
     need = n_tiles * tile_sz
     if len(tile_data) < need:
@@ -296,7 +334,12 @@ def gba_tiles_to_rgba(
     for ti in range(n_tiles):
         off = ti * tile_sz
         chunk = tile_data[off : off + tile_sz]
-        idxs = decode_gba_tile_4bpp_indices(chunk) if bpp == 4 else decode_gba_tile_8bpp_indices(chunk)
+        if bpp == 4:
+            idxs = decode_gba_tile_4bpp_indices(chunk)
+        elif bpp == 6:
+            idxs = decode_gba_tile_6bpp_indices(chunk)
+        else:
+            idxs = decode_gba_tile_8bpp_indices(chunk)
         tcx = (ti % tw) * 8
         tcy = (ti // tw) * 8
         k = 0
@@ -340,6 +383,38 @@ def write_palette_strip_png(
         for yy in range(swatch_h):
             for xx in range(swatch_w):
                 px[x0 + xx, yy] = (r, g, b, 255)
+    im.save(path, format="PNG")
+
+
+def write_palette_grid_png(
+    path: str,
+    colors: List[Tuple[int, int, int]],
+    *,
+    cols: int = 16,
+    cell_w: int = 18,
+    cell_h: int = 26,
+    gap: int = 2,
+    pad: int = 4,
+) -> None:
+    """
+    Multi-row palette preview (same swatch size as 4bpp Tools canvas: 18×26, 16 columns).
+    """
+    Image = _require_pillow()
+    if not colors:
+        colors = [(0, 0, 0)]
+    n = len(colors)
+    nrow = (n + cols - 1) // cols
+    w = pad * 2 + cols * cell_w + max(0, cols - 1) * gap
+    h = pad * 2 + nrow * cell_h + max(0, nrow - 1) * gap
+    im = Image.new("RGBA", (w, h), (30, 30, 30, 255))
+    px = im.load()
+    for i, (r, g, b) in enumerate(colors):
+        row, col = divmod(i, cols)
+        x0 = pad + col * (cell_w + gap)
+        y0 = pad + row * (cell_h + gap)
+        for yy in range(cell_h):
+            for xx in range(cell_w):
+                px[x0 + xx, y0 + yy] = (r, g, b, 255)
     im.save(path, format="PNG")
 
 
@@ -387,8 +462,8 @@ def parse_graphics_anchor_format(fmt: str) -> Optional[GraphicsAnchorSpec]:
         s = s[1:].strip()
     s = _strip_outer_backticks(s)
 
-    # 8bpp palette: exactly one hex digit after colon (required)
-    m = re.fullmatch(r"(uc|lz)p8:([0-9a-fA-F])", s, re.IGNORECASE)
+    # 8bpp palette: one or more hex digits after colon (e.g. ucp8:3 or ucp8:0123)
+    m = re.fullmatch(r"(uc|lz)p8:([0-9a-fA-F]+)", s, re.IGNORECASE)
     if m:
         lz = m.group(1).lower() == "lz"
         return GraphicsAnchorSpec(
@@ -413,7 +488,7 @@ def parse_graphics_anchor_format(fmt: str) -> Optional[GraphicsAnchorSpec]:
             palette_4_indices=idxs,
         )
 
-    m = re.fullmatch(r"(uc|lz)s([48])x(\d+)x(\d+)", s, re.IGNORECASE)
+    m = re.fullmatch(r"(uc|lz)s([468])x(\d+)x(\d+)", s, re.IGNORECASE)
     if m:
         lz = m.group(1).lower() == "lz"
         bpp = int(m.group(2))
@@ -437,6 +512,68 @@ def parse_graphics_anchor_format(fmt: str) -> Optional[GraphicsAnchorSpec]:
     return None
 
 
+_GRAPHICS_TABLE_COUNT_REF_RE = re.compile(r"^[A-Za-z_][\w.+-]*$")
+
+
+def parse_graphics_table_format(fmt: str) -> Optional[Tuple[GraphicsAnchorSpec, str]]:
+    """
+    Table of identical graphics blobs: ``[rowFormat]countRef``.
+
+    ``rowFormat`` parses as a standalone graphics spec (palette or sprite, with optional ``|palette``).
+    ``countRef`` is resolved in the hex editor (PCS table name, ``[[List]]`` name, numeric count, etc.).
+
+    Examples::
+
+        [ucp8:0123]cardgraphicsindexes
+        [ucs6x10x10|graphics.cards.palettes]cardgraphicsindexes
+    """
+    s = fmt.strip()
+    if s.startswith("^"):
+        s = s[1:].strip()
+    s = _strip_outer_backticks(s)
+    if not s.startswith("["):
+        return None
+    depth = 0
+    close = -1
+    for i, ch in enumerate(s):
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                close = i
+                break
+    if close < 0:
+        return None
+    inner = s[1:close].strip()
+    suffix = s[close + 1 :].strip()
+    if not inner or not suffix:
+        return None
+    if not _GRAPHICS_TABLE_COUNT_REF_RE.match(suffix):
+        return None
+    row_spec = parse_graphics_anchor_format(inner)
+    if row_spec is None:
+        return None
+    return (row_spec, suffix)
+
+
+def graphics_row_byte_size(spec: GraphicsAnchorSpec) -> int:
+    """Uncompressed byte size of one row in a graphics table (palette blob or tile blob)."""
+    if spec.kind == "palette":
+        if spec.lz:
+            raise ValueError("LZ palette rows in graphics tables are not supported")
+        if spec.bpp == 4:
+            return 32 * palette_4_chunk_count(spec)
+        if spec.palette_hex_digit is None:
+            raise ValueError("8bpp palette spec missing palette_hex_digit")
+        return palette_byte_count_8_variant(spec.palette_hex_digit)
+    if spec.kind == "sprite":
+        if spec.lz:
+            raise ValueError("LZ sprite rows in graphics tables are not supported")
+        return tile_data_bytes(spec.bpp, spec.width_tiles, spec.height_tiles)
+    raise ValueError(f"unknown graphics kind {spec.kind!r}")
+
+
 def parse_sprite_field_spec(inner: str) -> Tuple[Optional[GraphicsAnchorSpec], Optional[str]]:
     """
     Inner part of sprite<`...`> e.g. lzs4x2x6|graphics.items.ball.palettes
@@ -451,7 +588,7 @@ def parse_sprite_field_spec(inner: str) -> Tuple[Optional[GraphicsAnchorSpec], O
     else:
         spec_part = inner
 
-    m = re.fullmatch(r"(uc|lz)s([48])x(\d+)x(\d+)", spec_part, re.IGNORECASE)
+    m = re.fullmatch(r"(uc|lz)s([468])x(\d+)x(\d+)", spec_part, re.IGNORECASE)
     if not m:
         return None, pal_name
     lz = m.group(1).lower() == "lz"
@@ -529,6 +666,8 @@ def palette_bytes_for_gbagfx(
             pal_bytes = pal_bytes[:GBA_4BPP_SUBPALETTE_BYTES]
         else:
             pal_bytes = normalize_4bpp_palette_for_gbagfx(pal_bytes, spec.palette_4_indices)
+    # 4bpp sprites with an 8bpp-format palette anchor: only the first subpalette applies.
+    # 6bpp/8bpp sprites use the full extracted palette (e.g. 64 colors = 128 bytes for 6bpp card art).
     if sprite_bpp == 4 and spec.kind == "palette" and spec.bpp == 8:
         pal_bytes = pal_bytes[:GBA_4BPP_SUBPALETTE_BYTES]
     return pal_bytes
@@ -567,14 +706,12 @@ def decode_palette_to_png_pal(
 
     td = tempfile.mkdtemp(prefix="ch_gfx_")
     try:
-        colors = raw_gba_palette_to_rgb888_list(pal_bytes)
-        colors = pret_pad_palette_over_16_colors(colors)
+        colors_act = raw_gba_palette_to_rgb888_list(pal_bytes)
         png_path = os.path.join(td, "palette.png")
-        write_palette_strip_png(png_path, colors)
-        n = len(raw_gba_palette_to_rgb888_list(pal_bytes))
-        log = (
-            f"Palette -> PNG ({n} GBA colors; pret gfx.c ReadGbaPalette / UPCONVERT_BIT_DEPTH).\n"
-        )
+        # Grid layout (16×N) with 18×26 swatches — readable for 64-color rows; avoid padding to 256 for preview.
+        write_palette_grid_png(png_path, colors_act)
+        n = len(colors_act)
+        log = f"Palette -> PNG ({n} GBA colors; grid preview, pret ReadGbaPalette RGB).\n"
         return png_path, log
     except ImportError as e:
         return None, f"{e}\n"
@@ -596,13 +733,19 @@ def _sprite_tiles_to_png_path(
     wpx = spec.width_tiles * 8
     hpx = spec.height_tiles * 8
     rgba = gba_tiles_to_rgba(
-        tiles, spec.bpp, spec.width_tiles, spec.height_tiles, pal_rgb
+        tiles,
+        spec.bpp,
+        spec.width_tiles,
+        spec.height_tiles,
+        pal_rgb,
     )
     png_path = os.path.join(td, f"{stem}.png")
     write_rgba_png(png_path, wpx, hpx, rgba)
-    return png_path, (
-        f"Sprite -> PNG {wpx}x{hpx} ({spec.bpp}bpp tiles, pret gfx.c tile order).\n"
-    )
+    if spec.bpp == 6:
+        log = f"Sprite -> PNG {wpx}x{hpx} (6bpp packed → indices 0–63).\n"
+    else:
+        log = f"Sprite -> PNG {wpx}x{hpx} ({spec.bpp}bpp tiles, pret gfx.c tile order).\n"
+    return png_path, log
 
 
 def decode_graphics_anchor_to_png(
@@ -652,7 +795,7 @@ def decode_graphics_anchor_to_png(
                 external_palette_spec, pal_bytes, sprite_bpp=spec.bpp
             )
         else:
-            pal_bytes = bytes(32)
+            pal_bytes = bytes(128) if spec.bpp == 6 else bytes(32)
 
         png_path, slog = _sprite_tiles_to_png_path(tiles, spec, pal_bytes, td, stem)
         logs.append(slog)
@@ -692,7 +835,7 @@ def decode_sprite_at_pointer(
                 return None, f"External palette decode error: {e}\n"
             pal_bytes = palette_bytes_for_gbagfx(palette_spec, pal_bytes, sprite_bpp=spec.bpp)
         else:
-            pal_bytes = bytes(32)
+            pal_bytes = bytes(128) if spec.bpp == 6 else bytes(32)
 
         png_path, slog = _sprite_tiles_to_png_path(tiles, spec, pal_bytes, td, "sprite")
         logs.append(slog)
