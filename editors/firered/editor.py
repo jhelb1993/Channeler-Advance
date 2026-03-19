@@ -302,5 +302,6 @@ class FireRedEditor:
             "Channeler Advance - Pokémon FireRed Editor\n\n"
             "Uses pret/pokefirered for C code reference.\n\n"
             "Ctrl+T — show/hide tools pane\n"
-            "Ctrl+Shift+1/2/3 — toggle Table / Struct / (reserved) slot",
+            "Ctrl+Shift+1/2/3 — toggle Table / Struct / (reserved) slot\n"
+            "Ctrl+M — Anchors browser: double-click a table/struct leaf to open it in Tools",
         )

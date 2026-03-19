@@ -1931,8 +1931,7 @@ class HexEditorFrame(ttk.Frame):
         self._listbox_anchor.grid(row=0, column=0, sticky="nsew")
         self._scroll_anchor.grid(row=0, column=1, sticky="ns")
         self._scroll_anchor.configure(command=self._listbox_anchor.yview)
-        self._listbox_anchor.bind("<Double-Button-1>", self._on_anchor_browser_click)
-        self._listbox_anchor.bind("<Button-1>", self._on_anchor_browser_click)
+        self._listbox_anchor.bind("<Double-Button-1>", self._on_anchor_browser_double_click)
 
         def _anchor_scroll(delta: int) -> None:
             self._listbox_anchor.yview_scroll(-delta, "units")
@@ -2486,8 +2485,8 @@ class HexEditorFrame(ttk.Frame):
             self._listbox_anchor.insert(tk.END, display)
         self._listbox_anchor._anchor_items = items
 
-    def _on_anchor_browser_click(self, event: tk.Event) -> None:
-        """Handle click in anchor browser: drill down, go back, or goto address."""
+    def _on_anchor_browser_double_click(self, event: tk.Event) -> None:
+        """Handle anchors browser activation on double-click only."""
         sel = self._listbox_anchor.curselection()
         if not sel:
             return
@@ -2499,11 +2498,18 @@ class HexEditorFrame(ttk.Frame):
         if address == -1:
             self._anchor_browser_path = self._anchor_browser_path[:-1]
             self._refresh_anchor_browser()
-        elif address is not None:
-            self._do_goto(address)
-        else:
+            return
+        if address is None:
             self._anchor_browser_path = display.split(".")
             self._refresh_anchor_browser()
+            return
+        self._do_goto(address)
+        cb = self._on_pointer_to_named_anchor_cb
+        if not cb:
+            return
+        anchor_info = self._named_anchor_info_for_tools(display)
+        if anchor_info:
+            self.after(10, lambda ai=anchor_info: cb(ai))
 
     def _parse_pcs_format(self, fmt: str) -> Optional[Tuple[str, int, Any]]:
         if not fmt:
@@ -2557,6 +2563,21 @@ class HexEditorFrame(ttk.Frame):
     def set_on_pointer_to_named_anchor(self, cb: Optional[Any]) -> None:
         """Set callback(anchor_info) for NamedAnchor navigation (pointer follow or direct offset match)."""
         self._on_pointer_to_named_anchor_cb = cb
+
+    def _named_anchor_info_for_tools(self, anchor_name: str) -> Optional[Dict[str, Any]]:
+        """If ``anchor_name`` is a PCS table or struct NamedAnchor, return info with ``type`` ``pcs`` or ``struct``.
+
+        Shape matches :meth:`_find_named_anchor_at_offset` results for use with
+        ``set_on_pointer_to_named_anchor`` (e.g. FireRed tools pane).
+        """
+        want = anchor_name.strip()
+        for info in self._get_pcs_table_anchors():
+            if info["name"] == want:
+                return {**info, "type": "pcs"}
+        for info in self.get_struct_anchors():
+            if info["name"] == want:
+                return {**info, "type": "struct"}
+        return None
 
     def _find_named_anchor_at_offset(self, file_off: int, exact: bool = False) -> Optional[Dict[str, Any]]:
         """Return anchor info if file_off matches a NamedAnchor (PCS table or struct).
