@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from typing import Optional
 
-from editors.common.hex_editor import HexEditorFrame
+from editors.common.hex_editor import HexEditorFrame, PcsStringTableFrame
 
 # Path to pokefirered submodule for C parsing
 POKEFIRERED_PATH = os.path.join(os.path.dirname(__file__), "pokefirered")
@@ -25,7 +25,8 @@ class FireRedEditor:
 
         self._hex_editor: Optional[HexEditorFrame] = None
         self._main_paned: Optional[ttk.PanedWindow] = None
-        self._placeholder_frame: Optional[ttk.Frame] = None
+        self._tools_frame: Optional[ttk.Frame] = None
+        self._tools_visible = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -47,7 +48,7 @@ class FireRedEditor:
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="About", command=self._on_about)
 
-        # Main content: paned window with hex editor and room for tools
+        # Main content: paned window with hex editor and Tools pane
         self._main_paned = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
         self._main_paned.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
@@ -55,21 +56,62 @@ class FireRedEditor:
         self._hex_editor = HexEditorFrame(self._main_paned, default_encoding="pcs")
         self._main_paned.add(self._hex_editor)
 
-        # Bottom: placeholder for future tools (resizable)
-        self._placeholder_frame = ttk.LabelFrame(
-            self._main_paned,
-            text="Tools",
-        )
-        self._main_paned.add(self._placeholder_frame)
+        # Bottom: Tools pane (toggleable, room for 3 tools side-by-side)
+        self._tools_frame = ttk.LabelFrame(self._main_paned, text=" Tools ", padding=2)
+        self._tools_frame.columnconfigure(0, weight=1)
+        self._tools_frame.columnconfigure(1, weight=1)
+        self._tools_frame.columnconfigure(2, weight=1)
+        self._tools_frame.rowconfigure(0, weight=1)
+        # Tool 1: PCS String Table (compact, left-aligned)
+        self._pcs_tool = ttk.Frame(self._tools_frame)
+        self._pcs_tool.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
+        self._pcs_tool.columnconfigure(0, weight=1)
+        self._pcs_tool.rowconfigure(0, weight=1)
+        self._pcs_table = PcsStringTableFrame(self._pcs_tool, self._hex_editor)
+        self._pcs_table.grid(row=0, column=0, sticky="nsew")
+        # Tool 2 & 3: placeholders for future tools
+        self._tool2 = ttk.Frame(self._tools_frame)
+        self._tool2.grid(row=0, column=1, sticky="nsew", padx=2)
+        self._tool3 = ttk.Frame(self._tools_frame)
+        self._tool3.grid(row=0, column=2, sticky="nsew", padx=(2, 0))
+        self._tools_visible = False  # Start hidden, no tool selected by default
+
+        # Ctrl+T toggle Tools pane
+        self.root.bind("<Control-t>", self._toggle_tools)
+        self.root.bind("<Control-T>", self._toggle_tools)
+
+        # Pointer->NamedAnchor: when double-clicking pointer to PCS table, show it
+        self._hex_editor.set_on_pointer_to_named_anchor(self._on_pointer_to_pcs_anchor)
 
         self._update_file_menu_state()
         self.root.bind("<Control-s>", lambda e: self._on_save())
+
+    def _toggle_tools(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Toggle Tools pane visibility. Bound to Ctrl+T."""
+        self._tools_visible = not self._tools_visible
+        if self._tools_visible:
+            self._main_paned.add(self._tools_frame)
+        else:
+            self._main_paned.forget(self._tools_frame)
+        return "break"
+
+    def _on_pointer_to_pcs_anchor(self, anchor_info: dict) -> None:
+        """Called when user double-clicks a pointer/offset for a NamedAnchor PCS table."""
+        if not self._tools_visible:
+            self._tools_visible = True
+            self._main_paned.add(self._tools_frame)
+        self._pcs_table.refresh_anchors()
+        name = anchor_info.get("name", "")
+        self._pcs_table.show_table(name)
+        self.root.after(50, lambda: self._pcs_table._tree.focus_set())
 
     def _update_file_menu_state(self) -> None:
         has_file = self._hex_editor and self._hex_editor.has_data()
         state = tk.NORMAL if has_file else tk.DISABLED
         self._file_menu.entryconfig("Save", state=state)
         self._file_menu.entryconfig("Save As...", state=state)
+        if has_file:
+            self._pcs_table.refresh_anchors()
 
     def _on_open_rom(self) -> None:
         path = filedialog.askopenfilename(
@@ -82,6 +124,7 @@ class FireRedEditor:
         if path and self._hex_editor.load_file(path):
             self.root.title(f"Channeler Advance - Pokémon FireRed — {path}")
             self._update_file_menu_state()
+            self._pcs_table.refresh_anchors()
 
     def _on_save(self) -> None:
         if self._hex_editor and self._hex_editor.save_file():

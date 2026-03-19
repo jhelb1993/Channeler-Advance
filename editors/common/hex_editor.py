@@ -139,6 +139,268 @@ _init_pcs()
 _init_pcs_reverse()
 
 
+def encode_pcs_string(text: str, width: int) -> bytearray:
+    """Encode text to PCS bytes, terminated by 0xFF, padded to width with 0x00."""
+    out = bytearray()
+    for c in text:
+        b = _PCS_CHAR_TO_BYTE.get(c)
+        if b is not None:
+            out.append(b)
+    out.append(0xFF)
+    while len(out) < width:
+        out.append(0x00)
+    return out[:width]
+
+
+class _PcsEditDialog:
+    """Modal dialog to edit a PCS string. Returns bytearray of length width (padded with 0xFF, 0x00) on OK."""
+
+    def __init__(self, parent: tk.Misc, title: str, initial: str, width: int) -> None:
+        self.result: Optional[bytearray] = None
+        self._width = width
+        self._dialog = tk.Toplevel(parent)
+        self._dialog.title(title)
+        self._dialog.transient(parent)
+        self._dialog.grab_set()
+        f = ttk.Frame(self._dialog, padding=8)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(f, text="Value:").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self._entry = ttk.Entry(f, width=min(40, width + 4), font=("Consolas", 10))
+        self._entry.insert(0, initial)
+        self._entry.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        self._entry.select_range(0, tk.END)
+        self._entry.focus_set()
+        f.columnconfigure(0, weight=1)
+        btnf = ttk.Frame(f)
+        btnf.grid(row=2, column=0, sticky="e")
+        ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
+        self._entry.bind("<Return>", lambda e: self._on_ok())
+        self._entry.bind("<Escape>", lambda e: self._on_cancel())
+        self._dialog.wait_window()
+
+    def _on_ok(self) -> None:
+        text = self._entry.get()
+        out = bytearray()
+        for c in text:
+            b = _PCS_CHAR_TO_BYTE.get(c)
+            if b is not None:
+                out.append(b)
+        out.append(0xFF)
+        while len(out) < self._width:
+            out.append(0x00)
+        self.result = out[: self._width]
+        self._dialog.destroy()
+
+    def _on_cancel(self) -> None:
+        self._dialog.destroy()
+
+
+class PcsStringTableFrame(ttk.Frame):
+    """Compact PCS string table for Tools pane: combo + tree, inline editing, horizontal scroll."""
+
+    def __init__(self, parent: tk.Misc, hex_editor: "HexEditorFrame", **kwargs) -> None:
+        super().__init__(parent, **kwargs)
+        self._hex = hex_editor
+        self._anchors: List[Dict[str, Any]] = []
+        self._edit_entry: Optional[tk.Entry] = None
+        self._edit_iid: Optional[str] = None
+        self._build()
+
+    def _build(self) -> None:
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+        f = ttk.Frame(self)
+        f.grid(row=0, column=0, sticky="w", pady=(0, 2))
+        f.columnconfigure(1, weight=1)
+        ttk.Label(f, text="Table:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self._combo = ttk.Combobox(f, font=("Consolas", 8), width=20, state="readonly")
+        self._combo.grid(row=0, column=1, sticky="w")
+        self._combo.bind("<<ComboboxSelected>>", self._on_combo_select)
+        tree_f = ttk.Frame(self)
+        tree_f.grid(row=1, column=0, sticky="nsew")
+        tree_f.columnconfigure(0, weight=1)
+        tree_f.rowconfigure(0, weight=1)
+        self._tree = ttk.Treeview(tree_f, columns=("idx", "val"), show="headings", height=5, selectmode="browse")
+        self._tree.heading("idx", text="#")
+        self._tree.heading("val", text="Name")
+        self._tree.column("idx", width=28, minwidth=28)
+        self._tree.column("val", width=120, minwidth=60)
+        self._scroll_y = tk.Scrollbar(tree_f)
+        self._scroll_x = tk.Scrollbar(tree_f, orient=tk.HORIZONTAL)
+        self._tree.configure(yscrollcommand=self._scroll_y.set, xscrollcommand=self._scroll_x.set)
+        self._scroll_y.configure(command=self._tree.yview)
+        self._scroll_x.configure(command=self._tree.xview)
+        self._tree.grid(row=0, column=0, sticky="nsew")
+        self._scroll_y.grid(row=0, column=1, sticky="ns")
+        self._scroll_x.grid(row=1, column=0, sticky="ew")
+        self._tree.bind("<Return>", self._start_inline_edit)
+        self._tree.bind("<F2>", self._start_inline_edit)
+        self._tree.bind("<ButtonRelease-1>", self._on_tree_click)
+
+    def _on_tree_click(self, event: tk.Event) -> None:
+        reg = self._tree.identify_region(event.x, event.y)
+        if reg == "cell":
+            col = self._tree.identify_column(event.x)
+            if col == "#2":
+                self.after(50, self._start_inline_edit)
+
+    def _start_inline_edit(self, event: Optional[tk.Event] = None) -> None:
+        if self._edit_entry:
+            return
+        sel = self._tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        if not iid.startswith("pcs_"):
+            return
+        if not self._anchors or not self._hex.get_data():
+            return
+        idx = self._combo.current()
+        if idx < 0 or idx >= len(self._anchors):
+            return
+        info = self._anchors[idx]
+        vals = self._tree.item(iid, "values")
+        if len(vals) < 2:
+            return
+        try:
+            bbox = self._tree.bbox(iid, "#2")
+        except tk.TclError:
+            return
+        if not bbox:
+            return
+        x, y, w, h = bbox
+        tw = self._tree
+        self._edit_entry = tk.Entry(tw.master, font=("Consolas", 9))
+        self._edit_entry.place(x=tw.winfo_x() + x, y=tw.winfo_y() + y, width=max(w, 80), height=h)
+        self._edit_entry.insert(0, vals[1])
+        self._edit_entry.select_range(0, tk.END)
+        self._edit_entry.focus_set()
+        self._edit_iid = iid
+        self._edit_entry.bind("<Return>", self._commit_inline_edit)
+        self._edit_entry.bind("<Escape>", self._cancel_inline_edit)
+        self._edit_entry.bind("<FocusOut>", self._commit_inline_edit)
+        self._edit_entry.bind("<Up>", self._edit_adjacent_row)
+        self._edit_entry.bind("<Down>", self._edit_adjacent_row)
+
+    def _commit_inline_edit(self, event: Optional[tk.Event] = None) -> None:
+        if not self._edit_entry or not self._edit_iid:
+            return
+        text = self._edit_entry.get()
+        row_idx = int(self._edit_iid.split("_")[1])
+        idx = self._combo.current()
+        if idx >= 0 and idx < len(self._anchors):
+            info = self._anchors[idx]
+            try:
+                gba = int(info["anchor"]["Address"]) if isinstance(info["anchor"]["Address"], (int, float)) else int(str(info["anchor"]["Address"]), 0)
+                if gba < GBA_ROM_BASE:
+                    gba += GBA_ROM_BASE
+                off = gba - GBA_ROM_BASE + row_idx * info["width"]
+                enc = encode_pcs_string(text, info["width"])
+                self._hex.write_bytes_at(off, enc)
+                parts = enc[:enc.index(0xFF)] if 0xFF in enc else enc
+                disp = "".join(_PCS_BYTE_TO_CHAR.get(b, "·") for b in parts)
+                self._tree.set(self._edit_iid, "val", disp)
+            except (ValueError, TypeError, KeyError):
+                pass
+        self._cancel_inline_edit()
+
+    def _edit_adjacent_row(self, event: tk.Event) -> Optional[str]:
+        """Up/Down: commit current edit, move to previous/next row, start edit there."""
+        if not self._edit_entry or not self._edit_iid:
+            return None
+        text = self._edit_entry.get()
+        row_idx = int(self._edit_iid.split("_")[1])
+        idx = self._combo.current()
+        if idx >= 0 and idx < len(self._anchors):
+            info = self._anchors[idx]
+            try:
+                gba = int(info["anchor"]["Address"]) if isinstance(info["anchor"]["Address"], (int, float)) else int(str(info["anchor"]["Address"]), 0)
+                if gba < GBA_ROM_BASE:
+                    gba += GBA_ROM_BASE
+                off = gba - GBA_ROM_BASE + row_idx * info["width"]
+                enc = encode_pcs_string(text, info["width"])
+                self._hex.write_bytes_at(off, enc)
+                parts = enc[:enc.index(0xFF)] if 0xFF in enc else enc
+                self._tree.set(self._edit_iid, "val", "".join(_PCS_BYTE_TO_CHAR.get(b, "·") for b in parts))
+            except (ValueError, TypeError, KeyError):
+                pass
+        direction = -1 if event.keysym == "Up" else 1
+        next_idx = row_idx + direction
+        next_iid = f"pcs_{next_idx}"
+        self._cancel_inline_edit()
+        if self._tree.exists(next_iid):
+            self._tree.selection_set(next_iid)
+            self._tree.see(next_iid)
+            self._tree.focus_set()
+            self.after(10, self._start_inline_edit)
+        return "break"
+
+    def _cancel_inline_edit(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        ent = self._edit_entry
+        self._edit_entry = None
+        self._edit_iid = None
+        if ent:
+            ent.place_forget()
+            ent.destroy()
+        if self._tree:
+            self._tree.focus_set()
+        return "break"
+
+    def _on_combo_select(self, event: Optional[tk.Event] = None) -> None:
+        self._load_table()
+
+    def refresh_anchors(self) -> None:
+        self._anchors = self._hex.get_pcs_table_anchors()
+        self._combo.set("")
+        self._combo.configure(values=[a["name"] for a in self._anchors] if self._anchors else [])
+        self._tree.delete(*self._tree.get_children())
+
+    def show_table(self, anchor_name: str) -> None:
+        if not self._anchors:
+            self.refresh_anchors()
+        for i, a in enumerate(self._anchors):
+            if a["name"] == anchor_name:
+                self._combo.current(i)
+                self._load_table()
+                return
+
+    def _load_table(self) -> None:
+        self._tree.delete(*self._tree.get_children())
+        if not self._anchors or not self._hex.get_data():
+            return
+        idx = self._combo.current()
+        if idx < 0 or idx >= len(self._anchors):
+            return
+        info = self._anchors[idx]
+        anchor, width, count = info["anchor"], info["width"], info["count"]
+        addr = anchor.get("Address")
+        if addr is None:
+            return
+        try:
+            gba = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+            if gba < GBA_ROM_BASE:
+                gba += GBA_ROM_BASE
+            base_off = gba - GBA_ROM_BASE
+        except (ValueError, TypeError):
+            return
+        self._tree.heading("val", text=info["field"].capitalize())
+        data = self._hex.get_data()
+        if not data:
+            return
+        for i in range(count):
+            off = base_off + i * width
+            if off + width > len(data):
+                break
+            chunk = bytes(data[off : off + width])
+            chars = []
+            for b in chunk:
+                if b == 0xFF:
+                    break
+                chars.append(_PCS_BYTE_TO_CHAR.get(b, "·"))
+            self._tree.insert("", tk.END, values=(str(i), "".join(chars)), iid=f"pcs_{i}")
+
+
 class HexEditorFrame(ttk.Frame):
     """Embeddable hex editor with 16 bytes/row, pointer highlighting, follow, save, delete, insert mode."""
 
@@ -182,34 +444,41 @@ class HexEditorFrame(ttk.Frame):
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(1, weight=1)
 
-        # Top row: mode | ASM mode | Goto | Chars
+        # Top row: mode | cursor offset | ASM mode | Goto | Chars
         top_row = ttk.Frame(outer)
         top_row.grid(row=0, column=0, sticky="w", pady=(0, 1))
         self._mode_label = ttk.Label(top_row, text="REPLACE", font=("Consolas", 9, "bold"))
         self._mode_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
-        ttk.Label(top_row, text="ASM mode:", font=("Consolas", 9)).grid(row=0, column=1, sticky="w", padx=(8, 2))
+        ttk.Label(top_row, text="Offset:", font=("Consolas", 9)).grid(row=0, column=1, sticky="w", padx=(8, 2))
+        self._cursor_offset_var = tk.StringVar(value="")
+        self._cursor_offset_entry = ttk.Entry(
+            top_row, textvariable=self._cursor_offset_var,
+            font=("Consolas", 9), width=10, state="readonly"
+        )
+        self._cursor_offset_entry.grid(row=0, column=2, sticky="w", padx=(0, 8))
+        ttk.Label(top_row, text="ASM mode:", font=("Consolas", 9)).grid(row=0, column=3, sticky="w", padx=(8, 2))
         self._asm_mode_var = tk.StringVar(value="Thumb")
         self._asm_mode_combo = ttk.Combobox(
             top_row, textvariable=self._asm_mode_var, values=["Thumb", "ARM"], width=6, state="readonly", font=("Consolas", 9)
         )
-        self._asm_mode_combo.grid(row=0, column=2, sticky="w", padx=(0, 2))
+        self._asm_mode_combo.grid(row=0, column=4, sticky="w", padx=(0, 2))
         self._asm_mode_combo.current(0)
         self._asm_mode_combo.bind("<<ComboboxSelected>>", self._on_asm_mode_change)
-        ttk.Label(top_row, text="Goto:", font=("Consolas", 9)).grid(row=0, column=3, sticky="w", padx=(8, 2))
+        ttk.Label(top_row, text="Goto:", font=("Consolas", 9)).grid(row=0, column=5, sticky="w", padx=(8, 2))
         self._goto_var = tk.StringVar(value="")
         self._goto_entry = ttk.Entry(top_row, textvariable=self._goto_var, width=10, font=("Consolas", 9))
-        self._goto_entry.grid(row=0, column=4, sticky="w", padx=(0, 8))
+        self._goto_entry.grid(row=0, column=6, sticky="w", padx=(0, 8))
         self._goto_entry.bind("<KeyRelease>", self._on_goto_entry_change)
         self._goto_entry.bind("<FocusIn>", self._on_goto_focus_in)
-        ttk.Label(top_row, text="Chars:", font=("Consolas", 9)).grid(row=0, column=5, sticky="w", padx=(8, 2))
+        ttk.Label(top_row, text="Chars:", font=("Consolas", 9)).grid(row=0, column=7, sticky="w", padx=(8, 2))
         self._encoding_var = tk.StringVar(value=self._encoding.upper())
         self._encoding_combo = ttk.Combobox(
             top_row, textvariable=self._encoding_var, values=["ASCII", "PCS"], width=8, state="readonly"
         )
-        self._encoding_combo.grid(row=0, column=6, sticky="w")
+        self._encoding_combo.grid(row=0, column=8, sticky="w")
         self._encoding_combo.bind("<<ComboboxSelected>>", self._on_encoding_change)
         self._selection_label = ttk.Label(top_row, text="", font=("Consolas", 9))
-        self._selection_label.grid(row=0, column=7, sticky="w", padx=(8, 0))
+        self._selection_label.grid(row=0, column=9, sticky="w", padx=(8, 0))
 
         # Main content: hex | ascii | asm (toggleable) | scrollbar | tools area
         body = ttk.Frame(outer)
@@ -309,8 +578,8 @@ class HexEditorFrame(ttk.Frame):
             w.bind("<Button-4>", lambda e: _pseudo_c_scroll(3))
             w.bind("<Button-5>", lambda e: _pseudo_c_scroll(-3))
 
-        # FunctionAnchor browser: hierarchical nav (1st -> 2nd -> 3rd order), Ctrl+M
-        self._anchor_frame = ttk.LabelFrame(body, text=" FunctionAnchors ", padding=2)
+        # Function/NamedAnchor browser: hierarchical nav (1st -> 2nd -> 3rd order), Ctrl+M
+        self._anchor_frame = ttk.LabelFrame(body, text=" Anchors ", padding=2)
         self._anchor_frame.grid(row=1, column=5, sticky="nsew", padx=(4, 0))
         self._anchor_frame.columnconfigure(0, weight=1)
         self._anchor_frame.rowconfigure(0, weight=1)
@@ -335,6 +604,8 @@ class HexEditorFrame(ttk.Frame):
 
         self._tools_frame = ttk.Frame(body, width=1)
         self._tools_frame.grid(row=1, column=6, sticky="nsew", padx=(4, 0))
+
+        self._on_pointer_to_named_anchor_cb: Optional[Any] = None
 
         if not self._asm_pane_visible:
             self._asm_frame.grid_remove()
@@ -814,8 +1085,11 @@ class HexEditorFrame(ttk.Frame):
         return "break"
 
     def _get_anchor_browser_items(self) -> List[Tuple[str, Optional[int]]]:
-        """Return [(display_text, address_or_none), ...]. address is set for leaves (full anchor names)."""
-        anchors = self._toml_data.get("FunctionAnchors", [])
+        """Return [(display_text, address_or_none), ...]. address is set for leaves (full anchor names).
+        Includes both FunctionAnchors and NamedAnchors."""
+        funcs = self._toml_data.get("FunctionAnchors", [])
+        named = self._toml_data.get("NamedAnchors", [])
+        anchors = list(funcs) + [a for a in named if a.get("Address") is not None]
         path = self._anchor_browser_path
         prefix = ".".join(path) + "." if path else ""
         branches: Set[str] = set()
@@ -891,6 +1165,107 @@ class HexEditorFrame(ttk.Frame):
         else:
             self._anchor_browser_path = display.split(".")
             self._refresh_anchor_browser()
+
+    def _parse_pcs_format(self, fmt: str) -> Optional[Tuple[str, int, Any]]:
+        if not fmt:
+            return None
+        m = re.search(r'\^?\[(\w+)""(\d+)\](.+)', fmt)
+        if not m:
+            return None
+        field, width_str, length_part = m.group(1), m.group(2), m.group(3).strip()
+        width = int(width_str)
+        if length_part.isdigit():
+            return (field, width, int(length_part))
+        return (field, width, length_part)
+
+    def _resolve_table_length(self, length_ref: Any) -> Optional[int]:
+        if isinstance(length_ref, int):
+            return length_ref if length_ref >= 0 else None
+        if not isinstance(length_ref, str) or not self._data:
+            return None
+        for mw in self._toml_data.get("MatchedWords", []):
+            if str(mw.get("Name", "")).strip() == length_ref.strip():
+                addr, ln = mw.get("Address"), mw.get("Length", 1)
+                if addr is None:
+                    continue
+                try:
+                    gba = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+                    if gba < GBA_ROM_BASE:
+                        gba += GBA_ROM_BASE
+                    off = gba - GBA_ROM_BASE
+                    if 0 <= off < len(self._data) - ln:
+                        val = sum(self._data[off + i] << (i * 8) for i in range(ln))
+                        return val
+                except (ValueError, TypeError):
+                    pass
+        return None
+
+    def _get_pcs_table_anchors(self) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
+        for anchor in self._toml_data.get("NamedAnchors", []):
+            fmt = str(anchor.get("Format", "")).strip().strip("'\"")
+            parsed = self._parse_pcs_format(fmt)
+            if parsed:
+                field, width, length = parsed
+                count = length if isinstance(length, int) else self._resolve_table_length(length)
+                if count is not None and count > 0:
+                    result.append({
+                        "anchor": anchor, "name": str(anchor.get("Name", "")).strip(),
+                        "field": field, "width": width, "count": count,
+                    })
+        return result
+
+    def set_on_pointer_to_named_anchor(self, cb: Optional[Any]) -> None:
+        """Set callback(anchor_info) for NamedAnchor navigation (pointer follow or direct offset match)."""
+        self._on_pointer_to_named_anchor_cb = cb
+
+    def _find_named_anchor_at_offset(self, file_off: int, exact: bool = False) -> Optional[Dict[str, Any]]:
+        """Return PCS table info if file_off matches a NamedAnchor.
+        exact=True: only match if file_off is the exact start.
+        exact=False: match if file_off falls within the table's byte range."""
+        for info in self._get_pcs_table_anchors():
+            addr = info["anchor"].get("Address")
+            if addr is None:
+                continue
+            try:
+                gba = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+                if gba < GBA_ROM_BASE:
+                    gba += GBA_ROM_BASE
+                start = gba - GBA_ROM_BASE
+                if exact:
+                    if start == file_off:
+                        return info
+                else:
+                    end = start + info["width"] * info["count"]
+                    if start <= file_off < end:
+                        return info
+            except (ValueError, TypeError):
+                pass
+        return None
+
+    def _select_named_anchor_extent(self, info: Dict[str, Any]) -> None:
+        """Select all bytes of a NamedAnchor table and place cursor at the start."""
+        addr = info["anchor"].get("Address")
+        if addr is None:
+            return
+        try:
+            gba = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+            if gba < GBA_ROM_BASE:
+                gba += GBA_ROM_BASE
+            start = gba - GBA_ROM_BASE
+        except (ValueError, TypeError):
+            return
+        total_bytes = info["width"] * info["count"]
+        end = start + total_bytes - 1
+        if end >= len(self._data):
+            end = len(self._data) - 1
+        self._cursor_byte_offset = start
+        self._selection_start = start
+        self._selection_end = end
+        self._visible_row_start = start // BYTES_PER_ROW
+        self._refresh_visible()
+        self._update_scrollbar()
+        self._update_cursor_display()
 
     def _on_asm_mode_change(self, event: Optional[tk.Event] = None) -> None:
         sel = self._asm_mode_var.get()
@@ -1460,22 +1835,109 @@ class HexEditorFrame(ttk.Frame):
         return os.path.join(os.path.dirname(rom_path), base + ".toml")
 
     def _load_toml_for_rom(self) -> None:
-        """Load TOML for current ROM. Create default if missing."""
-        if not self._file_path or not _TOML_AVAILABLE:
+        """Load TOML for current ROM. Create default if missing.
+        Tries tomli first; on failure uses regex fallback. Treats '''...''' same as \"...\" for Name/Format."""
+        if not self._file_path:
             self._toml_path = None
             self._toml_data = {}
             return
         toml_path = self._get_toml_path(self._file_path)
-        if os.path.isfile(toml_path):
+        if not os.path.isfile(toml_path):
+            self._create_default_toml(toml_path)
+            return
+        self._toml_path = toml_path
+        loaded = False
+        if _TOML_AVAILABLE:
             try:
                 with open(toml_path, "rb") as f:
                     self._toml_data = tomli.load(f)
-                self._toml_path = toml_path
+                loaded = True
             except Exception:
-                self._toml_data = {}
-                self._toml_path = toml_path
-        else:
-            self._create_default_toml(toml_path)
+                pass
+        if not loaded:
+            self._toml_data = self._load_toml_regex_fallback(toml_path)
+
+    def _load_toml_regex_fallback(self, toml_path: str) -> Dict[str, Any]:
+        """Regex-based TOML loader when tomli fails. Treats '''...''' same as \"...\"."""
+        text = ""
+        try:
+            text = open(toml_path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            return {}
+        result: Dict[str, Any] = {}
+        # Match Key = '''value''' or Key = "value" - value can span lines for '''
+        def _parse_str(m: "re.Match") -> str:
+            s = m.group(1)
+            if s.startswith("'''") and s.endswith("'''"):
+                return s[3:-3].replace("\\'", "'")
+            if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+                return s[1:-1].replace('\\"', '"').replace("\\'", "'")
+            return s
+        for section in ("FunctionAnchors", "NamedAnchors", "MatchedWords", "Constants", "Structs", "List"):
+            pattern = rf"\[\[{section}\]\](.*?)(?=\[\[|\Z)"
+            blocks = re.findall(pattern, text, re.DOTALL)
+            items: List[Dict[str, Any]] = []
+            for block in blocks:
+                item: Dict[str, Any] = {}
+                idx = 0
+                while idx < len(block):
+                    m = re.match(r"\s*(\w+)\s*=\s*", block[idx:])
+                    if not m:
+                        idx += 1
+                        continue
+                    key, val_start = m.group(1), idx + m.end()
+                    rest = block[val_start:]
+                    if rest.startswith("'''"):
+                        end = rest.find("'''", 3)
+                        if end >= 0:
+                            item[key] = rest[3:end].replace("\\'", "'")
+                            idx = val_start + end + 3
+                        else:
+                            idx = val_start + 3
+                    elif rest.startswith('"'):
+                        i, n = 1, len(rest)
+                        while i < n:
+                            if rest[i] == "\\" and i + 1 < n:
+                                i += 2
+                                continue
+                            if rest[i] == '"':
+                                item[key] = rest[1:i].replace('\\"', '"')
+                                idx = val_start + i + 1
+                                break
+                            i += 1
+                        else:
+                            idx = val_start + n
+                    elif rest.startswith("'"):
+                        i, n = 1, len(rest)
+                        while i < n:
+                            if rest[i] == "\\" and i + 1 < n:
+                                i += 2
+                                continue
+                            if rest[i] == "'":
+                                item[key] = rest[1:i].replace("\\'", "'")
+                                idx = val_start + i + 1
+                                break
+                            i += 1
+                        else:
+                            idx = val_start + n
+                    else:
+                        hm = re.match(r"(0x[0-9A-Fa-f]+|\d+)\s*", rest)
+                        if hm:
+                            s = hm.group(1)
+                            item[key] = int(s, 16) if s.startswith("0x") else int(s)
+                            idx = val_start + hm.end()
+                        elif rest.startswith("true"):
+                            item[key] = True
+                            idx = val_start + 4
+                        elif rest.startswith("false"):
+                            item[key] = False
+                            idx = val_start + 5
+                        else:
+                            idx = val_start + 1
+                if item:
+                    items.append(item)
+            result[section] = items
+        return result
 
     def _create_default_toml(self, toml_path: str) -> None:
         """Create default TOML file with template structure."""
@@ -1522,11 +1984,11 @@ Format = "`f|u8`[u8 arg0]"
             pass
 
     def _get_function_anchor_offset_by_name(self, name: str) -> Optional[int]:
-        """Return file offset for FunctionAnchor with given Name, or None if not found."""
+        """Return file offset for FunctionAnchor or NamedAnchor with given Name, or None if not found."""
         if not self._toml_data or not name:
             return None
         name_lo = name.strip().lower()
-        for anchor in self._toml_data.get("FunctionAnchors", []):
+        for anchor in list(self._toml_data.get("FunctionAnchors", [])) + list(self._toml_data.get("NamedAnchors", [])):
             anchor_name = anchor.get("Name")
             if anchor_name and str(anchor_name).lower() == name_lo:
                 addr = anchor.get("Address")
@@ -1542,10 +2004,10 @@ Format = "`f|u8`[u8 arg0]"
         return None
 
     def _get_function_anchor_for_addr(self, gba_addr: int) -> Optional[Dict[str, Any]]:
-        """Return FunctionAnchor dict if gba_addr matches any anchor Address."""
+        """Return FunctionAnchor or NamedAnchor dict if gba_addr matches any anchor Address."""
         if not self._toml_data:
             return None
-        for anchor in self._toml_data.get("FunctionAnchors", []):
+        for anchor in list(self._toml_data.get("FunctionAnchors", [])) + list(self._toml_data.get("NamedAnchors", [])):
             addr = anchor.get("Address")
             if addr is None:
                 continue
@@ -1873,6 +2335,21 @@ Format = "`f|u8`[u8 arg0]"
 
     def has_data(self) -> bool:
         return len(self._data) > 0
+
+    def get_data(self) -> Optional[bytearray]:
+        return self._data if self._data else None
+
+    def get_pcs_table_anchors(self) -> List[Dict[str, Any]]:
+        return self._get_pcs_table_anchors()
+
+    def write_bytes_at(self, offset: int, data: bytes) -> None:
+        if not self._data or offset < 0:
+            return
+        for i, b in enumerate(data):
+            if offset + i < len(self._data):
+                self._data[offset + i] = b
+        self._modified = True
+        self._refresh_visible()
 
     # ── Scrolling ────────────────────────────────────────────────────
 
@@ -2756,6 +3233,10 @@ Format = "`f|u8`[u8 arg0]"
         if not self._data:
             return
         self._cursor_byte_offset = max(0, min(self._cursor_byte_offset, len(self._data) - 1))
+        fo = self._cursor_byte_offset
+        self._cursor_offset_var.set(
+            f"{GBA_ROM_BASE + fo:08X}" if self._data else ""
+        )
 
         idx = self._offset_to_index(self._cursor_byte_offset)
         idx_asc = self._offset_to_ascii_index(self._cursor_byte_offset)
@@ -2791,6 +3272,8 @@ Format = "`f|u8`[u8 arg0]"
                     aix_e = self._offset_to_ascii_index(row_end_off)
                     if aix_s and aix_e:
                         self._text_ascii.tag_add("sel_ascii", aix_s, f"{aix_e}+1c")
+            self._text.tag_raise("sel_hex")
+            self._text_ascii.tag_raise("sel_ascii")
         else:
             self._selection_label.config(text="")
 
@@ -2935,25 +3418,57 @@ Format = "`f|u8`[u8 arg0]"
                 end = max(end, fo + 3)
         return (start, end)
 
-    def _on_double_click(self, event: tk.Event) -> None:
+    def _on_double_click(self, event: tk.Event) -> str:
         idx = self._text.index(f"@{event.x},{event.y}")
         off = self._index_to_offset(idx)
-        if off is not None:
+        if off is None:
+            self._on_click(event)
+            return "break"
+
+        # Determine if click is on address column (col < 10) vs hex data
+        try:
+            _, cn = idx.split(".")
+            on_addr_col = int(cn) < 10
+        except (ValueError, TypeError):
+            on_addr_col = False
+        if not on_addr_col:
+            # Hex data click: check 4-byte word for pointer to a PCS table start
+            ptr_start = (off // 4) * 4
+            target_fo = self._get_pointer_at_offset(ptr_start)
+            if target_fo is not None:
+                anchor_info = self._find_named_anchor_at_offset(target_fo, exact=True)
+                if anchor_info:
+                    self._select_named_anchor_extent(anchor_info)
+                    if self._on_pointer_to_named_anchor_cb:
+                        self.after(10, lambda ai=anchor_info: self._on_pointer_to_named_anchor_cb(ai))
+                    return "break"
+
+        # Check if current offset falls within a NamedAnchor PCS table
+        anchor_info = self._find_named_anchor_at_offset(off)
+        if anchor_info:
+            self._select_named_anchor_extent(anchor_info)
+            if self._on_pointer_to_named_anchor_cb:
+                self.after(10, lambda ai=anchor_info: self._on_pointer_to_named_anchor_cb(ai))
+            return "break"
+
+        if not on_addr_col:
             ptr_start = (off // 4) * 4
             if self._follow_pointer_at(ptr_start):
-                return
-            extent = self._find_function_extent(off)
-            if extent is not None:
-                func_start, func_end = extent
-                self._selection_start = func_start
-                self._selection_end = func_end
-                self._cursor_byte_offset = func_start
-                if self._ensure_cursor_visible():
-                    self._update_scrollbar()
-                self._refresh_visible()
-                self._update_cursor_display()
-                return
+                return "break"
+
+        extent = self._find_function_extent(off)
+        if extent is not None:
+            func_start, func_end = extent
+            self._selection_start = func_start
+            self._selection_end = func_end
+            self._cursor_byte_offset = func_start
+            if self._ensure_cursor_visible():
+                self._update_scrollbar()
+            self._refresh_visible()
+            self._update_cursor_display()
+            return "break"
         self._on_click(event)
+        return "break"
 
     def _on_right_click(self, event: tk.Event) -> None:
         idx = self._text.index(f"@{event.x},{event.y}")
@@ -3066,9 +3581,10 @@ Format = "`f|u8`[u8 arg0]"
         if target is not None:
             self._cursor_byte_offset = target
             self._selection_start = self._selection_end = None
-            self._ensure_cursor_visible()
+            self._visible_row_start = target // BYTES_PER_ROW
             self._refresh_visible()
             self._update_scrollbar()
+            self._update_cursor_display()
             return True
         return False
 

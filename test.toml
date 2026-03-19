@@ -2,24 +2,44 @@
 # Add [[FunctionAnchors]], [[Structs]], [[Constants]] as needed.
 
 [[Constants]]
-Name = "NUM_TASK_DATA"
+Name = '''NUM_TASK_DATA'''
 Value = 16
 
 [[Structs]]
-Name = "Task"
-Format = "`s`{TaskFunc|*u8}{isActive|b8}{prev|u8}{next|u8}{priority|u8}{data[NUM_TASK_DATA]|s16}"
+Name = '''Task'''
+Format = '''`s`{TaskFunc|*u8}{isActive|b8}{prev|u8}{next|u8}{priority|u8}{data[NUM_TASK_DATA]|s16}'''
 
 [[FunctionAnchors]]
-Name = "funcs.trainer_card.Task_SetCardFlipped"
+Name = '''funcs.trainer_card.Task_SetCardFlipped'''
 Address = 0x8b4d8
-Format = "`f|b8`[struct Task* task]"
+Format = '''`f|b8`[struct Task* task]'''
 
 [[FunctionAnchors]]
-Name = "funcs.trainer_card.Task_BeginCardFlip"
+Name = '''funcs.trainer_card.Task_BeginCardFlip'''
 Address = 0x8b254
-Format = "`f|b8`[struct Task* task]"
+Format = '''`f|b8`[struct Task* task]'''
 
 [[FunctionAnchors]]
-Name = "funcs.trainer_card.Task_AnimateCardFlipUp"
+Name = '''funcs.trainer_card.Task_AnimateCardFlipUp'''
 Address = 0x8b540
-Format = "`f|b8`[struct Task* task]"
+Format = '''`f|b8`[struct Task* task]'''
+
+[[NamedAnchors]]
+Name = '''data.pokemon.gSpeciesNames'''
+Address = 0x245EE0
+Format = '''[name""11]412'''
+
+[[NamedAnchors]]
+Name = '''data.abilities.gAbilityNames'''
+Address = 0x24FC40
+Format = '''[name""13]78'''
+
+[[NamedAnchors]]
+Name = '''data.pokemon.type.gTypeNames'''
+Address = 0x24F1A0
+Format = '''^[name""7]data.pokemon.type.length'''
+
+[[MatchedWords]]
+Name = '''data.pokemon.type.length'''
+Address = 0x456F10
+Length = 1
