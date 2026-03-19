@@ -1,0 +1,7 @@
+6bpp
+graphics and palette editing
+convert structs and functions to toml
+ctrl + t pulls up all 3 editors
+port firered editor code to hex_editor.py
+generate toml (other option)
+undo (ctrl + z)
