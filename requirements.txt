@@ -4,3 +4,4 @@
 capstone>=5.0
 angr>=9.2
 tomli>=2.0
+pygments>=2.0

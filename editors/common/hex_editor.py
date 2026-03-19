@@ -36,8 +36,20 @@ try:
 except ImportError:
     pass
 
+_PYGMENTS_AVAILABLE = False
+try:
+    from pygments import lex
+    from pygments.lexers import get_lexer_by_name
+    _PYGMENTS_AVAILABLE = True
+except ImportError:
+    pass
+
 GBA_ROM_BASE = 0x08000000
 GBA_ROM_MAX = 0x09FFFFFF  # addresses > this are not ROM code pointers; treat as code, not .word
+GBA_EWRAM_START = 0x02000000
+GBA_EWRAM_END = 0x0203FFFF
+GBA_IWRAM_START = 0x03000000
+GBA_IWRAM_END = 0x03007FFF
 BYTES_PER_ROW = 16
 HEX_DIGITS = "0123456789ABCDEFabcdef"
 
@@ -308,6 +320,8 @@ class HexEditorFrame(ttk.Frame):
         self._text_ascii.tag_configure("pointer", foreground="red")
         self._text_ascii.tag_configure("sel_ascii", background="#add8e6", foreground="black")
 
+        self._init_syntax_highlight_tags()
+
         # Key / mouse bindings on hex widget
         self._text.bind("<KeyPress>", self._on_key)
         self._text.bind("<Button-1>", self._on_click)
@@ -364,12 +378,12 @@ class HexEditorFrame(ttk.Frame):
         ):
             w.bind("<Control-h>", self._toggle_hackmew_mode)
             w.bind("<Control-H>", self._toggle_hackmew_mode)
-            w.bind("<Control-e>", self._compile_hackmew_asm)
-            w.bind("<Control-E>", self._compile_hackmew_asm)
+            w.bind("<Control-i>", self._compile_hackmew_asm)
+            w.bind("<Control-I>", self._compile_hackmew_asm)
         self.winfo_toplevel().bind("<Control-h>", self._toggle_hackmew_mode, add=True)
         self.winfo_toplevel().bind("<Control-H>", self._toggle_hackmew_mode, add=True)
-        self.winfo_toplevel().bind("<Control-e>", self._compile_hackmew_asm, add=True)
-        self.winfo_toplevel().bind("<Control-E>", self._compile_hackmew_asm, add=True)
+        self.winfo_toplevel().bind("<Control-i>", self._compile_hackmew_asm, add=True)
+        self.winfo_toplevel().bind("<Control-I>", self._compile_hackmew_asm, add=True)
 
         self._text.bind("<Control-Shift-A>", lambda e: self._select_all())
         self._text_ascii.bind("<Control-Shift-A>", lambda e: self._select_all())
@@ -425,6 +439,102 @@ class HexEditorFrame(ttk.Frame):
         self._goto_entry.focus_set()
         self._goto_entry.select_range(0, tk.END)
         return "break"
+
+    def _init_syntax_highlight_tags(self) -> None:
+        """Configure Pygments token tags for ASM and Pseudo-C panes. GBA address regions use custom greens."""
+        for w in (self._text_asm, self._text_pseudo_c):
+            w.tag_configure("Token.Keyword", foreground="#0000FF")
+            w.tag_configure("Token.Keyword.Declaration", foreground="#0000FF")
+            w.tag_configure("Token.Keyword.Type", foreground="#2E8B57")
+            w.tag_configure("Token.Comment", foreground="#B22222")
+            w.tag_configure("Token.Comment.Single", foreground="#B22222")
+            w.tag_configure("Token.Comment.Multi", foreground="#B22222")
+            w.tag_configure("Token.String", foreground="#BC8F8F")
+            w.tag_configure("Token.Number", foreground="#68228B")
+            w.tag_configure("Token.Number.Hex", foreground="#68228B")
+            w.tag_configure("Token.Operator", foreground="#333333")
+            w.tag_configure("Token.Name.Label", foreground="#228B22")
+            w.tag_configure("Token.Name.Function", foreground="#00008B")
+            w.tag_configure("addr_rom", foreground="#39FF14")   # neon green
+            w.tag_configure("addr_ewram", foreground="#32CD32")  # leaf green
+            w.tag_configure("addr_iwram", foreground="#006400")  # dark green
+            w.tag_configure("loc_label", foreground="#DC143C")  # crimson red for loc_
+
+    def _apply_syntax_highlighting(self, widget: tk.Text, lang: str) -> None:
+        """Apply Pygments syntax highlighting and GBA address coloring to widget content."""
+        text = widget.get("1.0", tk.END)
+        if not text.strip():
+            return
+        try:
+            if _PYGMENTS_AVAILABLE:
+                lexer = get_lexer_by_name("gas" if lang == "asm" else "c", stripall=False)
+                widget.mark_set("_hl_start", "1.0")
+                for token_type, value in lex(text, lexer):
+                    if not value:
+                        continue
+                    widget.mark_set("_hl_end", "_hl_start + %dc" % len(value))
+                    tag_name = str(token_type)
+                    try:
+                        raw = value.strip().lstrip("#<>")
+                        if raw.lower().startswith("0x"):
+                            val = int(raw, 16)
+                            if GBA_ROM_BASE <= val <= GBA_ROM_MAX:
+                                tag_name = "addr_rom"
+                            elif GBA_EWRAM_START <= val <= GBA_EWRAM_END:
+                                tag_name = "addr_ewram"
+                            elif GBA_IWRAM_START <= val <= GBA_IWRAM_END:
+                                tag_name = "addr_iwram"
+                    except (ValueError, TypeError):
+                        pass
+                    widget.tag_add(tag_name, "_hl_start", "_hl_end")
+                    widget.mark_set("_hl_start", "_hl_end")
+            self._apply_gba_address_tags(widget, text)
+        except Exception:
+            pass
+
+    def _classify_gba_address(self, val: int) -> Optional[str]:
+        """Return the highlight tag for a GBA address value, or None."""
+        if GBA_ROM_BASE <= val <= GBA_ROM_MAX:
+            return "addr_rom"
+        if GBA_EWRAM_START <= val <= GBA_EWRAM_END:
+            return "addr_ewram"
+        if GBA_IWRAM_START <= val <= GBA_IWRAM_END:
+            return "addr_iwram"
+        return None
+
+    def _apply_gba_address_tags(self, widget: tk.Text, text: str) -> None:
+        """Tag GBA addresses, sub_/loc_/g_ labels in a text widget."""
+        # Hex address literals: 0x08XXXXXX, 0x8XXXXXX, 0x02XXXXXX, 0x2XXXXXX, etc.
+        for match in re.finditer(r"(?<![.\w])#?(0x[0-9A-Fa-f]{7,8})\b", text):
+            try:
+                val = int(match.group(1), 16)
+                tag = self._classify_gba_address(val)
+                if tag:
+                    widget.tag_add(tag, f"1.0+{match.start(1)}c", f"1.0+{match.end(1)}c")
+            except (ValueError, TypeError):
+                pass
+        # sub_XXXXXXXX / sub_XXXXXXX — ROM function names (neon green)
+        for match in re.finditer(r"\bsub_([0-9A-Fa-f]{7,8})\b", text):
+            try:
+                val = int(match.group(1), 16)
+                if self._classify_gba_address(val) == "addr_rom":
+                    widget.tag_add("addr_rom", f"1.0+{match.start(0)}c", f"1.0+{match.end(0)}c")
+            except (ValueError, TypeError):
+                pass
+        # loc_XXXXXXXX — branch labels (red)
+        for match in re.finditer(r"\bloc_[0-9A-Fa-f]{7,8}\b", text):
+            widget.tag_add("loc_label", f"1.0+{match.start(0)}c", f"1.0+{match.end(0)}c")
+        # g_XXXXXXX — EWRAM / IWRAM global variable names
+        for match in re.finditer(r"\bg_([0-9A-Fa-f]{7,8})\b", text):
+            try:
+                val = int(match.group(1), 16)
+                tag = self._classify_gba_address(val)
+                if tag in ("addr_ewram", "addr_iwram"):
+                    widget.tag_add(tag, f"1.0+{match.start(0)}c", f"1.0+{match.end(0)}c")
+            except (ValueError, TypeError):
+                pass
+        for tag in ("addr_rom", "addr_ewram", "addr_iwram", "loc_label"):
+            widget.tag_raise(tag)
 
     def _toggle_asm_pane(self, event: Optional[tk.Event] = None) -> Optional[str]:
         """Toggle ASM disassembly pane visibility. Bound to Ctrl+A.
@@ -534,7 +644,7 @@ class HexEditorFrame(ttk.Frame):
         return "\n".join(lines)
 
     def _compile_hackmew_asm(self, event: Optional[tk.Event] = None) -> Optional[str]:
-        """Compile edited HackMew ASM via deps/thumb.bat and insert .bin into ROM. Bound to Ctrl+E."""
+        """Compile edited HackMew ASM via deps/thumb.bat and insert .bin into ROM. Bound to Ctrl+I."""
         if not self._hackmew_mode or not self._asm_pane_visible:
             return "break"
         if self._hackmew_asm_start is None or self._hackmew_asm_end is None:
@@ -847,7 +957,7 @@ class HexEditorFrame(ttk.Frame):
     def _prevent_unwanted(self, event: tk.Event) -> Optional[str]:
         if event.keysym in ("Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next"):
             return None
-        if event.state & 0x4 and event.keysym.lower() in ("a", "b", "c", "g", "h", "v", "x", "s"):
+        if event.state & 0x4 and event.keysym.lower() in ("a", "b", "c", "g", "h", "i", "v", "x", "s"):
             return None
         if event.char and event.char in HEX_DIGITS:
             return "break"
@@ -1536,13 +1646,16 @@ Format = "`f|u8`[u8 arg0]"
                     hex_bytes = f"{b0:02x} {b1:02x} {b2:02x} {b3:02x}"
                     lines.append(f"{GBA_ROM_BASE + offset:08X}:  {hex_bytes:12s}  .word 0x{b3:02x}{b2:02x}{b1:02x}{b0:02x}\n")
                 offset += align
-        self._text_asm.insert("1.0", "".join(lines) if lines else "(No instructions)")
+        content = "".join(lines) if lines else "(No instructions)"
+        self._text_asm.insert("1.0", content)
+        if lines:
+            self._apply_syntax_highlighting(self._text_asm, "asm")
         self._text_asm.configure(state=tk.DISABLED)
         if self._pseudo_c_pane_visible:
             self._refresh_pseudo_c_selection()
 
     def _refresh_asm_hackmew(self) -> None:
-        """Show editable HackMew-style ASM in the ASM pane. Records region for Ctrl+E compile."""
+        """Show editable HackMew-style ASM in the ASM pane. Records region for Ctrl+I compile."""
         self._text_asm.configure(state=tk.NORMAL)
         self._text_asm.delete("1.0", tk.END)
         if not self._data or not _CAPSTONE_AVAILABLE:
@@ -1567,6 +1680,7 @@ Format = "`f|u8`[u8 arg0]"
         self._hackmew_asm_start = start
         self._hackmew_asm_end = end
         self._text_asm.insert("1.0", "\n".join(lines))
+        self._apply_syntax_highlighting(self._text_asm, "asm")
         if self._pseudo_c_pane_visible:
             self._refresh_pseudo_c_selection()
 
@@ -1628,6 +1742,7 @@ Format = "`f|u8`[u8 arg0]"
         self._text_pseudo_c.configure(state=tk.NORMAL)
         self._text_pseudo_c.delete("1.0", tk.END)
         self._text_pseudo_c.insert(tk.END, text)
+        self._apply_syntax_highlighting(self._text_pseudo_c, "c")
         self._text_pseudo_c.configure(state=tk.DISABLED)
 
     def _angr_fallback_to_capstone(self, start: int, end: int, align: int, angr_error: Optional[str]) -> None:
@@ -1746,7 +1861,10 @@ Format = "`f|u8`[u8 arg0]"
                     lines.append(line + "\n")
         except Exception:
             pass
-        self._text_pseudo_c.insert(tk.END, "".join(lines) if lines else "(No instructions)")
+        content = "".join(lines) if lines else "(No instructions)"
+        self._text_pseudo_c.insert(tk.END, content)
+        if lines:
+            self._apply_syntax_highlighting(self._text_pseudo_c, "c")
         self._text_pseudo_c.configure(state=tk.DISABLED)
 
     def _insn_to_pseudo_c(self, insn: object, mode: int) -> str:
