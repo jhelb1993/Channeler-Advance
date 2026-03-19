@@ -8,7 +8,12 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from typing import List, Optional
 
-from editors.common.hex_editor import HexEditorFrame, PcsStringTableFrame, StructEditorFrame
+from editors.common.hex_editor import (
+    HexEditorFrame,
+    PcsStringTableFrame,
+    StructEditorFrame,
+    GraphicsPreviewFrame,
+)
 
 POKEFIRERED_PATH = os.path.join(os.path.dirname(__file__), "pokefirered")
 
@@ -81,8 +86,10 @@ class FireRedEditor:
         self._struct_editor = StructEditorFrame(self._struct_inner, self._hex_editor)
         self._struct_editor.pack(fill=tk.BOTH, expand=True)
 
-        # Slot 2: reserved
+        # Slot 2: graphics (gbagfx / WSL)
         self._tool3_canvas, self._tool3_inner = self._make_scroll_slot()
+        self._graphics_preview = GraphicsPreviewFrame(self._tool3_inner, self._hex_editor)
+        self._graphics_preview.pack(fill=tk.BOTH, expand=True)
 
         self._tools_visible = False
 
@@ -181,6 +188,7 @@ class FireRedEditor:
             self._main_paned.add(self._tools_frame)
             self._pcs_table.refresh_anchors()
             self._struct_editor.refresh_anchors()
+            self._graphics_preview.refresh_anchors()
             self._layout_tool_slots()
         else:
             self._main_paned.forget(self._tools_frame)
@@ -202,6 +210,7 @@ class FireRedEditor:
             self._main_paned.add(self._tools_frame)
             self._pcs_table.refresh_anchors()
             self._struct_editor.refresh_anchors()
+            self._graphics_preview.refresh_anchors()
 
         self._layout_tool_slots()
         return "break"
@@ -209,9 +218,13 @@ class FireRedEditor:
     # ── Pointer/anchor callbacks ──────────────────────────────────────
 
     def _on_pointer_to_named_anchor(self, anchor_info: dict) -> None:
-        is_struct = anchor_info.get("type") == "struct"
-        slot = 1 if is_struct else 0
-        self._slot_active[slot] = True
+        t = anchor_info.get("type")
+        if t == "graphics":
+            self._slot_active[2] = True
+        elif t == "struct":
+            self._slot_active[1] = True
+        else:
+            self._slot_active[0] = True
 
         if not self._tools_visible:
             self._tools_visible = True
@@ -219,7 +232,11 @@ class FireRedEditor:
 
         self._layout_tool_slots()
         name = anchor_info.get("name", "")
-        if is_struct:
+        if t == "graphics":
+            self._graphics_preview.refresh_anchors()
+            self._graphics_preview.show_anchor(name)
+            self.root.after(50, lambda: self._graphics_preview._combo.focus_set())
+        elif t == "struct":
             self._struct_editor.refresh_anchors()
             self._struct_editor.show_struct(name)
             self.root.after(50, lambda: self._struct_editor._tree.focus_set())
@@ -247,6 +264,7 @@ class FireRedEditor:
         if has_file:
             self._pcs_table.refresh_anchors()
             self._struct_editor.refresh_anchors()
+            self._graphics_preview.refresh_anchors()
 
     def _on_load_structure_toml(self) -> None:
         if not self._hex_editor or not self._hex_editor.has_data():
@@ -258,6 +276,7 @@ class FireRedEditor:
         if path and self._hex_editor.load_toml_manual(path):
             self._pcs_table.refresh_anchors()
             self._struct_editor.refresh_anchors()
+            self._graphics_preview.refresh_anchors()
             self._update_file_menu_state()
             messagebox.showinfo("TOML", f"Using structure file:\n{path}")
 
@@ -267,6 +286,7 @@ class FireRedEditor:
         self._hex_editor.clear_toml_manual_override()
         self._pcs_table.refresh_anchors()
         self._struct_editor.refresh_anchors()
+        self._graphics_preview.refresh_anchors()
         self._update_file_menu_state()
         paired = self._hex_editor.get_toml_path() or "(none)"
         messagebox.showinfo("TOML", f"Reloaded ROM-paired structure file:\n{paired}")
@@ -281,6 +301,7 @@ class FireRedEditor:
             self._update_file_menu_state()
             self._pcs_table.refresh_anchors()
             self._struct_editor.refresh_anchors()
+            self._graphics_preview.refresh_anchors()
 
     def _on_save(self) -> None:
         if self._hex_editor and self._hex_editor.save_file():
@@ -302,6 +323,7 @@ class FireRedEditor:
             "Channeler Advance - Pokémon FireRed Editor\n\n"
             "Uses pret/pokefirered for C code reference.\n\n"
             "Ctrl+T — show/hide tools pane\n"
-            "Ctrl+Shift+1/2/3 — toggle Table / Struct / (reserved) slot\n"
+            "Ctrl+Shift+1/2/3 — toggle Table / Struct / Graphics slot\n"
+            "Graphics: deps/gbagfx via WSL (Linux binary); install Pillow for PNG preview\n"
             "Ctrl+M — Anchors browser: double-click a table/struct leaf to open it in Tools",
         )

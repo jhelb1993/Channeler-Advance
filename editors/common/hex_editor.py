@@ -14,6 +14,17 @@ import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
 from typing import Optional, Dict, List, Tuple, Set, Any
 
+from editors.common.gba_graphics import (
+    decode_graphics_anchor_to_png,
+    decode_palette_to_png_pal,
+    decode_sprite_at_pointer,
+    parse_graphics_anchor_format,
+    parse_sprite_field_spec,
+    compute_graphics_rom_span,
+    resolve_gba_pointer,
+    repo_gbagfx_path,
+)
+
 _TOML_AVAILABLE = False
 try:
     import tomli
@@ -293,11 +304,11 @@ class PcsStringTableFrame(ttk.Frame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
         f = ttk.Frame(self)
-        f.grid(row=0, column=0, sticky="w", pady=(0, 2))
+        f.grid(row=0, column=0, sticky="ew", pady=(0, 2))
         f.columnconfigure(1, weight=1)
         ttk.Label(f, text="Table:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w", padx=(0, 4))
-        self._combo = ttk.Combobox(f, font=("Consolas", 8), width=20, state="readonly")
-        self._combo.grid(row=0, column=1, sticky="w")
+        self._combo = ttk.Combobox(f, font=("Consolas", 8), state="readonly")
+        self._combo.grid(row=0, column=1, sticky="ew")
         self._combo.bind("<<ComboboxSelected>>", self._on_combo_select)
         tree_f = ttk.Frame(self)
         tree_f.grid(row=1, column=0, sticky="nsew")
@@ -483,6 +494,134 @@ class PcsStringTableFrame(ttk.Frame):
             self._tree.insert("", tk.END, values=(str(i), "".join(chars)), iid=f"pcs_{i}")
 
 
+class GraphicsPreviewFrame(ttk.Frame):
+    """Decode GBA palettes/sprites with pret gbagfx (via WSL on Windows) and show PNG + gbagfx output."""
+
+    def __init__(self, parent: tk.Misc, hex_editor: "HexEditorFrame", **kwargs) -> None:
+        super().__init__(parent, **kwargs)
+        self._hex = hex_editor
+        self._photo: Optional[Any] = None
+        self._build()
+
+    def _build(self) -> None:
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(3, weight=1)
+        top = ttk.Frame(self)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 2))
+        top.columnconfigure(1, weight=1)
+        ttk.Label(top, text="Graphics:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self._combo = ttk.Combobox(top, font=("Consolas", 8), state="readonly")
+        self._combo.grid(row=0, column=1, sticky="ew", padx=(0, 4))
+        self._combo.bind("<<ComboboxSelected>>", lambda e: self._decode_selected())
+        ttk.Button(top, text="Decode", command=self._decode_selected).grid(row=0, column=2, sticky="e")
+        ttk.Label(self, text="gbagfx output:", font=("Consolas", 8)).grid(row=1, column=0, sticky="w")
+        self._log = tk.Text(self, height=5, font=("Consolas", 8), wrap=tk.WORD, state=tk.DISABLED)
+        self._log.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+        self._img_label = ttk.Label(self, text="(no preview)")
+        self._img_label.grid(row=3, column=0, sticky="nw")
+
+    def _set_log(self, text: str) -> None:
+        self._log.configure(state=tk.NORMAL)
+        self._log.delete("1.0", tk.END)
+        self._log.insert("1.0", text or "")
+        self._log.configure(state=tk.DISABLED)
+
+    def _clear_image(self, msg: str = "(no preview)") -> None:
+        self._photo = None
+        self._img_label.configure(image="", text=msg)
+
+    def _try_show_image(self, path: str) -> None:
+        try:
+            from PIL import Image, ImageTk  # type: ignore
+        except ImportError:
+            self._clear_image(f"Install Pillow to preview PNG.\n{path}")
+            return
+        try:
+            im = Image.open(path)
+            im = im.convert("RGBA")
+            max_w, max_h = 280, 280
+            try:
+                resample = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+            except AttributeError:
+                resample = Image.LANCZOS
+            im.thumbnail((max_w, max_h), resample)
+            self._photo = ImageTk.PhotoImage(im)
+            self._img_label.configure(image=self._photo, text="")
+        except OSError as e:
+            self._clear_image(f"Could not load image:\n{e}\n{path}")
+
+    def refresh_anchors(self) -> None:
+        names = [a["name"] for a in self._hex.get_graphics_anchors()]
+        self._combo.configure(values=names)
+        if not names:
+            self._combo.set("")
+            self._set_log(f"gbagfx path: {repo_gbagfx_path()}\n(no graphics NamedAnchors in TOML)")
+            self._clear_image()
+
+    def show_anchor(self, anchor_name: str) -> None:
+        self.refresh_anchors()
+        vals = list(self._combo["values"])
+        try:
+            i = vals.index(anchor_name)
+        except ValueError:
+            self._set_log(f"Graphics anchor not found: {anchor_name!r}")
+            return
+        self._combo.current(i)
+        self._decode_selected()
+
+    def _decode_selected(self, event: Optional[tk.Event] = None) -> None:
+        idx = self._combo.current()
+        vals = list(self._combo["values"])
+        if idx < 0 or idx >= len(vals):
+            return
+        name = vals[idx]
+        rom = self._hex.get_data()
+        if not rom:
+            return
+        info = next((a for a in self._hex.get_graphics_anchors() if a["name"] == name), None)
+        if not info:
+            self._set_log("Anchor missing.")
+            return
+        spec = info["spec"]
+        logs: List[str] = []
+        if spec.kind == "palette":
+            pal_path, log = decode_palette_to_png_pal(bytes(rom), info["base_off"], spec)
+            logs.append(log)
+            self._set_log("\n".join(logs))
+            if pal_path:
+                self._try_show_image(pal_path)
+            else:
+                self._clear_image("(gbagfx did not produce .pal)")
+            return
+        ext_ps: Optional[Any] = None
+        ext_pb: Optional[int] = None
+        log_pre = ""
+        if spec.kind == "sprite" and getattr(spec, "palette_anchor_name", None):
+            pan = spec.palette_anchor_name
+            ga = self._hex.find_graphics_anchor_by_name(pan)
+            if ga is None or ga["spec"].kind != "palette":
+                log_pre = (
+                    f"Warning: palette NamedAnchor not found or not a palette format: {pan!r}\n"
+                    f"Using default 16-color palette.\n\n"
+                )
+            else:
+                ext_ps = ga["spec"]
+                ext_pb = ga["base_off"]
+        png_path, log = decode_graphics_anchor_to_png(
+            bytes(rom),
+            info["base_off"],
+            spec,
+            external_palette_spec=ext_ps,
+            external_palette_base_off=ext_pb,
+        )
+        logs.append(log_pre + log)
+        self._set_log("\n".join(logs))
+        if png_path:
+            self._try_show_image(png_path)
+        else:
+            self._clear_image("(gbagfx did not produce .png)")
+
+
 def _parse_struct_fields(fmt: str) -> Optional[List[Dict[str, Any]]]:
     """Parse the fields inside a Format like '[field1. field2: ...]count'.
     Returns list of field descriptors with byte offsets, or None if not a struct format."""
@@ -567,6 +706,20 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
     if token.endswith("<>"):
         nm = re.match(r'^(\w+)', token)
         return {"name": nm.group(1) if nm else token, "size": 4, "type": "ptr", "enum": None, "hex": True}
+
+    sm = re.match(r"^(\w+)<`([^`]*)`>\s*$", token)
+    if sm:
+        inner = sm.group(2).strip()
+        gspec, pal_name = parse_sprite_field_spec(inner)
+        return {
+            "name": sm.group(1),
+            "size": 4,
+            "type": "gfx_sprite",
+            "enum": None,
+            "hex": True,
+            "gfx_spec": gspec,
+            "gfx_palette_name": pal_name,
+        }
 
     if "<[" in token or "<`" in token:
         nm = re.match(r'^(\w+)', token)
@@ -700,13 +853,13 @@ class StructEditorFrame(ttk.Frame):
 
     def _build(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(5, weight=1)
+        self.rowconfigure(6, weight=1)
         top = ttk.Frame(self)
         top.grid(row=0, column=0, sticky="ew", pady=(0, 2))
         top.columnconfigure(1, weight=1)
         ttk.Label(top, text="Struct:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w", padx=(0, 4))
-        self._combo = ttk.Combobox(top, font=("Consolas", 8), width=20, state="readonly")
-        self._combo.grid(row=0, column=1, sticky="w")
+        self._combo = ttk.Combobox(top, font=("Consolas", 8), state="readonly")
+        self._combo.grid(row=0, column=1, sticky="ew")
         self._combo.bind("<<ComboboxSelected>>", self._on_combo_select)
 
         nav = ttk.Frame(self)
@@ -796,6 +949,26 @@ class StructEditorFrame(ttk.Frame):
             font=("Consolas", 7),
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
+        # sprite<`ucs4xWxH|palette.anchor`>: decode via gbagfx (WSL) + optional palette NamedAnchor
+        self._gfx_sprite_frame = ttk.Frame(self)
+        self._gfx_sprite_frame.columnconfigure(0, weight=1)
+        ttk.Label(self._gfx_sprite_frame, text="sprite (graphics)", font=("Consolas", 8, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w"
+        )
+        ttk.Button(
+            self._gfx_sprite_frame, text="Decode preview (gbagfx)", command=self._on_decode_gfx_sprite
+        ).grid(row=1, column=0, sticky="w", pady=(0, 4))
+        self._gfx_log = tk.Text(
+            self._gfx_sprite_frame, height=4, font=("Consolas", 7), wrap=tk.WORD, state=tk.DISABLED
+        )
+        self._gfx_log.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self._gfx_img_label = ttk.Label(self._gfx_sprite_frame, text="")
+        self._gfx_img_label.grid(row=3, column=0, sticky="nw")
+        self._gfx_sprite_frame.grid(row=5, column=0, sticky="ew", pady=(0, 2))
+        self._gfx_sprite_frame.grid_remove()
+        self._gfx_fi: Optional[int] = None
+        self._gfx_photo: Optional[Any] = None
+
         # [[List]] enum: ROM dropdown + TOML label. PCS NamedAnchor table enum: ROM dropdown + PCS string in ROM.
         self._list_enum_frame = ttk.Frame(self)
         self._list_enum_frame.columnconfigure(0, weight=1)
@@ -864,7 +1037,7 @@ class StructEditorFrame(ttk.Frame):
         self._list_enum_frame.grid_remove()
 
         tree_f = ttk.Frame(self)
-        tree_f.grid(row=5, column=0, sticky="nsew")
+        tree_f.grid(row=6, column=0, sticky="nsew")
         tree_f.columnconfigure(0, weight=1)
         tree_f.rowconfigure(0, weight=1)
         self._tree = ttk.Treeview(
@@ -896,6 +1069,97 @@ class StructEditorFrame(ttk.Frame):
     def _sync_field_aux_panels(self) -> None:
         self._update_ptr_text_panel()
         self._update_list_enum_panel()
+        self._update_gfx_sprite_panel()
+
+    def _set_gfx_log(self, text: str) -> None:
+        self._gfx_log.configure(state=tk.NORMAL)
+        self._gfx_log.delete("1.0", tk.END)
+        self._gfx_log.insert("1.0", text)
+        self._gfx_log.configure(state=tk.DISABLED)
+
+    def _update_gfx_sprite_panel(self) -> None:
+        sel = self._tree.selection()
+        if not sel or not sel[0].startswith("sf_"):
+            self._gfx_sprite_frame.grid_remove()
+            self._gfx_fi = None
+            return
+        fi = int(sel[0].split("_")[1])
+        if fi >= len(self._fields):
+            self._gfx_sprite_frame.grid_remove()
+            self._gfx_fi = None
+            return
+        fd = self._fields[fi]
+        if fd.get("type") != "gfx_sprite":
+            self._gfx_sprite_frame.grid_remove()
+            self._gfx_fi = None
+            return
+        self._gfx_fi = fi
+        self._gfx_sprite_frame.grid(row=5, column=0, sticky="ew", pady=(0, 2))
+
+    def _on_decode_gfx_sprite(self) -> None:
+        fi = self._gfx_fi
+        if fi is None or fi >= len(self._fields):
+            return
+        fd = self._fields[fi]
+        if fd.get("type") != "gfx_sprite":
+            return
+        spec = fd.get("gfx_spec")
+        if spec is None:
+            messagebox.showwarning("Struct", "Invalid sprite graphics spec in field Format.")
+            return
+        data = self._hex.get_data()
+        if not data:
+            return
+        try:
+            entry_idx = int(self._idx_var.get())
+        except ValueError:
+            return
+        foff = self._base_off + entry_idx * self._struct_size + fd["offset"]
+        if foff + 4 > len(data):
+            return
+        tgt = resolve_gba_pointer(data, foff)
+        if tgt is None:
+            self._set_gfx_log("Pointer does not reference ROM (need 0x08…/0x09… GBA address).")
+            self._gfx_img_label.configure(image="", text="(bad pointer)")
+            return
+        pal_name = fd.get("gfx_palette_name")
+        pal_spec = None
+        pal_base = None
+        log_extra = ""
+        if pal_name:
+            ga = self._hex.find_graphics_anchor_by_name(pal_name)
+            if ga is None or ga["spec"].kind != "palette":
+                log_extra = (
+                    f"\nWarning: palette anchor missing or not palette format: {pal_name!r}\n"
+                    f"Using default 16-color palette.\n"
+                )
+            else:
+                pal_spec = ga["spec"]
+                pal_base = ga["base_off"]
+        png_path, log = decode_sprite_at_pointer(bytes(data), tgt, spec, pal_spec, pal_base)
+        self._set_gfx_log(log_extra + log)
+        self._gfx_photo = None
+        if png_path:
+            try:
+                from PIL import Image, ImageTk  # type: ignore
+                im = Image.open(png_path)
+                im = im.convert("RGBA")
+                try:
+                    resample = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+                except AttributeError:
+                    resample = Image.LANCZOS
+                im.thumbnail((220, 220), resample)
+                self._gfx_photo = ImageTk.PhotoImage(im)
+                self._gfx_img_label.configure(image=self._gfx_photo, text="")
+            except ImportError:
+                self._gfx_img_label.configure(
+                    image="",
+                    text=f"Install Pillow to preview PNG.\n{png_path}",
+                )
+            except OSError as e:
+                self._gfx_img_label.configure(image="", text=f"Image error: {e}")
+        else:
+            self._gfx_img_label.configure(image="", text="(decode failed)")
 
     def _start_inline_edit_after_click(self) -> None:
         if self._tree.selection():
@@ -1461,6 +1725,8 @@ class StructEditorFrame(ttk.Frame):
         self._entry_label_pcs_frame.grid_remove()
         self._list_enum_frame.grid_remove()
         self._list_enum_fi = None
+        self._gfx_sprite_frame.grid_remove()
+        self._gfx_fi = None
         self._combo.set("")
         self._combo.configure(values=[a["name"] for a in self._anchors] if self._anchors else [])
         self._tree.delete(*self._tree.get_children())
@@ -1480,6 +1746,8 @@ class StructEditorFrame(ttk.Frame):
         self._ptr_text_fi = None
         self._list_enum_frame.grid_remove()
         self._list_enum_fi = None
+        self._gfx_sprite_frame.grid_remove()
+        self._gfx_fi = None
         self._tree.delete(*self._tree.get_children())
         try:
             data = self._hex.get_data()
@@ -1523,6 +1791,11 @@ class StructEditorFrame(ttk.Frame):
             if len(raw) >= 4:
                 ptr = int.from_bytes(raw[:4], "little")
                 return f"0x{ptr:08X}"
+            return ""
+        if ftype == "gfx_sprite":
+            if len(raw) >= 4:
+                ptr = int.from_bytes(raw[:4], "little")
+                return f"0x{ptr:08X}  (sprite)"
             return ""
         val = int.from_bytes(raw, "little")
         enum_ref = fd.get("enum")
@@ -1630,6 +1903,8 @@ class StructEditorFrame(ttk.Frame):
                     raw_val = self._read_pcs_at_pointer(ptr - GBA_ROM_BASE)
                 else:
                     raw_val = vals[1].split(" → ", 1)[0].strip() if " → " in vals[1] else vals[1]
+        elif fd["type"] == "gfx_sprite":
+            raw_val = vals[1].split()[0].strip() if vals[1] else vals[1]
         elif " → " in raw_val:
             raw_val = raw_val.split(" → ", 1)[0].strip()
         self._edit_entry.insert(0, raw_val)
@@ -1689,7 +1964,7 @@ class StructEditorFrame(ttk.Frame):
                 )
                 self._cancel_inline_edit()
                 return
-        elif fd["type"] in ("uint", "ptr"):
+        elif fd["type"] in ("uint", "ptr", "gfx_sprite"):
             try:
                 val = int(text, 0)
             except ValueError:
@@ -1707,7 +1982,7 @@ class StructEditorFrame(ttk.Frame):
         else:
             self._refresh_pcs_ptr_tree_row(fi)
         self._cancel_inline_edit()
-        self._update_ptr_text_panel()
+        self._sync_field_aux_panels()
 
     def _edit_adjacent_field(self, event: tk.Event) -> Optional[str]:
         if not self._edit_entry or not self._edit_iid:
@@ -2577,6 +2852,9 @@ class HexEditorFrame(ttk.Frame):
         for info in self.get_struct_anchors():
             if info["name"] == want:
                 return {**info, "type": "struct"}
+        for info in self.get_graphics_anchors():
+            if info["name"] == want:
+                return {**info, "type": "graphics"}
         return None
 
     def _find_named_anchor_at_offset(self, file_off: int, exact: bool = False) -> Optional[Dict[str, Any]]:
@@ -2615,11 +2893,29 @@ class HexEditorFrame(ttk.Frame):
                 if base <= file_off < base + total:
                     info["type"] = "struct"
                     return info
+        for info in self.get_graphics_anchors():
+            base = info["base_off"]
+            span = int(info.get("rom_span", 1))
+            total = max(1, span)
+            if exact:
+                if base == file_off:
+                    gi = dict(info)
+                    gi["type"] = "graphics"
+                    return gi
+            else:
+                if base <= file_off < base + total:
+                    gi = dict(info)
+                    gi["type"] = "graphics"
+                    return gi
         return None
 
     def _select_named_anchor_extent(self, info: Dict[str, Any]) -> None:
         """Select all bytes of a NamedAnchor table/struct and place cursor at the start."""
-        if "base_off" in info:
+        t = info.get("type")
+        if t == "graphics" or info.get("graphics_entry"):
+            start = info["base_off"]
+            total_bytes = max(1, int(info.get("rom_span", 1)))
+        elif t == "struct" or "struct_size" in info:
             start = info["base_off"]
             total_bytes = info["struct_size"] * info["count"]
         else:
@@ -3829,6 +4125,49 @@ Format = "`f|u8`[u8 arg0]"
 
     def get_pcs_table_anchors(self) -> List[Dict[str, Any]]:
         return self._get_pcs_table_anchors()
+
+    def get_graphics_anchors(self) -> List[Dict[str, Any]]:
+        """NamedAnchors whose Format is a graphics palette/sprite spec (ucp4, lzs4xWxH, …)."""
+        result: List[Dict[str, Any]] = []
+        pcs_names = {a["name"] for a in self._get_pcs_table_anchors()}
+        rom_len = len(self._data) if self._data else 0
+        for anchor in self._toml_data.get("NamedAnchors", []):
+            name = str(anchor.get("Name", "")).strip().strip("'\"")
+            if not name or name in pcs_names:
+                continue
+            fmt = str(anchor.get("Format", "")).strip().strip("'\"")
+            spec = parse_graphics_anchor_format(fmt)
+            if spec is None:
+                continue
+            addr = anchor.get("Address")
+            if addr is None:
+                continue
+            try:
+                gba = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+                if gba < GBA_ROM_BASE:
+                    gba += GBA_ROM_BASE
+                base_off = gba - GBA_ROM_BASE
+            except (ValueError, TypeError):
+                continue
+            if base_off < 0 or base_off >= rom_len:
+                continue
+            rom_span = compute_graphics_rom_span(spec, rom_len, base_off)
+            result.append({
+                "name": name,
+                "anchor": anchor,
+                "spec": spec,
+                "base_off": base_off,
+                "rom_span": rom_span,
+                "graphics_entry": True,
+            })
+        return result
+
+    def find_graphics_anchor_by_name(self, anchor_name: str) -> Optional[Dict[str, Any]]:
+        want = anchor_name.strip()
+        for a in self.get_graphics_anchors():
+            if a["name"] == want:
+                return a
+        return None
 
     def get_struct_anchors(self) -> List[Dict[str, Any]]:
         """Return NamedAnchors whose Format is a parseable struct (not pure PCS tables)."""
