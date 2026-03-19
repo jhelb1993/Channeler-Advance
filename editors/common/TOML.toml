@@ -1,6 +1,3 @@
-# Structure definitions for this ROM
-# Add [[FunctionAnchors]], [[Structs]], [[Constants]] as needed.
-
 [[Constants]]
 Name = '''NUM_TASK_DATA'''
 Value = 16
@@ -30,9 +27,9 @@ Address = 0x245EE0
 Format = '''[name""11]412'''
 
 [[NamedAnchors]]
-Name = '''data.pokemon.stats'''
+Name = '''data.pokemon.gSpeciesInfo'''
 Address = 0x254784
-Format = '''[hp. attack. def. speed. spatk. spdef. baseStatTotal|=hp+attack+def+speed+spatk+spdef type1.data.pokemon.type.gTypeNames type2.data.pokemon.type.gTypeNames catchRate. baseExp. evs:|t|hp:|atk:|def:|spd:|spatk:|spdef: item1:data.items.stats item2:data.items.stats genderratio.genderratiovalues steps2hatch. basehappiness. growthrate.growthrates egg1.egggroups egg2.egggroups ability1.data.abilities.gAbilityNames ability2.data.abilities.gAbilityNames runrate. dex.|t|color:::.bodycolors|noFlip. padding:]data.pokemon.gSpeciesNames'''
+Format = '''[hp. attack. def. speed. spatk. spdef. baseStatTotal|=hp+attack+def+speed+spatk+spdef type1.data.pokemon.type.gTypeNames type2.data.pokemon.type.gTypeNames catchRate. baseExp. evs:|t|hp:|atk:|def:|spd:|spatk:|spdef: item1:data.items.gItems item2:data.items.gItems genderratio.genderratiovalues steps2hatch. basehappiness. growthrate.growthrates egg1.egggroups egg2.egggroups ability1.data.abilities.gAbilityNames ability2.data.abilities.gAbilityNames runrate. dex.|t|color:::.bodycolors|noFlip. padding:]data.pokemon.gSpeciesNames'''
 
 [[NamedAnchors]]
 Name = '''data.abilities.gAbilityNames'''
@@ -40,9 +37,9 @@ Address = 0x24FC40
 Format = '''[name""13]78'''
 
 [[NamedAnchors]]
-Name = '''data.items.stats'''
+Name = '''data.items.gItems'''
 Address = 0x3DB028
-Format = '''[name""13 unused. index: price: holdeffect.holdeffects param. description<""> keyitemvalue. bagkeyitem. pocket.pocketid type.|s=pocket(0=itemtype|1=itemtype|2=itemtype|4=itemtype|5=itemtype) fieldeffect<> battleusage:: battleeffect<> battleextra::]data.items.count'''
+Format = '''[name""13 unused. index: price: holdeffect.holdeffects param. description<""> keyitemvalue. bagkeyitem. pocket.pocketid type. fieldeffect<> battleusage:: battleeffect<> battleextra::]data.items.count'''
 
 [[NamedAnchors]]
 Name = '''data.pokemon.type.gTypeNames'''

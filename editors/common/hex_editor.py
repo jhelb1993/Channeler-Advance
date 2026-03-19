@@ -524,6 +524,32 @@ def _parse_struct_count(fmt: str) -> Any:
     return None
 
 
+def _suffix_candidates_for_pcs_lookup(suffix: str) -> List[str]:
+    """Strip trailing +N / -N segments to match NamedAnchor PCS table names (e.g. data.pokemon.names+28)."""
+    out: List[str] = []
+    s = suffix.strip()
+    seen = set()
+    while s and s not in seen:
+        seen.add(s)
+        out.append(s)
+        m = re.match(r"^(.+?)([+-]\d+)$", s)
+        if not m:
+            break
+        s = m.group(1).strip()
+    return out
+
+
+def _find_pcs_table_for_struct_suffix(
+    pcs_tables: List[Dict[str, Any]], suffix: str
+) -> Optional[Dict[str, Any]]:
+    """If the constant after ] names a PCS string table, return its get_pcs_table_anchors() entry."""
+    for cand in _suffix_candidates_for_pcs_lookup(suffix):
+        for info in pcs_tables:
+            if info["name"] == cand:
+                return info
+    return None
+
+
 def _load_toml_lists(toml_data: Dict[str, Any]) -> Dict[str, Dict[int, str]]:
     """Load [[List]] entries into {name: {index: label}}."""
     lists: Dict[str, Dict[int, str]] = {}
@@ -563,11 +589,12 @@ class StructEditorFrame(ttk.Frame):
         self._base_off = 0
         self._edit_entry: Optional[tk.Entry] = None
         self._edit_iid: Optional[str] = None
+        self._entry_index_context_pcs: Optional[Dict[str, Any]] = None
         self._build()
 
     def _build(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
+        self.rowconfigure(4, weight=1)
         top = ttk.Frame(self)
         top.grid(row=0, column=0, sticky="ew", pady=(0, 2))
         top.columnconfigure(1, weight=1)
@@ -578,6 +605,7 @@ class StructEditorFrame(ttk.Frame):
 
         nav = ttk.Frame(self)
         nav.grid(row=1, column=0, sticky="ew", pady=(0, 2))
+        nav.columnconfigure(3, weight=1)
         ttk.Label(nav, text="Entry:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w", padx=(0, 4))
         self._idx_var = tk.StringVar(value="0")
         self._idx_spin = ttk.Spinbox(
@@ -588,9 +616,45 @@ class StructEditorFrame(ttk.Frame):
         self._idx_spin.bind("<Return>", lambda e: self._on_spin_change())
         self._entry_label = ttk.Label(nav, text="/ 0", font=("Consolas", 8))
         self._entry_label.grid(row=0, column=2, sticky="w", padx=(4, 0))
+        self._entry_index_name_label = ttk.Label(nav, text="", font=("Consolas", 8))
+        self._entry_index_name_label.grid(row=0, column=3, sticky="w", padx=(8, 0))
+        self._entry_index_name_label.grid_remove()
+
+        # Edit PCS string for the Format ]suffix table row (same index as struct entry)
+        self._entry_label_pcs_frame = ttk.Frame(self)
+        self._entry_label_pcs_frame.columnconfigure(1, weight=1)
+        ttk.Label(self._entry_label_pcs_frame, text="Entry PCS (table row):", font=("Consolas", 8)).grid(
+            row=0, column=0, sticky="w", padx=(0, 4)
+        )
+        self._entry_label_pcs_var = tk.StringVar(value="")
+        self._entry_label_pcs_entry = ttk.Entry(
+            self._entry_label_pcs_frame, textvariable=self._entry_label_pcs_var, font=("Consolas", 9)
+        )
+        self._entry_label_pcs_entry.grid(row=0, column=1, sticky="ew", padx=(0, 4))
+        self._entry_label_pcs_entry.bind("<Return>", lambda e: self._on_entry_label_pcs_apply())
+        ttk.Button(
+            self._entry_label_pcs_frame, text="Apply", command=self._on_entry_label_pcs_apply
+        ).grid(row=0, column=2, sticky="e")
+        self._entry_label_pcs_frame.grid(row=2, column=0, sticky="ew", pady=(0, 2))
+        self._entry_label_pcs_frame.grid_remove()
+
+        # pcs_ptr text panel — above tree so it stays visible in the tools pane
+        self._ptr_text_frame = ttk.Frame(self)
+        self._ptr_text_frame.columnconfigure(0, weight=1)
+        ttk.Label(self._ptr_text_frame, text="Text at pointer (pcs_ptr field):", font=("Consolas", 8)).grid(
+            row=0, column=0, columnspan=2, sticky="w"
+        )
+        self._ptr_text_entry = ttk.Entry(self._ptr_text_frame, font=("Consolas", 9))
+        self._ptr_text_entry.grid(row=1, column=0, sticky="ew", padx=(0, 4))
+        self._ptr_text_entry.bind("<Return>", lambda e: self._on_ptr_text_update())
+        self._ptr_text_update_btn = ttk.Button(
+            self._ptr_text_frame, text="Apply", command=self._on_ptr_text_update
+        )
+        self._ptr_text_update_btn.grid(row=1, column=1, sticky="e")
+        self._ptr_text_fi: Optional[int] = None
 
         tree_f = ttk.Frame(self)
-        tree_f.grid(row=2, column=0, sticky="nsew")
+        tree_f.grid(row=4, column=0, sticky="nsew")
         tree_f.columnconfigure(0, weight=1)
         tree_f.rowconfigure(0, weight=1)
         self._tree = ttk.Treeview(
@@ -610,20 +674,6 @@ class StructEditorFrame(ttk.Frame):
         self._tree.bind("<F2>", self._start_inline_edit)
         self._tree.bind("<ButtonRelease-1>", self._on_tree_click)
         self._tree.bind("<<TreeviewSelect>>", lambda e: self._update_ptr_text_panel())
-
-        # pcs_ptr text panel (hidden until a pcs_ptr field is selected)
-        self._ptr_text_frame = ttk.Frame(self)
-        self._ptr_text_frame.columnconfigure(0, weight=1)
-        ttk.Label(self._ptr_text_frame, text="Text at pointer:", font=("Consolas", 8)).grid(
-            row=0, column=0, sticky="w"
-        )
-        self._ptr_text_entry = ttk.Entry(self._ptr_text_frame, font=("Consolas", 9))
-        self._ptr_text_entry.grid(row=1, column=0, sticky="ew", padx=(0, 4))
-        self._ptr_text_update_btn = ttk.Button(
-            self._ptr_text_frame, text="Update", command=self._on_ptr_text_update
-        )
-        self._ptr_text_update_btn.grid(row=1, column=1, sticky="e")
-        self._ptr_text_fi: Optional[int] = None
 
     def _on_tree_click(self, event: tk.Event) -> None:
         reg = self._tree.identify_region(event.x, event.y)
@@ -655,7 +705,7 @@ class StructEditorFrame(ttk.Frame):
             self._ptr_text_fi = None
             return
         self._ptr_text_fi = fi
-        self._ptr_text_frame.grid(row=3, column=0, sticky="ew", pady=(4, 0))
+        self._ptr_text_frame.grid(row=3, column=0, sticky="ew", pady=(0, 2))
         data = self._hex.get_data()
         if not data:
             return
@@ -711,9 +761,63 @@ class StructEditorFrame(ttk.Frame):
         enc = encode_pcs_string(new_text, max(old_len, 1))
         self._hex.write_bytes_at(target_off, enc)
         iid = f"sf_{fi}"
-        if self._tree.exists(iid):
-            raw = bytes(data[foff:foff + fd["size"]])
+        data2 = self._hex.get_data()
+        if data2 and self._tree.exists(iid):
+            raw = bytes(data2[foff:foff + fd["size"]])
             self._tree.set(iid, "val", self._format_value(raw, fd))
+
+    def _pcs_table_row_file_offset(self, pcs_info: Dict[str, Any], row_idx: int) -> Optional[int]:
+        """File offset of one row in a PCS table anchor, or None."""
+        if row_idx < 0 or row_idx >= pcs_info.get("count", 0):
+            return None
+        anchor = pcs_info["anchor"]
+        width = pcs_info["width"]
+        addr = anchor.get("Address")
+        if addr is None:
+            return None
+        try:
+            gba = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+            if gba < GBA_ROM_BASE:
+                gba += GBA_ROM_BASE
+            base = gba - GBA_ROM_BASE
+        except (ValueError, TypeError):
+            return None
+        data = self._hex.get_data()
+        if not data:
+            return None
+        off = base + row_idx * width
+        if off + width > len(data):
+            return None
+        return off
+
+    def _write_pcs_table_row(self, pcs_info: Dict[str, Any], row_idx: int, text: str) -> bool:
+        off = self._pcs_table_row_file_offset(pcs_info, row_idx)
+        if off is None:
+            return False
+        width = pcs_info["width"]
+        enc = encode_pcs_string(text, width)
+        self._hex.write_bytes_at(off, bytes(enc))
+        return True
+
+    def _on_entry_label_pcs_apply(self) -> None:
+        """Write the Entry PCS field to the ]suffix PCS table at the current struct index."""
+        if not self._entry_index_context_pcs:
+            return
+        try:
+            idx = int(self._idx_var.get())
+        except ValueError:
+            return
+        idx = max(0, min(idx, self._entry_count - 1))
+        pcs_count = int(self._entry_index_context_pcs.get("count") or 0)
+        if idx >= pcs_count:
+            messagebox.showwarning("Struct", "Current index is past the PCS table length.")
+            return
+        text = self._entry_label_pcs_var.get()
+        if not self._write_pcs_table_row(self._entry_index_context_pcs, idx, text):
+            messagebox.showerror("Struct", "Could not write PCS string (bad address or ROM bounds).")
+            return
+        self._update_entry_index_name_label()
+        self._load_entry(idx)
 
     def _on_combo_select(self, event: Optional[tk.Event] = None) -> None:
         idx = self._combo.current()
@@ -724,6 +828,7 @@ class StructEditorFrame(ttk.Frame):
         self._entry_count = info["count"]
         self._struct_size = info["struct_size"]
         self._base_off = info["base_off"]
+        self._entry_index_context_pcs = info.get("entry_label_pcs")
         self._idx_spin.configure(to=max(0, self._entry_count - 1))
         self._idx_var.set("0")
         self._entry_label.config(text=f"/ {self._entry_count}")
@@ -738,9 +843,70 @@ class StructEditorFrame(ttk.Frame):
         self._idx_var.set(str(i))
         self._load_entry(i)
 
+    def _pcs_decode_table_row(self, pcs_info: Dict[str, Any], row_idx: int) -> str:
+        """Decode PCS string at row_idx in a PCS table anchor."""
+        if row_idx < 0 or row_idx >= pcs_info.get("count", 0):
+            return ""
+        anchor = pcs_info["anchor"]
+        width = pcs_info["width"]
+        addr = anchor.get("Address")
+        if addr is None:
+            return ""
+        try:
+            gba = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+            if gba < GBA_ROM_BASE:
+                gba += GBA_ROM_BASE
+            base = gba - GBA_ROM_BASE
+        except (ValueError, TypeError):
+            return ""
+        data = self._hex.get_data()
+        if not data:
+            return ""
+        off = base + row_idx * width
+        if off + width > len(data):
+            return ""
+        chars = []
+        for i in range(width):
+            b = data[off + i]
+            if b == 0xFF:
+                break
+            chars.append(_PCS_BYTE_TO_CHAR.get(b, "·"))
+        return "".join(chars)
+
+    def _update_entry_index_name_label(self) -> None:
+        """Show PCS text from the Format ]suffix table at the current entry index, if applicable."""
+        if not self._entry_index_context_pcs:
+            self._entry_index_name_label.grid_remove()
+            self._entry_label_pcs_frame.grid_remove()
+            return
+        try:
+            idx = int(self._idx_var.get())
+        except ValueError:
+            self._entry_index_name_label.grid_remove()
+            self._entry_label_pcs_frame.grid_remove()
+            return
+        idx = max(0, min(idx, self._entry_count - 1))
+        pcs_count = int(self._entry_index_context_pcs.get("count") or 0)
+        if idx >= pcs_count:
+            self._entry_index_name_label.config(text="→ (past PCS table)")
+            self._entry_index_name_label.grid()
+            self._entry_label_pcs_frame.grid_remove()
+            return
+        txt = self._pcs_decode_table_row(self._entry_index_context_pcs, idx)
+        if txt:
+            self._entry_index_name_label.config(text=f"→ {txt}")
+        else:
+            self._entry_index_name_label.config(text="→ (empty)")
+        self._entry_index_name_label.grid()
+        self._entry_label_pcs_var.set(txt)
+        self._entry_label_pcs_frame.grid()
+
     def refresh_anchors(self) -> None:
         self._anchors = self._hex.get_struct_anchors()
         self._lists = self._hex.get_lists()
+        self._entry_index_context_pcs = None
+        self._entry_index_name_label.grid_remove()
+        self._entry_label_pcs_frame.grid_remove()
         self._combo.set("")
         self._combo.configure(values=[a["name"] for a in self._anchors] if self._anchors else [])
         self._tree.delete(*self._tree.get_children())
@@ -759,20 +925,23 @@ class StructEditorFrame(ttk.Frame):
         self._ptr_text_frame.grid_remove()
         self._ptr_text_fi = None
         self._tree.delete(*self._tree.get_children())
-        data = self._hex.get_data()
-        if not data or not self._fields:
-            return
-        off = self._base_off + entry_idx * self._struct_size
-        if off + self._struct_size > len(data):
-            return
-        for fi, fd in enumerate(self._fields):
-            foff = off + fd["offset"]
-            sz = fd["size"]
-            if foff + sz > len(data):
-                break
-            raw = bytes(data[foff:foff + sz])
-            val_str = self._format_value(raw, fd)
-            self._tree.insert("", tk.END, values=(fd["name"], val_str), iid=f"sf_{fi}")
+        try:
+            data = self._hex.get_data()
+            if not data or not self._fields:
+                return
+            off = self._base_off + entry_idx * self._struct_size
+            if off + self._struct_size > len(data):
+                return
+            for fi, fd in enumerate(self._fields):
+                foff = off + fd["offset"]
+                sz = fd["size"]
+                if foff + sz > len(data):
+                    break
+                raw = bytes(data[foff:foff + sz])
+                val_str = self._format_value(raw, fd)
+                self._tree.insert("", tk.END, values=(fd["name"], val_str), iid=f"sf_{fi}")
+        finally:
+            self._update_entry_index_name_label()
 
     def _format_value(self, raw: bytes, fd: Dict[str, Any]) -> str:
         ftype = fd["type"]
@@ -872,6 +1041,11 @@ class StructEditorFrame(ttk.Frame):
         if len(vals) < 2:
             return
         try:
+            entry_idx = int(self._idx_var.get())
+        except ValueError:
+            return
+        foff = self._base_off + entry_idx * self._struct_size + fd["offset"]
+        try:
             bbox = self._tree.bbox(iid, "#2")
         except tk.TclError:
             return
@@ -884,6 +1058,14 @@ class StructEditorFrame(ttk.Frame):
         raw_val = vals[1]
         if fd.get("enum"):
             raw_val = raw_val.split(" (")[0] if " (" in raw_val else raw_val
+        elif fd["type"] == "pcs_ptr":
+            rom = self._hex.get_data()
+            if rom and foff + 4 <= len(rom):
+                ptr = int.from_bytes(rom[foff:foff + 4], "little")
+                if (ptr >> 24) in (0x08, 0x09):
+                    raw_val = self._read_pcs_at_pointer(ptr - GBA_ROM_BASE)
+                else:
+                    raw_val = vals[1].split(" → ", 1)[0].strip() if " → " in vals[1] else vals[1]
         elif " → " in raw_val:
             raw_val = raw_val.split(" → ", 1)[0].strip()
         self._edit_entry.insert(0, raw_val)
@@ -919,7 +1101,40 @@ class StructEditorFrame(ttk.Frame):
         if fd["type"] == "pcs":
             enc = encode_pcs_string(text, fd["size"])
             self._hex.write_bytes_at(foff, enc)
-        elif fd["type"] in ("uint", "ptr", "pcs_ptr"):
+        elif fd["type"] == "pcs_ptr":
+            ptr = int.from_bytes(data[foff:foff + 4], "little")
+            if re.fullmatch(r"0[xX][0-9A-Fa-f]{1,8}", text):
+                try:
+                    val = int(text, 0)
+                except ValueError:
+                    self._cancel_inline_edit()
+                    return
+                self._hex.write_bytes_at(foff, val.to_bytes(4, "little"))
+            elif (ptr >> 24) in (0x08, 0x09):
+                target_off = ptr - GBA_ROM_BASE
+                if target_off < 0 or target_off >= len(data):
+                    self._cancel_inline_edit()
+                    return
+                old_len = 0
+                for i in range(256):
+                    if target_off + i >= len(data):
+                        break
+                    if data[target_off + i] == 0xFF:
+                        old_len = i + 1
+                        break
+                else:
+                    old_len = 256
+                enc = encode_pcs_string(text, max(old_len, 1))
+                self._hex.write_bytes_at(target_off, enc)
+            else:
+                messagebox.showwarning(
+                    "Struct",
+                    "This pointer does not target ROM. Set the field to a ROM address (e.g. 0x08XXXXXX) first, "
+                    "then edit the string.",
+                )
+                self._cancel_inline_edit()
+                return
+        elif fd["type"] in ("uint", "ptr"):
             try:
                 val = int(text, 0)
             except ValueError:
@@ -995,6 +1210,8 @@ class HexEditorFrame(ttk.Frame):
         self._ldr_pc_targets_valid = False
         self._toml_path: Optional[str] = None
         self._toml_data: Dict[str, Any] = {}
+        # When set, this file is loaded instead of auto-resolving {ROM}.toml (until cleared).
+        self._toml_manual_override: Optional[str] = None
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -2416,6 +2633,81 @@ class HexEditorFrame(ttk.Frame):
         base = os.path.splitext(os.path.basename(rom_path))[0]
         return os.path.join(os.path.dirname(rom_path), base + ".toml")
 
+    def _resolve_toml_path_for_rom(self, rom_path: str) -> Tuple[str, bool]:
+        """Pick which TOML to load next to the ROM.
+
+        Prefer ``{ROM stem}.toml``. If missing, accept well-known project names
+        (``wct06.toml``, ``BPRE0.toml``) or a single ``*.toml`` in the same
+        folder — so a ROM with a different basename still picks up the repo
+        structure file.
+
+        Returns (path, exists_on_disk).
+        """
+        rom_dir = os.path.dirname(os.path.abspath(rom_path))
+        stem = os.path.splitext(os.path.basename(rom_path))[0]
+        primary = os.path.join(rom_dir, stem + ".toml")
+        if os.path.isfile(primary):
+            return primary, True
+        for name in ("wct06.toml", "BPRE0.toml", "bpred.toml"):
+            alt = os.path.join(rom_dir, name)
+            if os.path.isfile(alt):
+                return alt, True
+        try:
+            toml_names = sorted(
+                f for f in os.listdir(rom_dir) if f.lower().endswith(".toml")
+            )
+        except OSError:
+            toml_names = []
+        if len(toml_names) == 1:
+            return os.path.join(rom_dir, toml_names[0]), True
+        return primary, False
+
+    def _load_toml_bytes_from_path(self, toml_path: str) -> bool:
+        """Read and parse TOML at ``toml_path`` into ``self._toml_data``. Returns False on failure."""
+        loaded = False
+        if _TOML_AVAILABLE:
+            try:
+                with open(toml_path, "rb") as f:
+                    self._toml_data = tomli.load(f)
+                loaded = True
+            except Exception as e:
+                messagebox.showerror("TOML load failed", f"{toml_path}\n{e}")
+                return False
+        if not loaded:
+            self._toml_data = self._load_toml_regex_fallback(toml_path)
+        return True
+
+    def load_toml_manual(self, toml_path: str) -> bool:
+        """Use this TOML for structures/lists for the rest of the session (overrides ROM basename pairing)."""
+        path = os.path.abspath(toml_path)
+        if not os.path.isfile(path):
+            messagebox.showerror("TOML", f"File not found:\n{path}")
+            return False
+        prev_ov = self._toml_manual_override
+        prev_path = self._toml_path
+        prev_data = self._toml_data
+        self._toml_manual_override = path
+        self._toml_path = path
+        if not self._load_toml_bytes_from_path(path):
+            self._toml_manual_override = prev_ov
+            self._toml_path = prev_path
+            self._toml_data = prev_data
+            return False
+        self._ldr_pc_targets_valid = False
+        return True
+
+    def clear_toml_manual_override(self) -> None:
+        """Resume auto-selecting TOML next to the ROM (and reload)."""
+        self._toml_manual_override = None
+        self._load_toml_for_rom()
+
+    def has_toml_manual_override(self) -> bool:
+        return self._toml_manual_override is not None
+
+    def get_toml_path(self) -> Optional[str]:
+        """Path of the structure TOML in use (ROM-paired or manually loaded)."""
+        return self._toml_path
+
     def _load_toml_for_rom(self) -> None:
         """Load TOML for current ROM. Create default if missing.
         Tries tomli first; on failure uses regex fallback. Treats '''...''' same as \"...\" for Name/Format."""
@@ -2423,21 +2715,47 @@ class HexEditorFrame(ttk.Frame):
             self._toml_path = None
             self._toml_data = {}
             return
-        toml_path = self._get_toml_path(self._file_path)
-        if not os.path.isfile(toml_path):
+        if self._toml_manual_override:
+            mp = self._toml_manual_override
+            if os.path.isfile(mp):
+                self._toml_path = mp
+                if self._load_toml_bytes_from_path(mp):
+                    return
+            self._toml_manual_override = None
+        toml_path, exists = self._resolve_toml_path_for_rom(self._file_path)
+        if not exists:
             self._create_default_toml(toml_path)
             return
         self._toml_path = toml_path
-        loaded = False
-        if _TOML_AVAILABLE:
-            try:
-                with open(toml_path, "rb") as f:
-                    self._toml_data = tomli.load(f)
-                loaded = True
-            except Exception:
-                pass
-        if not loaded:
-            self._toml_data = self._load_toml_regex_fallback(toml_path)
+        self._load_toml_bytes_from_path(toml_path)
+
+    def _resolve_list_entry_span_end(self, list_name: str) -> Optional[int]:
+        """Upper bound for indices defined in ``[[List]]`` with this Name (for struct counts).
+
+        For ``0 = [ a, b, c ]`` returns ``3``. For ``4007 = [ x, y ]`` returns ``4009``.
+        Matches how :func:`_load_toml_lists` assigns indices.
+        """
+        want = list_name.strip()
+        for lst in self._toml_data.get("List", []):
+            name = str(lst.get("Name", "")).strip().strip("'\"")
+            if name != want:
+                continue
+            hi = 0
+            found = False
+            for key, val in lst.items():
+                if key in ("Name", "DefaultHash"):
+                    continue
+                try:
+                    idx = int(key)
+                except (ValueError, TypeError):
+                    continue
+                found = True
+                if isinstance(val, list):
+                    hi = max(hi, idx + len(val))
+                else:
+                    hi = max(hi, idx + 1)
+            return hi if found else None
+        return None
 
     def _load_toml_regex_fallback(self, toml_path: str) -> Dict[str, Any]:
         """Regex-based TOML loader when tomli fails. Treats '''...''' same as \"...\"."""
@@ -2955,9 +3273,15 @@ Format = "`f|u8`[u8 arg0]"
             struct_size = sum(f["size"] for f in fields)
             if struct_size <= 0:
                 continue
+            entry_label_pcs: Optional[Dict[str, Any]] = None
+            if isinstance(count_raw, str):
+                entry_label_pcs = _find_pcs_table_for_struct_suffix(
+                    self._get_pcs_table_anchors(), count_raw
+                )
             result.append({
                 "name": name, "anchor": anchor, "fields": fields,
                 "count": count, "struct_size": struct_size, "base_off": base_off,
+                "entry_label_pcs": entry_label_pcs,
             })
         return result
 
@@ -2972,6 +3296,9 @@ Format = "`f|u8`[u8 arg0]"
         mw = self._resolve_table_length(ref)
         if mw is not None:
             return mw + offset
+        list_hi = self._resolve_list_entry_span_end(ref)
+        if list_hi is not None:
+            return list_hi + offset
         for pcs in self._get_pcs_table_anchors():
             if pcs["name"] == ref:
                 return pcs["count"] + offset

@@ -45,6 +45,12 @@ class FireRedEditor:
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(label="Open ROM...", command=self._on_open_rom)
+        file_menu.add_command(label="Load structure TOML...", command=self._on_load_structure_toml, state=tk.DISABLED)
+        file_menu.add_command(
+            label="Use ROM-paired TOML (clear override)",
+            command=self._on_clear_toml_override,
+            state=tk.DISABLED,
+        )
         file_menu.add_command(label="Save", command=self._on_save, state=tk.DISABLED)
         file_menu.add_command(label="Save As...", command=self._on_save_as, state=tk.DISABLED)
         file_menu.add_separator()
@@ -229,9 +235,41 @@ class FireRedEditor:
         state = tk.NORMAL if has_file else tk.DISABLED
         self._file_menu.entryconfig("Save", state=state)
         self._file_menu.entryconfig("Save As...", state=state)
+        self._file_menu.entryconfig("Load structure TOML...", state=state)
+        ov = (
+            has_file
+            and self._hex_editor.has_toml_manual_override()
+        )
+        self._file_menu.entryconfig(
+            "Use ROM-paired TOML (clear override)",
+            state=tk.NORMAL if ov else tk.DISABLED,
+        )
         if has_file:
             self._pcs_table.refresh_anchors()
             self._struct_editor.refresh_anchors()
+
+    def _on_load_structure_toml(self) -> None:
+        if not self._hex_editor or not self._hex_editor.has_data():
+            return
+        path = filedialog.askopenfilename(
+            title="Load structure TOML",
+            filetypes=[("TOML", "*.toml"), ("All files", "*.*")],
+        )
+        if path and self._hex_editor.load_toml_manual(path):
+            self._pcs_table.refresh_anchors()
+            self._struct_editor.refresh_anchors()
+            self._update_file_menu_state()
+            messagebox.showinfo("TOML", f"Using structure file:\n{path}")
+
+    def _on_clear_toml_override(self) -> None:
+        if not self._hex_editor or not self._hex_editor.has_toml_manual_override():
+            return
+        self._hex_editor.clear_toml_manual_override()
+        self._pcs_table.refresh_anchors()
+        self._struct_editor.refresh_anchors()
+        self._update_file_menu_state()
+        paired = self._hex_editor.get_toml_path() or "(none)"
+        messagebox.showinfo("TOML", f"Reloaded ROM-paired structure file:\n{paired}")
 
     def _on_open_rom(self) -> None:
         path = filedialog.askopenfilename(
