@@ -692,11 +692,27 @@ class GraphicsPreviewFrame(ttk.Frame):
     def _update_table_nav_for_info(self, info: Dict[str, Any]) -> None:
         """Show row spinbox when this anchor or its linked palette uses ``[format]count``."""
         need = bool(info.get("graphics_table"))
-        if not need and info["spec"].kind == "sprite":
-            pan = getattr(info["spec"], "palette_anchor_name", None)
+        spec = info["spec"]
+        if not need and spec.kind == "sprite":
+            pan = getattr(spec, "palette_anchor_name", None)
             if pan:
                 ga = self._hex.find_graphics_anchor_by_name(pan)
                 need = bool(ga and ga.get("graphics_table"))
+        if not need and spec.kind == "tilemap":
+            ts = getattr(spec, "tileset_anchor_name", None)
+            ts_key = ts.strip() if ts else ""
+            if ts_key:
+                ga = self._hex.find_graphics_anchor_by_name(ts_key)
+                need = bool(ga and ga.get("graphics_table"))
+            if not need:
+                pan = getattr(spec, "palette_anchor_name", None)
+                if not pan and ts_key:
+                    gat = self._hex.find_graphics_anchor_by_name(ts_key)
+                    if gat and gat["spec"].kind == "sprite":
+                        pan = getattr(gat["spec"], "palette_anchor_name", None)
+                if pan:
+                    ga = self._hex.find_graphics_anchor_by_name(pan.strip())
+                    need = bool(ga and ga.get("graphics_table"))
         if need:
             _, eff, _ = self._effective_table_state(info)
             self._table_idx_spin.configure(from_=0, to=max(0, eff - 1))
@@ -725,10 +741,36 @@ class GraphicsPreviewFrame(ttk.Frame):
                     c = self._hex._resolve_struct_count(ref)
                     n = c if isinstance(c, int) and c > 0 else 1
                 counts.append(max(1, n))
+        if spec.kind == "tilemap":
+            ts = getattr(spec, "tileset_anchor_name", None)
+            ts_key = ts.strip() if ts else ""
+            if ts_key:
+                ga = self._hex.find_graphics_anchor_by_name(ts_key)
+                if ga and ga.get("graphics_table"):
+                    n = int(ga.get("table_num_entries") or 0)
+                    if n <= 0:
+                        ref = ga.get("table_count_ref") or ""
+                        c = self._hex._resolve_struct_count(ref)
+                        n = c if isinstance(c, int) and c > 0 else 1
+                    counts.append(max(1, n))
+            pan = getattr(spec, "palette_anchor_name", None)
+            if not pan and ts_key:
+                gat = self._hex.find_graphics_anchor_by_name(ts_key)
+                if gat and gat["spec"].kind == "sprite":
+                    pan = getattr(gat["spec"], "palette_anchor_name", None)
+            if pan:
+                ga = self._hex.find_graphics_anchor_by_name(pan.strip())
+                if ga and ga.get("graphics_table"):
+                    n = int(ga.get("table_num_entries") or 0)
+                    if n <= 0:
+                        ref = ga.get("table_count_ref") or ""
+                        c = self._hex._resolve_struct_count(ref)
+                        n = c if isinstance(c, int) and c > 0 else 1
+                    counts.append(max(1, n))
         eff = min(counts) if counts else 1
         warn = ""
         if len(counts) > 1 and min(counts) != max(counts):
-            warn = f"Table size mismatch (sprite vs palette): using min length {eff}.\n"
+            warn = f"Table size mismatch (graphics rows): using min length {eff}.\n"
         try:
             raw_i = int(self._hex.graphics_table_row_var.get())
         except (ValueError, tk.TclError):
@@ -741,6 +783,25 @@ class GraphicsPreviewFrame(ttk.Frame):
         if info.get("graphics_table"):
             return str(info.get("table_count_ref") or "")
         spec = info["spec"]
+        if spec.kind == "tilemap":
+            if info.get("graphics_table"):
+                return str(info.get("table_count_ref") or "")
+            ts = getattr(spec, "tileset_anchor_name", None)
+            ts_key = ts.strip() if ts else ""
+            if ts_key:
+                ga = self._hex.find_graphics_anchor_by_name(ts_key)
+                if ga and ga.get("graphics_table"):
+                    return str(ga.get("table_count_ref") or "")
+            pan = getattr(spec, "palette_anchor_name", None)
+            if not pan and ts_key:
+                gat = self._hex.find_graphics_anchor_by_name(ts_key)
+                if gat and gat["spec"].kind == "sprite":
+                    pan = getattr(gat["spec"], "palette_anchor_name", None)
+            if pan:
+                ga = self._hex.find_graphics_anchor_by_name(pan.strip())
+                if ga and ga.get("graphics_table"):
+                    return str(ga.get("table_count_ref") or "")
+            return ""
         if spec.kind == "sprite" and getattr(spec, "palette_anchor_name", None):
             ga = self._hex.find_graphics_anchor_by_name(spec.palette_anchor_name)
             if ga and ga.get("graphics_table"):
@@ -839,10 +900,63 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._hide_palette_8_ui()
         ext_ps: Optional[Any] = None
         ext_pb: Optional[int] = None
+        ext_ts_spec: Optional[Any] = None
+        ext_ts_off: Optional[int] = None
         log_pre = ""
-        sprite_off = info["base_off"]
+        blob_off = info["base_off"]
         if info.get("graphics_table"):
-            sprite_off = info["base_off"] + tbl_idx * int(info["row_byte_size"])
+            blob_off = info["base_off"] + tbl_idx * int(info["row_byte_size"])
+
+        if spec.kind == "tilemap":
+            tsn = getattr(spec, "tileset_anchor_name", None) or ""
+            ga_ts = self._hex.find_graphics_anchor_by_name(tsn.strip()) if tsn.strip() else None
+            if ga_ts is None or ga_ts["spec"].kind != "sprite":
+                self._set_log(
+                    log_pre
+                    + (
+                        f"Tilemap needs a tile sheet NamedAnchor (uct/lzt/ucs/lzs…); "
+                        f"missing or invalid: {tsn!r}\n"
+                    )
+                )
+                self._clear_image("(tilemap needs valid tileset anchor)")
+                return
+            ext_ts_spec = ga_ts["spec"]
+            ext_ts_off = int(ga_ts["base_off"])
+            if ga_ts.get("graphics_table"):
+                ext_ts_off = ga_ts["base_off"] + tbl_idx * int(ga_ts["row_byte_size"])
+            pan = getattr(spec, "palette_anchor_name", None)
+            if not pan:
+                pan = getattr(ga_ts["spec"], "palette_anchor_name", None)
+            if pan:
+                ga = self._hex.find_graphics_anchor_by_name(pan.strip())
+                if ga is None or ga["spec"].kind != "palette":
+                    dpal = "16-color" if spec.bpp == 4 else "256-color"
+                    log_pre = (
+                        f"Warning: palette NamedAnchor not found or not a palette format: {pan!r}\n"
+                        f"Using default {dpal} palette.\n\n"
+                    )
+                else:
+                    ext_ps = ga["spec"]
+                    ext_pb = ga["base_off"]
+                    if ga.get("graphics_table"):
+                        ext_pb = ga["base_off"] + tbl_idx * int(ga["row_byte_size"])
+            png_path, log = decode_graphics_anchor_to_png(
+                bytes(rom),
+                blob_off,
+                spec,
+                external_palette_spec=ext_ps,
+                external_palette_base_off=ext_pb,
+                external_tileset_spec=ext_ts_spec,
+                external_tileset_base_off=ext_ts_off,
+            )
+            logs.append(log_pre + log)
+            self._set_log("\n".join(logs))
+            if png_path:
+                self._try_show_image(png_path)
+            else:
+                self._clear_image("(tilemap PNG not produced)")
+            return
+
         if spec.kind == "sprite" and getattr(spec, "palette_anchor_name", None):
             pan = spec.palette_anchor_name
             ga = self._hex.find_graphics_anchor_by_name(pan)
@@ -859,7 +973,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     ext_pb = ga["base_off"] + tbl_idx * int(ga["row_byte_size"])
         png_path, log = decode_graphics_anchor_to_png(
             bytes(rom),
-            sprite_off,
+            blob_off,
             spec,
             external_palette_spec=ext_ps,
             external_palette_base_off=ext_pb,
@@ -4440,7 +4554,7 @@ Format = "`f|u8`[u8 arg0]"
         return self._get_pcs_table_anchors()
 
     def get_graphics_anchors(self) -> List[Dict[str, Any]]:
-        """NamedAnchors whose Format is a graphics palette/sprite spec (ucp4, lzs4xWxH, …)
+        """NamedAnchors whose Format is a graphics palette/sprite/tile/tilemap spec (ucp4, uct4xWxH, ucm4xWxH|…, …)
         or a table ``[rowSpec]countRef`` of identical rows."""
         result: List[Dict[str, Any]] = []
         pcs_names = {a["name"] for a in self._get_pcs_table_anchors()}
