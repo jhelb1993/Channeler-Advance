@@ -265,7 +265,7 @@ class HexEditorFrame(ttk.Frame):
             w.bind("<Button-4>", lambda e: _asm_scroll(3))
             w.bind("<Button-5>", lambda e: _asm_scroll(-3))
 
-        # Pseudo-C pane: to the right of ASM, hidden by default, toggleable with Ctrl+H
+        # Pseudo-C pane: to the right of ASM, hidden by default, toggleable with Ctrl+D
         self._pseudo_c_frame = ttk.LabelFrame(body, text=" Pseudo-C ", padding=2)
         self._pseudo_c_frame.grid(row=1, column=4, sticky="nsew", padx=(4, 0))
         self._pseudo_c_frame.columnconfigure(0, weight=1)
@@ -319,8 +319,8 @@ class HexEditorFrame(ttk.Frame):
             w.bind("<Control-A>", self._toggle_asm_pane)
 
         def _bind_pseudo_c_toggle(w: tk.Misc) -> None:
-            w.bind("<Control-h>", self._toggle_pseudo_c_pane)
-            w.bind("<Control-H>", self._toggle_pseudo_c_pane)
+            w.bind("<Control-d>", self._toggle_pseudo_c_pane)
+            w.bind("<Control-D>", self._toggle_pseudo_c_pane)
         def _bind_goto(w: tk.Misc) -> None:
             w.bind("<Control-g>", self._focus_goto_entry)
             w.bind("<Control-G>", self._focus_goto_entry)
@@ -343,8 +343,8 @@ class HexEditorFrame(ttk.Frame):
         _bind_pseudo_c_toggle(self._pseudo_c_frame)
         _bind_pseudo_c_toggle(self._text_pseudo_c)
         _bind_pseudo_c_toggle(outer)
-        self.winfo_toplevel().bind("<Control-h>", self._toggle_pseudo_c_pane, add=True)
-        self.winfo_toplevel().bind("<Control-H>", self._toggle_pseudo_c_pane, add=True)
+        self.winfo_toplevel().bind("<Control-d>", self._toggle_pseudo_c_pane, add=True)
+        self.winfo_toplevel().bind("<Control-D>", self._toggle_pseudo_c_pane, add=True)
         _bind_goto(self._text)
         _bind_goto(self._text_ascii)
         _bind_goto(self._goto_entry)
@@ -362,17 +362,23 @@ class HexEditorFrame(ttk.Frame):
             self._asm_mode_combo, self._asm_frame, self._text_asm,
             self._pseudo_c_frame, self._text_pseudo_c, outer,
         ):
-            w.bind("<Control-d>", self._toggle_hackmew_mode)
-            w.bind("<Control-D>", self._toggle_hackmew_mode)
+            w.bind("<Control-h>", self._toggle_hackmew_mode)
+            w.bind("<Control-H>", self._toggle_hackmew_mode)
             w.bind("<Control-e>", self._compile_hackmew_asm)
             w.bind("<Control-E>", self._compile_hackmew_asm)
-        self.winfo_toplevel().bind("<Control-d>", self._toggle_hackmew_mode, add=True)
-        self.winfo_toplevel().bind("<Control-D>", self._toggle_hackmew_mode, add=True)
+        self.winfo_toplevel().bind("<Control-h>", self._toggle_hackmew_mode, add=True)
+        self.winfo_toplevel().bind("<Control-H>", self._toggle_hackmew_mode, add=True)
         self.winfo_toplevel().bind("<Control-e>", self._compile_hackmew_asm, add=True)
         self.winfo_toplevel().bind("<Control-E>", self._compile_hackmew_asm, add=True)
 
         self._text.bind("<Control-Shift-A>", lambda e: self._select_all())
         self._text_ascii.bind("<Control-Shift-A>", lambda e: self._select_all())
+        self._text.bind("<Control-c>", self._copy_hex_ascii)
+        self._text.bind("<Control-C>", self._copy_hex_ascii)
+        self._text_ascii.bind("<Control-c>", self._copy_hex_ascii)
+        self._text_ascii.bind("<Control-C>", self._copy_hex_ascii)
+        self._text.bind("<<Copy>>", lambda e: self._copy_hex_ascii(e) or "break")
+        self._text_ascii.bind("<<Copy>>", lambda e: self._copy_hex_ascii(e) or "break")
         self._text.bind("<Control-v>", self._paste_insert)
         self._text.bind("<Control-V>", self._paste_insert)
         self._text.bind("<Control-b>", self._paste_write)
@@ -441,7 +447,7 @@ class HexEditorFrame(ttk.Frame):
         return "break"
 
     def _toggle_hackmew_mode(self, event: Optional[tk.Event] = None) -> Optional[str]:
-        """Toggle between standard ASM display and editable HackMew ASM. Bound to Ctrl+D."""
+        """Toggle between standard ASM display and editable HackMew ASM. Bound to Ctrl+H."""
         if not self._asm_pane_visible:
             return "break"
         self._hackmew_mode = not self._hackmew_mode
@@ -454,10 +460,21 @@ class HexEditorFrame(ttk.Frame):
         return "break"
 
     def _preprocess_hackmew_asm_for_compile(self, asm_text: str) -> str:
-        """Convert ldr rX, [pc, <label>] to ldr rX, [pc, #0xYY] by resolving label positions within the ASM."""
+        """Convert ldr rX, [pc, <label>] to ldr rX, [pc, #0xYY] by resolving label positions within the ASM.
+        Normalize S-suffix mnemonics (eors, ands, orrs, bics) to base forms for Hackmew assembler compatibility."""
         lines = asm_text.splitlines()
+        # Hackmew's assembler expects eor not eors, etc.
+        for i, raw in enumerate(lines):
+            line = raw.split("@")[0].strip()
+            if line and not line.endswith(":") and not line.startswith("."):
+                normalized = re.sub(r"\beors\b", "eor", line, flags=re.IGNORECASE)
+                normalized = re.sub(r"\bands\b", "and", normalized, flags=re.IGNORECASE)
+                normalized = re.sub(r"\borrs\b", "orr", normalized, flags=re.IGNORECASE)
+                normalized = re.sub(r"\bbics\b", "bic", normalized, flags=re.IGNORECASE)
+                if normalized != line:
+                    lines[i] = raw[: raw.find(line)] + normalized + raw[raw.find(line) + len(line) :]
         base = self._hackmew_asm_start
-        align = 2 if self._asm_mode == "thumb" else 4
+        align = 4
 
         def _insn_size(raw_line: str) -> int:
             s = raw_line.split("@")[0].strip()
@@ -543,7 +560,7 @@ class HexEditorFrame(ttk.Frame):
             asm_path = os.path.join(tmpdir, "edit.asm")
             bin_path = os.path.join(tmpdir, "edit.bin")
             origin = GBA_ROM_BASE + self._hackmew_asm_start
-            preamble = f".thumb\n.org 0x{origin:X}\n\n"
+            preamble = f".thumb\n.align 4\n.org 0x{origin:X}\n\n"
             with open(asm_path, "w", encoding="utf-8") as f:
                 f.write(preamble + asm_text + "\n")
 
@@ -600,7 +617,7 @@ class HexEditorFrame(ttk.Frame):
         return "break"
 
     def _toggle_pseudo_c_pane(self, event: Optional[tk.Event] = None) -> Optional[str]:
-        """Toggle Pseudo-C pane visibility. Bound to Ctrl+H."""
+        """Toggle Pseudo-C pane visibility. Bound to Ctrl+D."""
         self._goto_entry.selection_clear()
         self._text.focus_set()
         self._pseudo_c_pane_visible = not self._pseudo_c_pane_visible
@@ -727,6 +744,30 @@ class HexEditorFrame(ttk.Frame):
         dr = fr - self._visible_row_start + 1
         bc = offset % BYTES_PER_ROW
         return f"{dr}.{1 + bc}"
+
+    def _copy_hex_ascii(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Copy selected hex/ASCII bytes to clipboard. Bound to Ctrl+C. Hex pane: hex string; ASCII pane: text."""
+        if not self._data:
+            return "break"
+        if self._selection_start is not None and self._selection_end is not None:
+            s = min(self._selection_start, self._selection_end)
+            e = max(self._selection_start, self._selection_end) + 1
+            data = bytes(self._data[s:e])
+        else:
+            data = bytes(self._data[self._cursor_byte_offset : self._cursor_byte_offset + 1])
+        if not data:
+            return "break"
+        try:
+            focus = self.winfo_toplevel().focus_get()
+            if focus == self._text:
+                text = " ".join(f"{b:02X}" for b in data)
+            else:
+                text = "".join(self._byte_to_char(b) for b in data)
+            self.clipboard_clear()
+            self.clipboard_append(text)
+        except tk.TclError:
+            pass
+        return "break"
 
     def _parse_paste_hex(self, text: str) -> bytearray:
         """Parse clipboard as hex; only hex digits used, invalid chars skipped."""
@@ -1401,7 +1442,7 @@ Format = "`f|u8`[u8 arg0]"
             self._text_asm.configure(state=tk.DISABLED)
             return
         mode = CS_MODE_THUMB if self._asm_mode == "thumb" else CS_MODE_ARM
-        align = 2 if self._asm_mode == "thumb" else 4
+        align = 4
         if self._selection_start is not None and self._selection_end is not None:
             start = min(self._selection_start, self._selection_end)
             end = max(self._selection_start, self._selection_end) + 1
@@ -1512,7 +1553,7 @@ Format = "`f|u8`[u8 arg0]"
             self._text_asm.insert(tk.END, "(No instructions)")
             return
         mode = CS_MODE_THUMB if self._asm_mode == "thumb" else CS_MODE_ARM
-        align = 2 if self._asm_mode == "thumb" else 4
+        align = 4
         if self._selection_start is not None and self._selection_end is not None:
             start = min(self._selection_start, self._selection_end)
             end = max(self._selection_start, self._selection_end) + 1
@@ -1539,7 +1580,7 @@ Format = "`f|u8`[u8 arg0]"
             self._text_pseudo_c.insert(tk.END, "(No data)")
             self._text_pseudo_c.configure(state=tk.DISABLED)
             return
-        align = 2 if self._asm_mode == "thumb" else 4
+        align = 4
         if self._selection_start is not None and self._selection_end is not None:
             start = min(self._selection_start, self._selection_end)
             end = max(self._selection_start, self._selection_end) + 1
@@ -1577,7 +1618,7 @@ Format = "`f|u8`[u8 arg0]"
         if result and not result.startswith("(angr "):
             self.after(0, lambda: self._angr_decompile_done(result))
         else:
-            align = 2 if self._asm_mode == "thumb" else 4
+            align = 4
             self.after(0, lambda: self._angr_fallback_to_capstone(start, end, align, result))
 
     def _angr_decompile_done(self, text: str) -> None:
@@ -1938,7 +1979,7 @@ Format = "`f|u8`[u8 arg0]"
         if not self._data or not _CAPSTONE_AVAILABLE:
             return []
         mode = CS_MODE_THUMB if self._asm_mode == "thumb" else CS_MODE_ARM
-        align = 2 if self._asm_mode == "thumb" else 4
+        align = 4
         if self._selection_start is not None and self._selection_end is not None:
             start = min(self._selection_start, self._selection_end)
             end = max(self._selection_start, self._selection_end) + 1
@@ -2044,6 +2085,10 @@ Format = "`f|u8`[u8 arg0]"
                     line = re.sub(r"\blsrs\b", "lsr", line)
                     line = re.sub(r"\bmuls\b", "mul", line)
                     line = re.sub(r"\basrs\b", "asr", line)
+                    line = re.sub(r"\beors\b", "eor", line)
+                    line = re.sub(r"\bands\b", "and", line)
+                    line = re.sub(r"\borrs\b", "orr", line)
+                    line = re.sub(r"\bbics\b", "bic", line)
                     if re.match(
                         r"(?:b|bl|bx|blx|beq|bne|bgt|bge|blt|ble|bhi|bls|bhs|blo|bmi|bpl|bvs|bvc)\b",
                         line,
@@ -2335,7 +2380,7 @@ Format = "`f|u8`[u8 arg0]"
         Returns None if Capstone unavailable or no bx found."""
         if not self._data or not _CAPSTONE_AVAILABLE:
             return None
-        align = 2 if self._asm_mode == "thumb" else 4
+        align = 4
         start = (offset // align) * align
         if start >= len(self._data):
             return None
