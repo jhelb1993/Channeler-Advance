@@ -163,6 +163,8 @@ class HexEditorFrame(ttk.Frame):
         self._hackmew_asm_start: Optional[int] = None
         self._hackmew_asm_end: Optional[int] = None
         self._pseudo_c_pane_visible = False
+        self._anchor_browser_pane_visible = False
+        self._anchor_browser_path: List[str] = []
         self._ldr_pc_targets: Optional[Set[int]] = None
         self._ldr_pc_targets_valid = False
         self._toml_path: Optional[str] = None
@@ -217,7 +219,8 @@ class HexEditorFrame(ttk.Frame):
         body.columnconfigure(2, weight=0)
         body.columnconfigure(3, weight=0)
         body.columnconfigure(4, weight=0)
-        body.columnconfigure(5, weight=1)
+        body.columnconfigure(5, weight=0)
+        body.columnconfigure(6, weight=1)
         body.rowconfigure(0, weight=0)
         body.rowconfigure(1, weight=1)
 
@@ -306,13 +309,39 @@ class HexEditorFrame(ttk.Frame):
             w.bind("<Button-4>", lambda e: _pseudo_c_scroll(3))
             w.bind("<Button-5>", lambda e: _pseudo_c_scroll(-3))
 
+        # FunctionAnchor browser: hierarchical nav (1st -> 2nd -> 3rd order), Ctrl+M
+        self._anchor_frame = ttk.LabelFrame(body, text=" FunctionAnchors ", padding=2)
+        self._anchor_frame.grid(row=1, column=5, sticky="nsew", padx=(4, 0))
+        self._anchor_frame.columnconfigure(0, weight=1)
+        self._anchor_frame.rowconfigure(0, weight=1)
+        self._scroll_anchor = tk.Scrollbar(self._anchor_frame)
+        self._listbox_anchor = tk.Listbox(
+            self._anchor_frame, font=("Consolas", 9), width=36, height=20,
+            activestyle="dotbox", selectmode=tk.SINGLE,
+            yscrollcommand=self._scroll_anchor.set,
+        )
+        self._listbox_anchor.grid(row=0, column=0, sticky="nsew")
+        self._scroll_anchor.grid(row=0, column=1, sticky="ns")
+        self._scroll_anchor.configure(command=self._listbox_anchor.yview)
+        self._listbox_anchor.bind("<Double-Button-1>", self._on_anchor_browser_click)
+        self._listbox_anchor.bind("<Button-1>", self._on_anchor_browser_click)
+
+        def _anchor_scroll(delta: int) -> None:
+            self._listbox_anchor.yview_scroll(-delta, "units")
+        for w in (self._listbox_anchor, self._anchor_frame):
+            w.bind("<MouseWheel>", lambda e: _anchor_scroll(int((e.delta or 0) / 120)))
+            w.bind("<Button-4>", lambda e: _anchor_scroll(3))
+            w.bind("<Button-5>", lambda e: _anchor_scroll(-3))
+
         self._tools_frame = ttk.Frame(body, width=1)
-        self._tools_frame.grid(row=1, column=5, sticky="nsew", padx=(4, 0))
+        self._tools_frame.grid(row=1, column=6, sticky="nsew", padx=(4, 0))
 
         if not self._asm_pane_visible:
             self._asm_frame.grid_remove()
         if not self._pseudo_c_pane_visible:
             self._pseudo_c_frame.grid_remove()
+        if not self._anchor_browser_pane_visible:
+            self._anchor_frame.grid_remove()
 
         self._text.tag_configure("pointer", foreground="red")
         self._text.tag_configure("sel_hex", background="#add8e6", foreground="black")
@@ -359,6 +388,23 @@ class HexEditorFrame(ttk.Frame):
         _bind_pseudo_c_toggle(outer)
         self.winfo_toplevel().bind("<Control-d>", self._toggle_pseudo_c_pane, add=True)
         self.winfo_toplevel().bind("<Control-D>", self._toggle_pseudo_c_pane, add=True)
+        def _bind_anchor_toggle(w: tk.Misc) -> None:
+            w.bind("<Control-m>", self._toggle_anchor_browser_pane)
+            w.bind("<Control-M>", self._toggle_anchor_browser_pane)
+        _bind_anchor_toggle(self._text)
+        _bind_anchor_toggle(self._text_ascii)
+        _bind_anchor_toggle(self._goto_entry)
+        _bind_anchor_toggle(self._encoding_combo)
+        _bind_anchor_toggle(self._asm_mode_combo)
+        _bind_anchor_toggle(self._asm_frame)
+        _bind_anchor_toggle(self._text_asm)
+        _bind_anchor_toggle(self._pseudo_c_frame)
+        _bind_anchor_toggle(self._text_pseudo_c)
+        _bind_anchor_toggle(self._anchor_frame)
+        _bind_anchor_toggle(self._listbox_anchor)
+        _bind_anchor_toggle(outer)
+        self.winfo_toplevel().bind("<Control-m>", self._toggle_anchor_browser_pane, add=True)
+        self.winfo_toplevel().bind("<Control-M>", self._toggle_anchor_browser_pane, add=True)
         _bind_goto(self._text)
         _bind_goto(self._text_ascii)
         _bind_goto(self._goto_entry)
@@ -387,7 +433,8 @@ class HexEditorFrame(ttk.Frame):
         for w in (
             self._text, self._text_ascii, self._goto_entry, self._encoding_combo,
             self._asm_mode_combo, self._asm_frame, self._text_asm,
-            self._pseudo_c_frame, self._text_pseudo_c, outer,
+            self._pseudo_c_frame, self._text_pseudo_c, self._anchor_frame,
+            self._listbox_anchor, outer,
         ):
             w.bind("<Control-f>", self._show_find_dialog)
             w.bind("<Control-F>", self._show_find_dialog)
@@ -752,6 +799,99 @@ class HexEditorFrame(ttk.Frame):
         self.after_idle(self._refresh_visible)
         return "break"
 
+    def _toggle_anchor_browser_pane(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Toggle FunctionAnchor browser pane visibility. Bound to Ctrl+M."""
+        self._goto_entry.selection_clear()
+        self._text.focus_set()
+        self._anchor_browser_pane_visible = not self._anchor_browser_pane_visible
+        if self._anchor_browser_pane_visible:
+            self._anchor_frame.grid(row=1, column=5, sticky="nsew", padx=(4, 0))
+            self._anchor_browser_path = []
+            self._refresh_anchor_browser()
+        else:
+            self._anchor_frame.grid_remove()
+        self.after_idle(self._refresh_visible)
+        return "break"
+
+    def _get_anchor_browser_items(self) -> List[Tuple[str, Optional[int]]]:
+        """Return [(display_text, address_or_none), ...]. address is set for leaves (full anchor names)."""
+        anchors = self._toml_data.get("FunctionAnchors", [])
+        path = self._anchor_browser_path
+        prefix = ".".join(path) + "." if path else ""
+        branches: Set[str] = set()
+        leaves: List[Tuple[str, int]] = []
+        for a in anchors:
+            name = (a.get("Name") or "").strip()
+            if not name:
+                continue
+            parts = name.split(".")
+            if path:
+                if not all(i < len(parts) and parts[i] == p for i, p in enumerate(path)):
+                    continue
+                if len(parts) == len(path) + 1:
+                    addr = a.get("Address")
+                    if addr is not None:
+                        try:
+                            val = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+                            if val < GBA_ROM_BASE:
+                                val += GBA_ROM_BASE
+                            leaves.append((name, val - GBA_ROM_BASE))
+                        except (ValueError, TypeError):
+                            leaves.append((name, 0))
+                else:
+                    branch = ".".join(parts[: len(path) + 1])
+                    branches.add(branch)
+            else:
+                if len(parts) == 1:
+                    addr = a.get("Address")
+                    if addr is not None:
+                        try:
+                            val = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+                            if val < GBA_ROM_BASE:
+                                val += GBA_ROM_BASE
+                            leaves.append((name, val - GBA_ROM_BASE))
+                        except (ValueError, TypeError):
+                            leaves.append((name, 0))
+                else:
+                    branches.add(parts[0])
+        result: List[Tuple[str, Optional[int]]] = []
+        for b in sorted(branches):
+            result.append((b, None))
+        for name, off in sorted(leaves, key=lambda x: x[0]):
+            result.append((name, off))
+        return result
+
+    def _refresh_anchor_browser(self) -> None:
+        """Populate the anchor browser Listbox from current path."""
+        self._listbox_anchor.delete(0, tk.END)
+        items: List[Tuple[str, Optional[int]]] = []
+        if self._anchor_browser_path:
+            items.append(("\u2190 Back", -1))
+        for display, addr in self._get_anchor_browser_items():
+            items.append((display, addr))
+        for display, _ in items:
+            self._listbox_anchor.insert(tk.END, display)
+        self._listbox_anchor._anchor_items = items
+
+    def _on_anchor_browser_click(self, event: tk.Event) -> None:
+        """Handle click in anchor browser: drill down, go back, or goto address."""
+        sel = self._listbox_anchor.curselection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        items = getattr(self._listbox_anchor, "_anchor_items", None)
+        if not items or idx >= len(items):
+            return
+        display, address = items[idx]
+        if address == -1:
+            self._anchor_browser_path = self._anchor_browser_path[:-1]
+            self._refresh_anchor_browser()
+        elif address is not None:
+            self._do_goto(address)
+        else:
+            self._anchor_browser_path = display.split(".")
+            self._refresh_anchor_browser()
+
     def _on_asm_mode_change(self, event: Optional[tk.Event] = None) -> None:
         sel = self._asm_mode_var.get()
         self._asm_mode = "thumb" if sel == "Thumb" else "arm"
@@ -970,7 +1110,7 @@ class HexEditorFrame(ttk.Frame):
     def _prevent_unwanted(self, event: tk.Event) -> Optional[str]:
         if event.keysym in ("Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next"):
             return None
-        if event.state & 0x4 and event.keysym.lower() in ("a", "b", "c", "f", "g", "h", "i", "r", "v", "x", "s"):
+        if event.state & 0x4 and event.keysym.lower() in ("a", "b", "c", "f", "g", "h", "i", "m", "r", "v", "x", "s"):
             return None
         if event.char and event.char in HEX_DIGITS:
             return "break"
