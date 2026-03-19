@@ -277,10 +277,10 @@ Name = '''pocketid'''
 # ── Graphics NamedAnchors (FireRed Tools → Graphics slot, gbagfx via WSL on Windows) ──
 # Whole-anchor Format (no `[`…`]` struct wrapper). You may wrap the value in backticks in TOML, e.g.
 #   Format = '''`ucs4x8x8|graphics.items.fossils.palette1`'''
-#   ucp4          — uncompressed 4bpp palette, one 32-byte GBA palette → gbagfx → .pal
-#   ucp4:0F…      — N hex digits (0–F) = N consecutive 32-byte palettes (e.g. 16 digits → 512 bytes ROM);
-#                   for gbagfx palette-only preview, N>1 → 512-byte master; for 4bpp sprites only first 32 bytes
-#   lzp4 / lzp4:… — LZ77-compressed 4bpp palette; same length rule after decompress; same gbagfx expansion when N>1
+#   ucp4          — one 32-byte chunk for hardware palette index 0 only
+#   ucp4:45       — two chunks in ROM order: first → index 4, second → index 5 (64 bytes); other indices = 00 00
+#   ucp4:0F…      — one chunk per digit; digit value = palette index 0–F (16 digits → 512 bytes if all indices)
+#   lzp4 / lzp4:… — LZ77-compressed; same index/chunk layout after decompress
 #   ucp8:N        — uncompressed 8bpp-style palette run: N = one hex digit 0–F, byte length = N×32
 #   lzp8:N        — LZ77 palette, same length rule after decompress
 #                   (when used as the palette for a 4bpp sprite, only the first 32 bytes are passed to gbagfx)

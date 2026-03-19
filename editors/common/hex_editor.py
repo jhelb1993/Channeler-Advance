@@ -18,6 +18,9 @@ from editors.common.gba_graphics import (
     decode_graphics_anchor_to_png,
     decode_palette_to_png_pal,
     decode_sprite_at_pointer,
+    decode_gba_palette32_to_rgb888,
+    extract_palette_bytes,
+    get_palette_4_slot_bytes,
     parse_graphics_anchor_format,
     parse_sprite_field_spec,
     compute_graphics_rom_span,
@@ -501,11 +504,12 @@ class GraphicsPreviewFrame(ttk.Frame):
         super().__init__(parent, **kwargs)
         self._hex = hex_editor
         self._photo: Optional[Any] = None
+        self._pal4_state: Optional[Tuple[Any, bytes]] = None  # (GraphicsAnchorSpec, extracted pal bytes)
         self._build()
 
     def _build(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(3, weight=1)
+        self.rowconfigure(5, weight=1)
         top = ttk.Frame(self)
         top.grid(row=0, column=0, sticky="ew", pady=(0, 2))
         top.columnconfigure(1, weight=1)
@@ -514,11 +518,36 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._combo.grid(row=0, column=1, sticky="ew", padx=(0, 4))
         self._combo.bind("<<ComboboxSelected>>", lambda e: self._decode_selected())
         ttk.Button(top, text="Decode", command=self._decode_selected).grid(row=0, column=2, sticky="e")
-        ttk.Label(self, text="gbagfx output:", font=("Consolas", 8)).grid(row=1, column=0, sticky="w")
+
+        self._pal4_row = ttk.Frame(self)
+        self._pal4_row.grid(row=1, column=0, sticky="w", pady=(0, 2))
+        self._pal4_row.grid_remove()
+        ttk.Label(self._pal4_row, text="Palette index (0–15):", font=("Consolas", 8)).grid(
+            row=0, column=0, sticky="w", padx=(0, 4)
+        )
+        self._pal4_index_combo = ttk.Combobox(
+            self._pal4_row,
+            width=4,
+            state="readonly",
+            font=("Consolas", 8),
+            values=tuple(str(i) for i in range(16)),
+        )
+        self._pal4_index_combo.grid(row=0, column=1, sticky="w")
+        self._pal4_index_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_palette_4_swatches())
+        self._pal4_toml_hint = ttk.Label(self._pal4_row, text="", font=("Consolas", 8), foreground="#666")
+        self._pal4_toml_hint.grid(row=0, column=2, sticky="w", padx=(12, 0))
+
+        self._pal4_canvas = tk.Canvas(
+            self, height=44, bg="#1e1e1e", highlightthickness=1, highlightbackground="#555555"
+        )
+        self._pal4_canvas.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+        self._pal4_canvas.grid_remove()
+
+        ttk.Label(self, text="gbagfx output:", font=("Consolas", 8)).grid(row=3, column=0, sticky="w")
         self._log = tk.Text(self, height=5, font=("Consolas", 8), wrap=tk.WORD, state=tk.DISABLED)
-        self._log.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+        self._log.grid(row=4, column=0, sticky="ew", pady=(0, 4))
         self._img_label = ttk.Label(self, text="(no preview)")
-        self._img_label.grid(row=3, column=0, sticky="nw")
+        self._img_label.grid(row=5, column=0, sticky="nw")
 
     def _set_log(self, text: str) -> None:
         self._log.configure(state=tk.NORMAL)
@@ -529,6 +558,35 @@ class GraphicsPreviewFrame(ttk.Frame):
     def _clear_image(self, msg: str = "(no preview)") -> None:
         self._photo = None
         self._img_label.configure(image="", text=msg)
+
+    def _hide_palette_4_ui(self) -> None:
+        self._pal4_row.grid_remove()
+        self._pal4_canvas.grid_remove()
+        self._pal4_state = None
+        self._pal4_toml_hint.configure(text="")
+
+    def _refresh_palette_4_swatches(self) -> None:
+        if not self._pal4_state:
+            return
+        spec, pal_bytes = self._pal4_state
+        try:
+            slot = int(self._pal4_index_combo.get())
+        except (ValueError, tk.TclError):
+            slot = 0
+        try:
+            sub = get_palette_4_slot_bytes(spec, pal_bytes, slot)
+            rgbs = decode_gba_palette32_to_rgb888(sub)
+        except (ValueError, IndexError):
+            return
+        c = self._pal4_canvas
+        c.delete("all")
+        pad, cell_w, cell_h = 4, 18, 26
+        total_w = pad * 2 + 16 * (cell_w + 2)
+        c.configure(width=total_w, height=pad * 2 + cell_h)
+        for i, rgb in enumerate(rgbs):
+            x0 = pad + i * (cell_w + 2)
+            fill = "#%02x%02x%02x" % rgb
+            c.create_rectangle(x0, pad, x0 + cell_w, pad + cell_h, fill=fill, outline="#666666")
 
     def _try_show_image(self, path: str) -> None:
         try:
@@ -555,6 +613,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._combo.configure(values=names)
         if not names:
             self._combo.set("")
+            self._hide_palette_4_ui()
             self._set_log(f"gbagfx path: {repo_gbagfx_path()}\n(no graphics NamedAnchors in TOML)")
             self._clear_image()
 
@@ -585,6 +644,33 @@ class GraphicsPreviewFrame(ttk.Frame):
         spec = info["spec"]
         logs: List[str] = []
         if spec.kind == "palette":
+            self._hide_palette_4_ui()
+            if spec.bpp == 4:
+                raw = bytes(
+                    rom[
+                        info["base_off"] : info["base_off"]
+                        + min(len(rom) - info["base_off"], 1 << 20)
+                    ]
+                )
+                try:
+                    pal_bytes = extract_palette_bytes(spec, raw)
+                except ValueError as e:
+                    self._set_log(f"Palette extract error: {e}")
+                    self._clear_image()
+                    return
+                self._pal4_state = (spec, pal_bytes)
+                d0 = spec.palette_4_indices[0] if spec.palette_4_indices else 0
+                self._pal4_index_combo.set(str(d0))
+                if spec.palette_4_indices:
+                    hx = " ".join(format(i, "X") for i in spec.palette_4_indices)
+                    self._pal4_toml_hint.configure(
+                        text=f"Chunks map to palette indices (hex digits): {hx}"
+                    )
+                else:
+                    self._pal4_toml_hint.configure(text="Plain ucp4 → ROM chunk is index 0 only")
+                self._pal4_row.grid()
+                self._pal4_canvas.grid()
+                self._refresh_palette_4_swatches()
             pal_path, log = decode_palette_to_png_pal(bytes(rom), info["base_off"], spec)
             logs.append(log)
             self._set_log("\n".join(logs))
@@ -593,6 +679,7 @@ class GraphicsPreviewFrame(ttk.Frame):
             else:
                 self._clear_image("(gbagfx did not produce .pal)")
             return
+        self._hide_palette_4_ui()
         ext_ps: Optional[Any] = None
         ext_pb: Optional[int] = None
         log_pre = ""

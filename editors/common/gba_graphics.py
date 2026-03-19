@@ -1,8 +1,8 @@
 """
 GBA graphics helpers: Nintendo-style LZ77 decompress and gbagfx (pret) invocation via WSL on Windows.
-Palette formats: ucp4, lzp4, ucp4:HEX… (N digits → N×32 bytes), ucp8:N / lzp8:N (one hex digit, count×32).
-Multi–4bpp (N>1): palette-only preview uses a 512-byte master (16×16 colors, 00 00 pad); 4bpp sprites use only
-the first 32 bytes so gbagfx/libpng accept the PLTE. 8bpp-format palette anchors for 4bpp sprites are also trimmed to 32 bytes.
+Palette formats: ucp4, lzp4, ucp4:HEX… (each hex digit 0–F = a hardware palette index; ROM has one 32-byte chunk
+per digit in order), ucp8:N / lzp8:N. Multi–4bpp scatters chunks into a 512-byte master for gbagfx palette preview;
+4bpp sprites use only the first ROM chunk. 8bpp anchors used with 4bpp sprites are trimmed to 32 bytes.
 Sprite tile formats: ucs4xWxH / lzs4xWxH (and 8bpp variants), 8×8 tiles.
 """
 
@@ -263,7 +263,7 @@ def compute_graphics_rom_span(spec: GraphicsAnchorSpec, rom_len: int, base: int)
         if spec.lz:
             return min(rest, 512 * 1024)
         if spec.bpp == 4:
-            return min(rest, 32 * max(1, spec.palette_4_count))
+            return min(rest, 32 * palette_4_chunk_count(spec))
         dig = spec.palette_hex_digit or "1"
         return min(rest, palette_byte_count_8_variant(dig))
     if spec.lz:
@@ -276,8 +276,8 @@ class GraphicsAnchorSpec:
     kind: str  # "palette" | "sprite"
     bpp: int  # 4 or 8
     lz: bool
-    # palette 4bpp: number of 32-byte GBA palettes (ucp4 = 1; ucp4:0F… = len(hex) palettes)
-    palette_4_count: int = 1
+    # palette 4bpp: ``ucp4:`` hex digits = hardware indices; ``None`` = plain ucp4 → one chunk for index 0
+    palette_4_indices: Optional[Tuple[int, ...]] = None
     # palette 8bpp: ucp8:N / lzp8:N — one hex digit 0–F, byte length rule in palette_byte_count_8_variant
     palette_hex_digit: Optional[str] = None
     # sprite: tile dimensions
@@ -285,6 +285,70 @@ class GraphicsAnchorSpec:
     height_tiles: int = 0
     # sprite (whole anchor or struct field): optional palette NamedAnchor name after |
     palette_anchor_name: Optional[str] = None
+
+
+def palette_4_chunk_count(spec: GraphicsAnchorSpec) -> int:
+    """How many 32-byte palette chunks are stored in ROM for this 4bpp palette anchor."""
+    if spec.kind != "palette" or spec.bpp != 4:
+        return 0
+    if spec.palette_4_indices is None:
+        return 1
+    return len(spec.palette_4_indices)
+
+
+# 4bpp: 16 hardware indices × 16 colors × 2 bytes (master layout for gbagfx / editor)
+GBA_4BPP_SUBPALETTE_BYTES = 32
+GBA_4BPP_MASTER_INDEX_COUNT = 16
+GBA_4BPP_MASTER_PALETTE_BYTES = GBA_4BPP_MASTER_INDEX_COUNT * GBA_4BPP_SUBPALETTE_BYTES  # 512
+
+
+def gba_rgb555_word_to_rgb888(word: int) -> Tuple[int, int, int]:
+    """Convert GBA 16-bit color (xBBBBBGGGGGRRRRR, little-endian in ROM) to 8-bit RGB."""
+    r5 = word & 0x1F
+    g5 = (word >> 5) & 0x1F
+    b5 = (word >> 10) & 0x1F
+    return (
+        min(255, (r5 * 255 + 15) // 31),
+        min(255, (g5 * 255 + 15) // 31),
+        min(255, (b5 * 255 + 15) // 31),
+    )
+
+
+def decode_gba_palette32_to_rgb888(pal32: bytes) -> List[Tuple[int, int, int]]:
+    """16 GBA colors (32 bytes) → list of RGB888 tuples."""
+    if len(pal32) < 32:
+        pal32 = pal32.ljust(32, b"\x00")
+    out: List[Tuple[int, int, int]] = []
+    for i in range(0, 32, 2):
+        w = pal32[i] | (pal32[i + 1] << 8)
+        out.append(gba_rgb555_word_to_rgb888(w))
+    return out
+
+
+def get_palette_4_slot_bytes(spec: GraphicsAnchorSpec, pal_bytes: bytes, slot_index: int) -> bytes:
+    """
+    32 bytes for hardware palette index ``slot_index`` (0..15).
+    Missing indices use ``00 00`` per color (returned as 32 zero bytes).
+    """
+    if spec.kind != "palette" or spec.bpp != 4:
+        raise ValueError("not a 4bpp palette spec")
+    if not 0 <= slot_index < GBA_4BPP_MASTER_INDEX_COUNT:
+        raise ValueError(f"slot_index must be 0..{GBA_4BPP_MASTER_INDEX_COUNT - 1}")
+    if spec.palette_4_indices is None:
+        if slot_index == 0:
+            return pal_bytes[:GBA_4BPP_SUBPALETTE_BYTES].ljust(GBA_4BPP_SUBPALETTE_BYTES, b"\x00")[
+                : GBA_4BPP_SUBPALETTE_BYTES
+            ]
+        return bytes(GBA_4BPP_SUBPALETTE_BYTES)
+    out = bytes(GBA_4BPP_SUBPALETTE_BYTES)
+    for chunk_i, s in enumerate(spec.palette_4_indices):
+        if s != slot_index:
+            continue
+        off = chunk_i * GBA_4BPP_SUBPALETTE_BYTES
+        out = pal_bytes[off : off + GBA_4BPP_SUBPALETTE_BYTES].ljust(
+            GBA_4BPP_SUBPALETTE_BYTES, b"\x00"
+        )[: GBA_4BPP_SUBPALETTE_BYTES]
+    return out
 
 
 def _strip_outer_backticks(s: str) -> str:
@@ -316,17 +380,19 @@ def parse_graphics_anchor_format(fmt: str) -> Optional[GraphicsAnchorSpec]:
             palette_hex_digit=m.group(2).upper(),
         )
 
-    # 4bpp palette: optional :HEX… — each hex digit is one 32-byte sub-palette slot (e.g. 16 digits → 512 bytes)
+    # 4bpp palette: optional :HEX… — each hex digit names a palette index (0–F); one 32-byte chunk per digit in ROM order
     m = re.fullmatch(r"(uc|lz)p4(?::([0-9a-fA-F]+))?", s, re.IGNORECASE)
     if m:
         lz = m.group(1).lower() == "lz"
         suffix = m.group(2)
-        count = len(suffix) if suffix else 1
+        if not suffix:
+            return GraphicsAnchorSpec(kind="palette", bpp=4, lz=lz, palette_4_indices=None)
+        idxs = tuple(int(ch, 16) for ch in suffix)
         return GraphicsAnchorSpec(
             kind="palette",
             bpp=4,
             lz=lz,
-            palette_4_count=count,
+            palette_4_indices=idxs,
         )
 
     m = re.fullmatch(r"(uc|lz)s([48])x(\d+)x(\d+)", s, re.IGNORECASE)
@@ -394,7 +460,7 @@ def extract_palette_bytes(spec: GraphicsAnchorSpec, raw: bytes) -> bytes:
     if spec.lz:
         data = decompress_gba_lz77(raw)
     if spec.bpp == 4:
-        need = 32 * max(1, spec.palette_4_count)
+        need = 32 * palette_4_chunk_count(spec)
     else:
         assert spec.palette_hex_digit is not None
         need = palette_byte_count_8_variant(spec.palette_hex_digit)
@@ -403,33 +469,27 @@ def extract_palette_bytes(spec: GraphicsAnchorSpec, raw: bytes) -> bytes:
     return data[:need]
 
 
-# Multi–4bpp-palette → single master palette for gbagfx: 16 hardware indices × 16 colors × 2 bytes.
-GBA_4BPP_SUBPALETTE_BYTES = 32
-GBA_4BPP_MASTER_INDEX_COUNT = 16
-GBA_4BPP_MASTER_PALETTE_BYTES = GBA_4BPP_MASTER_INDEX_COUNT * GBA_4BPP_SUBPALETTE_BYTES  # 512
-
-
-def normalize_4bpp_palette_for_gbagfx(pal_bytes: bytes, palette_4_count: int) -> bytes:
+def normalize_4bpp_palette_for_gbagfx(
+    pal_bytes: bytes, indices: Optional[Tuple[int, ...]]
+) -> bytes:
     """
-    One 32-byte 4bpp palette is passed through unchanged.
+    Plain ``ucp4`` (``indices is None``): return the single 32-byte chunk unchanged.
 
-    If the spec packs more than one sub-palette (N×32 bytes), build a fixed 16-index master palette:
-    256 GBA colors (512 bytes). Copy each sub-palette into its slot; unused indices (when N < 16) or
-    missing colors within a short slot are padded with 0x00, 0x00 per color. If N > 16, only the first
-    16 sub-palettes are used.
+    Otherwise scatter each ROM chunk into its hardware palette slot named by the corresponding hex digit;
+    unused slots stay ``00 00`` per color (512 bytes total). Chunks targeting the same index: first wins.
     """
-    if palette_4_count <= 1:
+    if indices is None:
         return pal_bytes
     out = bytearray(GBA_4BPP_MASTER_PALETTE_BYTES)
-    n_use = min(max(1, palette_4_count), GBA_4BPP_MASTER_INDEX_COUNT)
-    for i in range(n_use):
-        off = i * GBA_4BPP_SUBPALETTE_BYTES
-        chunk = pal_bytes[off : off + GBA_4BPP_SUBPALETTE_BYTES]
-        if len(chunk) >= GBA_4BPP_SUBPALETTE_BYTES:
-            out[off : off + GBA_4BPP_SUBPALETTE_BYTES] = chunk
-        else:
-            out[off : off + len(chunk)] = chunk
-            # remainder of this slot stays 0x00 per color pair
+    for chunk_i, slot in enumerate(indices):
+        if slot < 0 or slot >= GBA_4BPP_MASTER_INDEX_COUNT:
+            continue
+        off_rom = chunk_i * GBA_4BPP_SUBPALETTE_BYTES
+        chunk = pal_bytes[off_rom : off_rom + GBA_4BPP_SUBPALETTE_BYTES]
+        if len(chunk) < GBA_4BPP_SUBPALETTE_BYTES:
+            chunk = chunk.ljust(GBA_4BPP_SUBPALETTE_BYTES, b"\x00")
+        base = slot * GBA_4BPP_SUBPALETTE_BYTES
+        out[base : base + GBA_4BPP_SUBPALETTE_BYTES] = chunk
     return bytes(out)
 
 
@@ -442,17 +502,16 @@ def palette_bytes_for_gbagfx(
     """
     Bytes written to .gbapal before gbagfx.
 
-    - Multi–4bpp palette anchors (N>1): for **palette-only** preview, expand to a 512-byte master. For **4bpp
-      sprites**, use only the first 32 bytes (sub-palette 0); a 512-byte palette makes gbagfx/libpng fail with
-      “Invalid palette length” on 4bpp PNG output.
+    - Multi-chunk 4bpp (``ucp4:`` with more than one hex digit): for **palette-only** preview, scatter chunks
+      into a 512-byte master by palette index. For **4bpp sprites**, use only the first ROM chunk (32 bytes).
     - When ``sprite_bpp`` is 4 and the palette anchor is 8bpp-format (``ucp8`` / ``lzp8``), trim to the first
       32 bytes.
     """
-    if spec.kind == "palette" and spec.bpp == 4 and spec.palette_4_count > 1:
+    if spec.kind == "palette" and spec.bpp == 4 and palette_4_chunk_count(spec) > 1:
         if sprite_bpp == 4:
             pal_bytes = pal_bytes[:GBA_4BPP_SUBPALETTE_BYTES]
         else:
-            pal_bytes = normalize_4bpp_palette_for_gbagfx(pal_bytes, spec.palette_4_count)
+            pal_bytes = normalize_4bpp_palette_for_gbagfx(pal_bytes, spec.palette_4_indices)
     if sprite_bpp == 4 and spec.kind == "palette" and spec.bpp == 8:
         pal_bytes = pal_bytes[:GBA_4BPP_SUBPALETTE_BYTES]
     return pal_bytes
