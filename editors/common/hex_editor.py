@@ -636,6 +636,8 @@ def _load_toml_lists(toml_data: Dict[str, Any]) -> Dict[str, Dict[int, str]]:
     """Load [[List]] entries into {name: {index: label}}."""
     lists: Dict[str, Dict[int, str]] = {}
     for lst in toml_data.get("List", []):
+        if not isinstance(lst, dict):
+            continue
         name = str(lst.get("Name", "")).strip().strip("'\"")
         if not name:
             continue
@@ -656,10 +658,10 @@ def _load_toml_lists(toml_data: Dict[str, Any]) -> Dict[str, Dict[int, str]]:
     return lists
 
 
-def _list_table_key_and_offset(lst_dict: Dict[str, Any], flat_index: int) -> Optional[Tuple[Any, int]]:
-    """For one ``[[List]]`` table dict, return ``(toml_key, offset_in_array)`` for a flat index, or None."""
+def _list_row_key_and_offset(list_dict: Dict[str, Any], flat_index: int) -> Optional[Tuple[Any, int]]:
+    """For one ``[[List]]`` row dict, return ``(toml_key, offset_in_array)`` for a flat index, or None."""
     spans: List[Tuple[Any, int, int]] = []
-    for key, val in lst_dict.items():
+    for key, val in list_dict.items():
         if str(key) in ("Name", "DefaultHash"):
             continue
         try:
@@ -686,6 +688,7 @@ class StructEditorFrame(ttk.Frame):
         self._hex = hex_editor
         self._anchors: List[Dict[str, Any]] = []
         self._lists: Dict[str, Dict[int, str]] = {}
+        self._list_enum_active_pcs: Optional[Dict[str, Any]] = None
         self._fields: List[Dict[str, Any]] = []
         self._entry_count = 0
         self._struct_size = 0
@@ -793,7 +796,7 @@ class StructEditorFrame(ttk.Frame):
             font=("Consolas", 7),
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
-        # TOML [[List]] enum: ROM index (dropdown) vs editing list string (TOML file)
+        # [[List]] enum: ROM dropdown + TOML label. PCS NamedAnchor table enum: ROM dropdown + PCS string in ROM.
         self._list_enum_frame = ttk.Frame(self)
         self._list_enum_frame.columnconfigure(0, weight=1)
         ttk.Label(self._list_enum_frame, text="[ROM ▾]", font=("Consolas", 8, "bold")).grid(
@@ -811,24 +814,51 @@ class StructEditorFrame(ttk.Frame):
         ttk.Separator(self._list_enum_frame, orient=tk.HORIZONTAL).grid(
             row=2, column=0, columnspan=2, sticky="ew", pady=(0, 4)
         )
-        ttk.Label(self._list_enum_frame, text="[TOML ✎]", font=("Consolas", 8, "bold")).grid(
-            row=3, column=0, sticky="nw", padx=(0, 4), pady=(0, 2)
+        self._list_enum_toml_block = ttk.Frame(self._list_enum_frame)
+        self._list_enum_toml_block.columnconfigure(0, weight=1)
+        ttk.Label(self._list_enum_toml_block, text="[TOML ✎]", font=("Consolas", 8, "bold")).grid(
+            row=0, column=0, sticky="nw", padx=(0, 4), pady=(0, 2)
         )
         ttk.Label(
-            self._list_enum_frame,
-            text="String at current ROM index (writes TOML file):",
+            self._list_enum_toml_block,
+            text="Label at current ROM index ([[List]]):",
             font=("Consolas", 8),
-        ).grid(row=3, column=1, sticky="w", pady=(0, 2))
+        ).grid(row=0, column=1, sticky="w", pady=(0, 2))
         self._list_enum_toml_var = tk.StringVar(value="")
         self._list_enum_toml_entry = ttk.Entry(
-            self._list_enum_frame, textvariable=self._list_enum_toml_var, font=("Consolas", 9)
+            self._list_enum_toml_block, textvariable=self._list_enum_toml_var, font=("Consolas", 9)
         )
-        self._list_enum_toml_entry.grid(row=4, column=0, sticky="ew", padx=(0, 4))
+        self._list_enum_toml_entry.grid(row=1, column=0, sticky="ew", padx=(0, 4))
         self._list_enum_toml_btn = ttk.Button(
-            self._list_enum_frame, text="Apply to TOML", command=self._on_list_enum_toml_apply
+            self._list_enum_toml_block, text="Apply to TOML", command=self._on_list_enum_toml_apply
         )
-        self._list_enum_toml_btn.grid(row=4, column=1, sticky="e", padx=(4, 0))
+        self._list_enum_toml_btn.grid(row=1, column=1, sticky="e", padx=(4, 0))
         self._list_enum_toml_entry.bind("<Return>", lambda e: self._on_list_enum_toml_apply())
+        self._list_enum_toml_block.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 2))
+        self._list_enum_toml_block.grid_remove()
+
+        self._list_enum_pcs_block = ttk.Frame(self._list_enum_frame)
+        self._list_enum_pcs_block.columnconfigure(0, weight=1)
+        ttk.Label(self._list_enum_pcs_block, text="[ROM PCS ✎]", font=("Consolas", 8, "bold")).grid(
+            row=0, column=0, sticky="nw", padx=(0, 4), pady=(0, 2)
+        )
+        ttk.Label(
+            self._list_enum_pcs_block,
+            text="String at current ROM index (NamedAnchor PCS table):",
+            font=("Consolas", 8),
+        ).grid(row=0, column=1, sticky="w", pady=(0, 2))
+        self._list_enum_pcs_var = tk.StringVar(value="")
+        self._list_enum_pcs_entry = ttk.Entry(
+            self._list_enum_pcs_block, textvariable=self._list_enum_pcs_var, font=("Consolas", 9)
+        )
+        self._list_enum_pcs_entry.grid(row=1, column=0, sticky="ew", padx=(0, 4))
+        self._list_enum_pcs_btn = ttk.Button(
+            self._list_enum_pcs_block, text="Apply to ROM", command=self._on_list_enum_pcs_apply
+        )
+        self._list_enum_pcs_btn.grid(row=1, column=1, sticky="e", padx=(4, 0))
+        self._list_enum_pcs_entry.bind("<Return>", lambda e: self._on_list_enum_pcs_apply())
+        self._list_enum_pcs_block.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 2))
+        self._list_enum_pcs_block.grid_remove()
         self._list_enum_fi: Optional[int] = None
         self._list_enum_frame.grid(row=3, column=0, sticky="ew", pady=(0, 2))
         self._list_enum_frame.grid_remove()
@@ -1089,22 +1119,45 @@ class StructEditorFrame(ttk.Frame):
             self._refresh_pcs_ptr_tree_row(fi)
             self._update_ptr_text_panel()
 
+    def _find_pcs_anchor_info_for_enum(self, enum_name: str) -> Optional[Dict[str, Any]]:
+        ref = enum_name.strip()
+        for info in self._hex.get_pcs_table_anchors():
+            if info["name"] == ref:
+                return info
+        return None
+
+    def _is_toml_list_enum_field(self, fd: Dict[str, Any]) -> bool:
+        return fd.get("type") == "uint" and bool(fd.get("enum")) and fd["enum"] in self._lists
+
+    def _is_pcs_table_enum_field(self, fd: Dict[str, Any]) -> bool:
+        if fd.get("type") != "uint" or not fd.get("enum"):
+            return False
+        if fd["enum"] in self._lists:
+            return False
+        return self._find_pcs_anchor_info_for_enum(fd["enum"]) is not None
+
+    def _is_enum_panel_field(self, fd: Dict[str, Any]) -> bool:
+        return self._is_toml_list_enum_field(fd) or self._is_pcs_table_enum_field(fd)
+
     def _update_list_enum_panel(self) -> None:
-        """Show ROM index combobox + TOML string editor for fields backed by [[List]]."""
+        """Show ROM index combobox + [[List]] TOML editor or PCS table string editor."""
         sel = self._tree.selection()
         if not sel or not sel[0].startswith("sf_"):
             self._list_enum_frame.grid_remove()
             self._list_enum_fi = None
+            self._list_enum_active_pcs = None
             return
         fi = int(sel[0].split("_")[1])
         if fi >= len(self._fields):
             self._list_enum_frame.grid_remove()
             self._list_enum_fi = None
+            self._list_enum_active_pcs = None
             return
         fd = self._fields[fi]
-        if not self._is_toml_list_enum_field(fd):
+        if not self._is_enum_panel_field(fd):
             self._list_enum_frame.grid_remove()
             self._list_enum_fi = None
+            self._list_enum_active_pcs = None
             return
         self._list_enum_fi = fi
         self._list_enum_frame.grid(row=3, column=0, sticky="ew", pady=(0, 2))
@@ -1119,32 +1172,59 @@ class StructEditorFrame(ttk.Frame):
         if foff + fd["size"] > len(data):
             return
         cur = int.from_bytes(data[foff:foff + fd["size"]], "little")
-        list_name = fd["enum"]
-        lm = self._lists.get(list_name, {})
         self._list_enum_idx_by_combo = []
         display_vals: List[str] = []
-        for idx in sorted(lm.keys()):
-            lab = lm[idx]
+
+        if self._is_toml_list_enum_field(fd):
+            self._list_enum_active_pcs = None
+            self._list_enum_toml_block.grid()
+            self._list_enum_pcs_block.grid_remove()
+            lm = self._lists.get(fd["enum"], {})
+            for idx in sorted(lm.keys()):
+                lab = lm[idx]
+                self._list_enum_idx_by_combo.append(idx)
+                short = lab.replace("\n", " ")
+                if len(short) > 52:
+                    short = short[:49] + "…"
+                display_vals.append(f"{idx}: {short}")
+            self._list_enum_rom_combo["values"] = tuple(display_vals)
+            try:
+                pos = self._list_enum_idx_by_combo.index(cur)
+            except ValueError:
+                self._list_enum_rom_combo.set(f"(ROM index {cur} — not in [[List]])")
+            else:
+                self._list_enum_rom_combo.current(pos)
+            self._list_enum_toml_var.set(lm.get(cur, ""))
+            return
+
+        pcs_info = self._find_pcs_anchor_info_for_enum(fd["enum"])
+        self._list_enum_active_pcs = pcs_info
+        self._list_enum_toml_block.grid_remove()
+        self._list_enum_pcs_block.grid()
+        count = int(pcs_info.get("count") or 0) if pcs_info else 0
+        for idx in range(count):
+            lab = self._pcs_decode_table_row(pcs_info, idx) if pcs_info else ""
             self._list_enum_idx_by_combo.append(idx)
             short = lab.replace("\n", " ")
             if len(short) > 52:
                 short = short[:49] + "…"
             display_vals.append(f"{idx}: {short}")
         self._list_enum_rom_combo["values"] = tuple(display_vals)
-        try:
-            pos = self._list_enum_idx_by_combo.index(cur)
-        except ValueError:
-            self._list_enum_rom_combo.set(f"(ROM index {cur} — not in TOML list)")
+        if 0 <= cur < count:
+            self._list_enum_rom_combo.current(cur)
         else:
-            self._list_enum_rom_combo.current(pos)
-        self._list_enum_toml_var.set(lm.get(cur, ""))
+            self._list_enum_rom_combo.set(f"(ROM index {cur} — past table)")
+        if pcs_info and 0 <= cur < count:
+            self._list_enum_pcs_var.set(self._pcs_decode_table_row(pcs_info, cur))
+        else:
+            self._list_enum_pcs_var.set("")
 
     def _on_list_enum_rom_combo(self, event: Optional[tk.Event] = None) -> None:
         fi = self._list_enum_fi
         if fi is None or fi >= len(self._fields):
             return
         fd = self._fields[fi]
-        if not self._is_toml_list_enum_field(fd):
+        if not self._is_enum_panel_field(fd):
             return
         pos = self._list_enum_rom_combo.current()
         if pos < 0 or pos >= len(self._list_enum_idx_by_combo):
@@ -1166,7 +1246,10 @@ class StructEditorFrame(ttk.Frame):
         if data2 and self._tree.exists(iid):
             raw = bytes(data2[foff:foff + fd["size"]])
             self._tree.set(iid, "val", self._format_value(raw, fd))
-        self._list_enum_toml_var.set(self._lists[fd["enum"]].get(new_idx, ""))
+        if self._is_toml_list_enum_field(fd):
+            self._list_enum_toml_var.set(self._lists.get(fd["enum"], {}).get(new_idx, ""))
+        elif self._list_enum_active_pcs:
+            self._list_enum_pcs_var.set(self._pcs_decode_table_row(self._list_enum_active_pcs, new_idx))
 
     def _on_list_enum_toml_apply(self) -> None:
         fi = self._list_enum_fi
@@ -1190,7 +1273,41 @@ class StructEditorFrame(ttk.Frame):
         new_s = self._list_enum_toml_var.get()
         if not self._hex.update_toml_list_string_at_index(list_name, cur, new_s):
             return
-        self._lists = self._hex.get_lists()
+        self._reload_lists()
+        self._update_list_enum_panel()
+        iid = f"sf_{fi}"
+        data2 = self._hex.get_data()
+        if data2 and self._tree.exists(iid):
+            raw = bytes(data2[foff:foff + fd["size"]])
+            self._tree.set(iid, "val", self._format_value(raw, fd))
+
+    def _on_list_enum_pcs_apply(self) -> None:
+        fi = self._list_enum_fi
+        if fi is None or fi >= len(self._fields):
+            return
+        fd = self._fields[fi]
+        if not self._is_pcs_table_enum_field(fd) or not self._list_enum_active_pcs:
+            return
+        data = self._hex.get_data()
+        if not data:
+            return
+        try:
+            entry_idx = int(self._idx_var.get())
+        except ValueError:
+            return
+        foff = self._base_off + entry_idx * self._struct_size + fd["offset"]
+        if foff + fd["size"] > len(data):
+            return
+        cur = int.from_bytes(data[foff:foff + fd["size"]], "little")
+        pcs_info = self._list_enum_active_pcs
+        count = int(pcs_info.get("count") or 0)
+        if cur < 0 or cur >= count:
+            messagebox.showwarning("Struct", "Current ROM index is outside the PCS table.")
+            return
+        new_text = self._list_enum_pcs_var.get()
+        if not self._write_pcs_table_row(pcs_info, cur, new_text):
+            messagebox.showerror("Struct", "Could not write PCS string (bad address or ROM bounds).")
+            return
         self._update_list_enum_panel()
         iid = f"sf_{fi}"
         data2 = self._hex.get_data()
@@ -1333,9 +1450,12 @@ class StructEditorFrame(ttk.Frame):
         self._entry_label_pcs_var.set(txt)
         self._entry_label_pcs_frame.grid()
 
+    def _reload_lists(self) -> None:
+        self._lists = self._hex.get_lists()
+
     def refresh_anchors(self) -> None:
         self._anchors = self._hex.get_struct_anchors()
-        self._lists = self._hex.get_lists()
+        self._reload_lists()
         self._entry_index_context_pcs = None
         self._entry_index_name_label.grid_remove()
         self._entry_label_pcs_frame.grid_remove()
@@ -1409,8 +1529,8 @@ class StructEditorFrame(ttk.Frame):
         if enum_ref:
             label = self._resolve_enum(val, enum_ref)
             if label is not None:
-                if enum_ref in self._lists:
-                    return f"{label}  ▾"  # TOML List: use panel below to pick / edit TOML string
+                if self._is_enum_panel_field(fd):
+                    return f"{label}  ▾"
                 return label
         if fd.get("hex"):
             return f"0x{val:0{len(raw) * 2}X}"
@@ -1431,8 +1551,9 @@ class StructEditorFrame(ttk.Frame):
         return "".join(chars)
 
     def _resolve_enum(self, value: int, enum_ref: str) -> Optional[str]:
-        if enum_ref in self._lists:
-            label = self._lists[enum_ref].get(value)
+        lm = self._lists.get(enum_ref)
+        if lm is not None:
+            label = lm.get(value)
             if label is not None:
                 return f"{value} ({label})"
         for info in self._hex.get_pcs_table_anchors():
@@ -1463,13 +1584,6 @@ class StructEditorFrame(ttk.Frame):
                 return f"{value} ({''.join(chars)})"
         return None
 
-    def _is_toml_list_enum_field(self, fd: Dict[str, Any]) -> bool:
-        return (
-            fd.get("type") == "uint"
-            and bool(fd.get("enum"))
-            and fd["enum"] in self._lists
-        )
-
     def _start_inline_edit(self, event: Optional[tk.Event] = None) -> None:
         if self._edit_entry:
             return
@@ -1483,7 +1597,7 @@ class StructEditorFrame(ttk.Frame):
         if fi >= len(self._fields):
             return
         fd = self._fields[fi]
-        if self._is_toml_list_enum_field(fd):
+        if self._is_enum_panel_field(fd):
             self._sync_field_aux_panels()
             self._list_enum_rom_combo.focus_set()
             return
@@ -3174,13 +3288,15 @@ class HexEditorFrame(ttk.Frame):
         self._load_toml_bytes_from_path(toml_path)
 
     def _resolve_list_entry_span_end(self, list_name: str) -> Optional[int]:
-        """Upper bound for indices defined in ``[[List]]`` with this Name (for struct counts).
+        """Upper bound for indices in ``[[List]]`` with this Name (for struct counts).
 
         For ``0 = [ a, b, c ]`` returns ``3``. For ``4007 = [ x, y ]`` returns ``4009``.
         Matches how :func:`_load_toml_lists` assigns indices.
         """
         want = list_name.strip()
         for lst in self._toml_data.get("List", []):
+            if not isinstance(lst, dict):
+                continue
             name = str(lst.get("Name", "")).strip().strip("'\"")
             if name != want:
                 continue
@@ -3217,7 +3333,14 @@ class HexEditorFrame(ttk.Frame):
             if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
                 return s[1:-1].replace('\\"', '"').replace("\\'", "'")
             return s
-        for section in ("FunctionAnchors", "NamedAnchors", "MatchedWords", "Constants", "Structs", "List"):
+        for section in (
+            "FunctionAnchors",
+            "NamedAnchors",
+            "MatchedWords",
+            "Constants",
+            "Structs",
+            "List",
+        ):
             pattern = rf"\[\[{section}\]\](.*?)(?=\[\[|\Z)"
             blocks = re.findall(pattern, text, re.DOTALL)
             items: List[Dict[str, Any]] = []
@@ -3760,11 +3883,11 @@ Format = "`f|u8`[u8 arg0]"
         return _load_toml_lists(self._toml_data)
 
     def update_toml_list_string_at_index(self, list_name: str, flat_index: int, new_label: str) -> bool:
-        """Update one string in a ``[[List]]`` table and rewrite the TOML file on disk."""
+        """Update one string in ``[[List]]`` and rewrite the TOML file on disk."""
         if not _TOMLI_W_AVAILABLE:
             messagebox.showerror(
                 "Struct",
-                "Editing [[List]] text requires the tomli-w package.\n"
+                "Editing TOML requires the tomli-w package.\n"
                 "Install with: pip install tomli-w",
             )
             return False
@@ -3774,23 +3897,23 @@ Format = "`f|u8`[u8 arg0]"
                 "No TOML file to write (open a ROM with a .toml, or use Load structure TOML).",
             )
             return False
-        lists_arr = self._toml_data.get("List")
-        if not isinstance(lists_arr, list):
+        rows = self._toml_data.get("List")
+        if not isinstance(rows, list):
             messagebox.showerror("Struct", "TOML has no [[List]] section.")
             return False
         target: Optional[Dict[str, Any]] = None
         want = list_name.strip()
-        for lst in lists_arr:
-            if not isinstance(lst, dict):
+        for row in rows:
+            if not isinstance(row, dict):
                 continue
-            name = str(lst.get("Name", "")).strip().strip("'\"")
+            name = str(row.get("Name", "")).strip().strip("'\"")
             if name == want:
-                target = lst
+                target = row
                 break
         if target is None:
-            messagebox.showerror("Struct", f"List not found in TOML: {list_name!r}")
+            messagebox.showerror("Struct", f"[[List]] entry not found: {list_name!r}")
             return False
-        coords = _list_table_key_and_offset(target, flat_index)
+        coords = _list_row_key_and_offset(target, flat_index)
         if coords is None:
             messagebox.showerror(
                 "Struct",
