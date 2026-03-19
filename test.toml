@@ -30,9 +30,19 @@ Address = 0x245EE0
 Format = '''[name""11]412'''
 
 [[NamedAnchors]]
+Name = '''data.pokemon.stats'''
+Address = 0x254784
+Format = '''[hp. attack. def. speed. spatk. spdef. type1.data.pokemon.type.gTypeNames type2.data.pokemon.type.gTypeNames catchRate. baseExp. evs:|t|hp:|atk:|def:|spd:|spatk:|spdef: item1:data.items.stats item2:data.items.stats genderratio.genderratiovalues steps2hatch. basehappiness. growthrate.growthrates egg1.egggroups egg2.egggroups ability1.data.abilities.gAbilityNames ability2.data.abilities.gAbilityNames runrate. dex.|t|color:::.bodycolors|noFlip. padding:]data.pokemon.gSpeciesNames'''
+
+[[NamedAnchors]]
 Name = '''data.abilities.gAbilityNames'''
 Address = 0x24FC40
 Format = '''[name""13]78'''
+
+[[NamedAnchors]]
+Name = '''data.items.stats'''
+Address = 0x3DB028
+Format = '''[name""13 unused. index: price: holdeffect.holdeffects param. description<""> keyitemvalue. bagkeyitem. pocket.pocketid type. fieldeffect<> battleusage:: battleeffect<> battleextra::]data.items.count'''
 
 [[NamedAnchors]]
 Name = '''data.pokemon.type.gTypeNames'''
@@ -43,3 +53,226 @@ Format = '''^[name""7]data.pokemon.type.length'''
 Name = '''data.pokemon.type.length'''
 Address = 0x456F10
 Length = 1
+
+[[MatchedWords]]
+Name = '''data.pokemon.type.length'''
+Address = 0x0E5448
+Length = 1
+Offset = 1
+
+[[MatchedWords]]
+Name = '''data.pokemon.type.length'''
+Address = 0x133408
+Length = 1
+Offset = 1
+
+[[MatchedWords]]
+Name = '''data.pokemon.type.length'''
+Address = 0x0E5454
+Length = 1
+Offset = 2
+
+[[MatchedWords]]
+Name = '''data.pokemon.type.length'''
+Address = 0x133414
+Length = 1
+Offset = 2
+
+[[MatchedWords]]
+Name = '''data.pokemon.type.length'''
+Address = 0x0E5460
+Length = 1
+Offset = 3
+
+[[MatchedWords]]
+Name = '''data.pokemon.type.length'''
+Address = 0x133420
+Length = 1
+Offset = 3
+
+[[MatchedWords]]
+Name = '''data.pokemon.type.length'''
+Address = 0x0E546C
+Length = 1
+Offset = 4
+
+[[MatchedWords]]
+Name = '''data.pokemon.type.length'''
+Address = 0x13342C
+Length = 1
+Offset = 4
+
+[[MatchedWords]]
+Name = '''data.pokemon.type.length'''
+Address = 0x0E5478
+Length = 1
+Offset = 5
+
+[[MatchedWords]]
+Name = '''data.items.count'''
+Address = 0x098998
+Length = 2
+
+[[MatchedWords]]
+Name = '''data.items.count'''
+Address = 0x09B3D0
+Length = 2
+
+[[MatchedWords]]
+Name = '''data.items.count'''
+Address = 0x10864C
+Length = 2
+
+[[MatchedWords]]
+Name = '''data.items.count'''
+Address = 0x10DA14
+Length = 2
+
+[[MatchedWords]]
+Name = '''data.items.count'''
+Address = 0x13D428
+Length = 2
+
+[[List]]
+Name = '''genderratiovalues'''
+0 = '''100% Male'''
+31 = '''87% Male'''
+63 = '''75% Male'''
+89 = '''65% Male'''
+127 = '''50% Male & 50% Female'''
+165 = '''65% Female'''
+191 = '''75% Female'''
+223 = '''87% Female'''
+254 = [
+   '''100% Female''',
+   '''Genderless''',
+]
+
+[[List]]
+Name = '''growthrates'''
+0 = [
+   '''Medium Fast''',
+   '''Erratic''',
+   '''Fluctuating''',
+   '''Medium Slow''',
+   '''Fast''',
+   '''Slow''',
+]
+
+[[List]]
+Name = '''egggroups'''
+0 = [
+   '''None''',
+   '''Monster''',
+   '''Water1''',
+   '''Bug''',
+   '''Flying''',
+   '''Field''',
+   '''Fairy''',
+   '''Grass''',
+   '''Human-Like''',
+   '''Water3''',
+   '''Mineral''',
+   '''Amorphous''',
+   '''Water2''',
+   '''Ditto''',
+   '''Dragon''',
+   '''Undiscovered''',
+]
+
+[[List]]
+Name = '''bodycolors'''
+0 = [
+   '''Red''',
+   '''Blue''',
+   '''Yellow''',
+   '''Green''',
+   '''Black''',
+   '''Brown''',
+   '''Purple''',
+   '''Gray''',
+   '''White''',
+   '''Pink''',
+]
+
+[[List]]
+Name = '''holdeffects'''
+0 = [
+   '''None''',
+   '''Heal|HP Yellow|Once''',
+   '''Remove Paralysis|Once''',
+   '''Remove Sleep|Once''',
+   '''Remove Poison|Once''',
+   '''Remove Burn|Once''',
+   '''Remove Freeze|Once''',
+   '''Restore PP|Empty|Once''',
+   '''Remove Confusion|Once''',
+   '''Remove Any Status Condition|Once''',
+   '''Heal, May Confuse − Attack natures|Once''',
+   '''Heal, May Confuse − Sp. Atk natures|Once''',
+   '''Heal, May Confuse − Speed natures|Once''',
+   '''Heal, May Confuse − Sp. Def natures|Once''',
+   '''Heal, May Confuse − Defense natures|Once''',
+   '''Boost ATK|HP Red|Once''',
+   '''Boost DEF|HP Red|Once''',
+   '''Boost SPD|HP Red|Once''',
+   '''Boost SP.ATK|HP Red|Once''',
+   '''Boost SP.DEF|HP Red|Once''',
+   '''Boost Crit.Ratio|HP Red|Once''',
+   '''Sharp Boost Random Stat|HP Red|Once''',
+   '''Reduce Enemy Accuracy''',
+   '''Restore Any Stat Loss|Once''',
+   '''Macho Brace''',
+   '''Exp. Share''',
+   '''May Strike First''',
+   '''Boost Friendliness''',
+   '''Remove Infatuation''',
+   '''Choice Band''',
+   '''Enemy May Flinch''',
+   '''Boost Bug-Type Moves''',
+   '''Doubles Battle Money''',
+   '''Repels Wild PKMN''',
+   '''Soul Dew''',
+   '''Boost SP.ATK for Clamperl''',
+   '''Boost SP.DEF for Clamperl''',
+   '''Flee Any Wild Battle''',
+   '''Prevent Evolution''',
+   '''May Endure Hit''',
+   '''Boost Exp. Gain''',
+   '''Boost Crit Ratio''',
+   '''Boost Steel-Type Moves''',
+   '''Restore Health Each Round''',
+   '''No effect''',
+   '''Boost SP.ATK For Pikachu''',
+   '''Boost Ground-Type Moves''',
+   '''Boost Rock-Type Moves''',
+   '''Boost Grass-Type Moves''',
+   '''Boost Dark-Type Moves''',
+   '''Boost Fighting-Type Moves''',
+   '''Boost Electric-Type Moves''',
+   '''Boost Water-Type Moves''',
+   '''Boost Flying-Type Moves''',
+   '''Boost Poison-Type Moves''',
+   '''Boost Ice-Type Moves''',
+   '''Boost Ghost-Type Moves''',
+   '''Boost Psychic-Type Moves''',
+   '''Boost Fire-Type Moves''',
+   '''Boost Dragon-Type Moves''',
+   '''Boost Normal-Type Moves''',
+   '''Up-Grade''',
+   '''Heal When Striking An Enemy''',
+   '''Boost Chansey's Crit.Ratio''',
+   '''Boost Ditto's DEF''',
+   '''Boost Cubone and Marowak ATK''',
+   '''Boost Farfetch'd Crit.Ratio''',
+]
+
+[[List]]
+Name = '''pocketid'''
+1 = [
+   '''item''',
+   '''key''',
+   '''ball''',
+   '''tm''',
+   '''berry''',
+]
