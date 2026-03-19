@@ -21,6 +21,13 @@ try:
 except ImportError:
     pass
 
+_TOMLI_W_AVAILABLE = False
+try:
+    import tomli_w
+    _TOMLI_W_AVAILABLE = True
+except ImportError:
+    tomli_w = None  # type: ignore
+
 _ANGR_AVAILABLE = False
 try:
     import angr
@@ -150,6 +157,81 @@ def encode_pcs_string(text: str, width: int) -> bytearray:
     while len(out) < width:
         out.append(0x00)
     return out[:width]
+
+
+def pcs_encoded_payload_length(text: str) -> int:
+    """Byte length of PCS encoding: mapped code units + 0xFF terminator (matches :func:`encode_pcs_string`)."""
+    n = 0
+    for c in text:
+        if _PCS_CHAR_TO_BYTE.get(c) is not None:
+            n += 1
+    return n + 1
+
+
+def measure_pcs_rom_slot_capacity(data: Any, off: int, max_scan: int = 8192) -> int:
+    """Contiguous bytes at ``off`` usable for one PCS string: body through first 0xFF, then trailing 0xFF padding."""
+    n = len(data)
+    if off < 0 or off >= n:
+        return 0
+    end = min(n, off + max_scan)
+    i = off
+    while i < end:
+        if data[i] == 0xFF:
+            i += 1
+            break
+        i += 1
+    else:
+        return end - off
+    while i < end and data[i] == 0xFF:
+        i += 1
+    return i - off
+
+
+def find_disjoint_ff_gap_start(
+    data: Any,
+    need: int,
+    excl_lo: int,
+    excl_hi: int,
+    *,
+    window_lo: Optional[int] = None,
+    window_hi: Optional[int] = None,
+) -> Optional[int]:
+    """First file offset ``s`` where ``data[s:s+need]`` are all ``0xFF`` and ``[s, s+need)`` is disjoint from ``[excl_lo, excl_hi)``.
+
+    If ``window_lo`` / ``window_hi`` are set, only consider ``s`` such that ``[s, s+need)`` lies inside
+    the half-open range ``[window_lo, window_hi)`` (clamped to ``[0, len(data))``).
+    """
+    if need <= 0:
+        return None
+    n = len(data)
+    lo = 0 if window_lo is None else max(0, min(n, window_lo))
+    hi_bound = n if window_hi is None else max(0, min(n, window_hi))
+    if lo >= hi_bound or hi_bound - lo < need:
+        return None
+    i = lo
+    while i < hi_bound:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        run_start = i
+        while run_start > 0 and data[run_start - 1] == 0xFF:
+            run_start -= 1
+        j = i
+        while j < n and data[j] == 0xFF:
+            j += 1
+        run_end = j
+        seg_lo = max(run_start, lo)
+        seg_hi = min(run_end, hi_bound)
+        if seg_hi - seg_lo < need:
+            i = j
+            continue
+        last_start = seg_hi - need
+        for s in range(seg_lo, last_start + 1):
+            seg_end = s + need
+            if seg_end <= excl_lo or s >= excl_hi:
+                return s
+        i = j
+    return None
 
 
 class _PcsEditDialog:
@@ -574,6 +656,27 @@ def _load_toml_lists(toml_data: Dict[str, Any]) -> Dict[str, Dict[int, str]]:
     return lists
 
 
+def _list_table_key_and_offset(lst_dict: Dict[str, Any], flat_index: int) -> Optional[Tuple[Any, int]]:
+    """For one ``[[List]]`` table dict, return ``(toml_key, offset_in_array)`` for a flat index, or None."""
+    spans: List[Tuple[Any, int, int]] = []
+    for key, val in lst_dict.items():
+        if str(key) in ("Name", "DefaultHash"):
+            continue
+        try:
+            base = int(key)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(val, list):
+            spans.append((key, base, len(val)))
+        else:
+            spans.append((key, base, 1))
+    spans.sort(key=lambda t: t[1])
+    for key, base, ln in spans:
+        if base <= flat_index < base + ln:
+            return (key, flat_index - base)
+    return None
+
+
 class StructEditorFrame(ttk.Frame):
     """Displays and edits structured data from a NamedAnchor, one entry at a time.
     Parses Format DSL fields (., :, <>, <"">, List enums, NamedAnchor cross-refs)."""
@@ -594,7 +697,7 @@ class StructEditorFrame(ttk.Frame):
 
     def _build(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(4, weight=1)
+        self.rowconfigure(5, weight=1)
         top = ttk.Frame(self)
         top.grid(row=0, column=0, sticky="ew", pady=(0, 2))
         top.columnconfigure(1, weight=1)
@@ -638,23 +741,100 @@ class StructEditorFrame(ttk.Frame):
         self._entry_label_pcs_frame.grid(row=2, column=0, sticky="ew", pady=(0, 2))
         self._entry_label_pcs_frame.grid_remove()
 
-        # pcs_ptr text panel — above tree so it stays visible in the tools pane
+        # pcs_ptr: edit GBA pointer and PCS text (relocates into 0xFF gaps if string grows)
         self._ptr_text_frame = ttk.Frame(self)
-        self._ptr_text_frame.columnconfigure(0, weight=1)
-        ttk.Label(self._ptr_text_frame, text="Text at pointer (pcs_ptr field):", font=("Consolas", 8)).grid(
-            row=0, column=0, columnspan=2, sticky="w"
+        self._ptr_text_frame.columnconfigure(1, weight=1)
+        ttk.Label(self._ptr_text_frame, text="pcs_ptr field", font=("Consolas", 8, "bold")).grid(
+            row=0, column=0, columnspan=3, sticky="w"
+        )
+        ttk.Label(self._ptr_text_frame, text="Pointer (GBA):", font=("Consolas", 8)).grid(
+            row=1, column=0, sticky="w", padx=(0, 4), pady=(0, 2)
+        )
+        self._ptr_addr_var = tk.StringVar(value="")
+        self._ptr_addr_entry = ttk.Entry(
+            self._ptr_text_frame, textvariable=self._ptr_addr_var, font=("Consolas", 9), width=14
+        )
+        self._ptr_addr_entry.grid(row=1, column=1, sticky="ew", padx=(0, 4), pady=(0, 2))
+        self._ptr_addr_entry.bind("<Return>", lambda e: self._on_ptr_pointer_apply())
+        ttk.Button(
+            self._ptr_text_frame, text="Set pointer", command=self._on_ptr_pointer_apply
+        ).grid(row=1, column=2, sticky="e", pady=(0, 2))
+        ttk.Label(self._ptr_text_frame, text="PCS text:", font=("Consolas", 8)).grid(
+            row=2, column=0, sticky="nw", padx=(0, 4), pady=(0, 2)
         )
         self._ptr_text_entry = ttk.Entry(self._ptr_text_frame, font=("Consolas", 9))
-        self._ptr_text_entry.grid(row=1, column=0, sticky="ew", padx=(0, 4))
+        self._ptr_text_entry.grid(row=2, column=1, sticky="ew", padx=(0, 4), pady=(0, 2))
         self._ptr_text_entry.bind("<Return>", lambda e: self._on_ptr_text_update())
         self._ptr_text_update_btn = ttk.Button(
-            self._ptr_text_frame, text="Apply", command=self._on_ptr_text_update
+            self._ptr_text_frame, text="Apply text", command=self._on_ptr_text_update
         )
-        self._ptr_text_update_btn.grid(row=1, column=1, sticky="e")
+        self._ptr_text_update_btn.grid(row=2, column=2, sticky="e", pady=(0, 2))
         self._ptr_text_fi: Optional[int] = None
 
+        gap_f = ttk.Frame(self._ptr_text_frame)
+        gap_f.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        gap_f.columnconfigure(1, weight=1)
+        gap_f.columnconfigure(3, weight=1)
+        ttk.Label(gap_f, text="FF gap search from", font=("Consolas", 8)).grid(
+            row=0, column=0, sticky="w", padx=(0, 4)
+        )
+        self._ptr_ff_gap_from_var = tk.StringVar(value="")
+        ttk.Entry(gap_f, textvariable=self._ptr_ff_gap_from_var, font=("Consolas", 8)).grid(
+            row=0, column=1, sticky="ew", padx=(0, 4)
+        )
+        ttk.Label(gap_f, text="through", font=("Consolas", 8)).grid(row=0, column=2, padx=(0, 4))
+        self._ptr_ff_gap_to_var = tk.StringVar(value="")
+        ttk.Entry(gap_f, textvariable=self._ptr_ff_gap_to_var, font=("Consolas", 8)).grid(
+            row=0, column=3, sticky="ew", padx=(0, 4)
+        )
+        ttk.Label(
+            gap_f,
+            text="(file offset or GBA 0x08…; both blank = whole ROM; “through” is inclusive)",
+            font=("Consolas", 7),
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 0))
+
+        # TOML [[List]] enum: ROM index (dropdown) vs editing list string (TOML file)
+        self._list_enum_frame = ttk.Frame(self)
+        self._list_enum_frame.columnconfigure(0, weight=1)
+        ttk.Label(self._list_enum_frame, text="[ROM ▾]", font=("Consolas", 8, "bold")).grid(
+            row=0, column=0, sticky="nw", padx=(0, 4), pady=(0, 2)
+        )
+        ttk.Label(self._list_enum_frame, text="Pick index (writes ROM only):", font=("Consolas", 8)).grid(
+            row=0, column=1, sticky="w", pady=(0, 2)
+        )
+        self._list_enum_rom_combo = ttk.Combobox(
+            self._list_enum_frame, font=("Consolas", 8), width=36, state="readonly"
+        )
+        self._list_enum_rom_combo.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        self._list_enum_rom_combo.bind("<<ComboboxSelected>>", self._on_list_enum_rom_combo)
+        self._list_enum_idx_by_combo: List[int] = []
+        ttk.Separator(self._list_enum_frame, orient=tk.HORIZONTAL).grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(0, 4)
+        )
+        ttk.Label(self._list_enum_frame, text="[TOML ✎]", font=("Consolas", 8, "bold")).grid(
+            row=3, column=0, sticky="nw", padx=(0, 4), pady=(0, 2)
+        )
+        ttk.Label(
+            self._list_enum_frame,
+            text="String at current ROM index (writes TOML file):",
+            font=("Consolas", 8),
+        ).grid(row=3, column=1, sticky="w", pady=(0, 2))
+        self._list_enum_toml_var = tk.StringVar(value="")
+        self._list_enum_toml_entry = ttk.Entry(
+            self._list_enum_frame, textvariable=self._list_enum_toml_var, font=("Consolas", 9)
+        )
+        self._list_enum_toml_entry.grid(row=4, column=0, sticky="ew", padx=(0, 4))
+        self._list_enum_toml_btn = ttk.Button(
+            self._list_enum_frame, text="Apply to TOML", command=self._on_list_enum_toml_apply
+        )
+        self._list_enum_toml_btn.grid(row=4, column=1, sticky="e", padx=(4, 0))
+        self._list_enum_toml_entry.bind("<Return>", lambda e: self._on_list_enum_toml_apply())
+        self._list_enum_fi: Optional[int] = None
+        self._list_enum_frame.grid(row=3, column=0, sticky="ew", pady=(0, 2))
+        self._list_enum_frame.grid_remove()
+
         tree_f = ttk.Frame(self)
-        tree_f.grid(row=4, column=0, sticky="nsew")
+        tree_f.grid(row=5, column=0, sticky="nsew")
         tree_f.columnconfigure(0, weight=1)
         tree_f.rowconfigure(0, weight=1)
         self._tree = ttk.Treeview(
@@ -673,7 +853,7 @@ class StructEditorFrame(ttk.Frame):
         self._tree.bind("<Return>", self._start_inline_edit)
         self._tree.bind("<F2>", self._start_inline_edit)
         self._tree.bind("<ButtonRelease-1>", self._on_tree_click)
-        self._tree.bind("<<TreeviewSelect>>", lambda e: self._update_ptr_text_panel())
+        self._tree.bind("<<TreeviewSelect>>", lambda e: self._sync_field_aux_panels())
 
     def _on_tree_click(self, event: tk.Event) -> None:
         reg = self._tree.identify_region(event.x, event.y)
@@ -681,7 +861,11 @@ class StructEditorFrame(ttk.Frame):
             col = self._tree.identify_column(event.x)
             if col == "#2":
                 self.after_idle(self._start_inline_edit_after_click)
+        self._sync_field_aux_panels()
+
+    def _sync_field_aux_panels(self) -> None:
         self._update_ptr_text_panel()
+        self._update_list_enum_panel()
 
     def _start_inline_edit_after_click(self) -> None:
         if self._tree.selection():
@@ -705,7 +889,7 @@ class StructEditorFrame(ttk.Frame):
             self._ptr_text_fi = None
             return
         self._ptr_text_fi = fi
-        self._ptr_text_frame.grid(row=3, column=0, sticky="ew", pady=(0, 2))
+        self._ptr_text_frame.grid(row=4, column=0, sticky="ew", pady=(0, 2))
         data = self._hex.get_data()
         if not data:
             return
@@ -717,6 +901,7 @@ class StructEditorFrame(ttk.Frame):
         if foff + 4 > len(data):
             return
         ptr = int.from_bytes(data[foff:foff + 4], "little")
+        self._ptr_addr_var.set(f"0x{ptr:08X}")
         if (ptr >> 24) in (0x08, 0x09):
             text = self._read_pcs_at_pointer(ptr - GBA_ROM_BASE)
         else:
@@ -724,13 +909,271 @@ class StructEditorFrame(ttk.Frame):
         self._ptr_text_entry.delete(0, tk.END)
         self._ptr_text_entry.insert(0, text)
 
-    def _on_ptr_text_update(self) -> None:
-        """Write PCS text to the address the current pointer field points at."""
+    def _pcs_ptr_field_file_off(self, fi: int) -> Optional[int]:
+        if fi < 0 or fi >= len(self._fields):
+            return None
+        fd = self._fields[fi]
+        if fd["type"] != "pcs_ptr":
+            return None
+        try:
+            entry_idx = int(self._idx_var.get())
+        except ValueError:
+            return None
+        foff = self._base_off + entry_idx * self._struct_size + fd["offset"]
+        data = self._hex.get_data()
+        if not data or foff + 4 > len(data):
+            return None
+        return foff
+
+    def _refresh_pcs_ptr_tree_row(self, fi: int) -> None:
+        foff = self._pcs_ptr_field_file_off(fi)
+        if foff is None:
+            return
+        fd = self._fields[fi]
+        iid = f"sf_{fi}"
+        data2 = self._hex.get_data()
+        if data2 and self._tree.exists(iid):
+            raw = bytes(data2[foff:foff + fd["size"]])
+            self._tree.set(iid, "val", self._format_value(raw, fd))
+
+    def _parse_ff_gap_search_window(self) -> Tuple[Optional[int], Optional[int], Optional[str]]:
+        """Parse FF-gap search range. Returns ``(window_lo, window_hi_exclusive, error)``.
+        ``(None, None, None)`` means search the full ROM."""
+        data = self._hex.get_data()
+        if not data:
+            return None, None, "No ROM loaded."
+        n = len(data)
+        fs = self._ptr_ff_gap_from_var.get().strip()
+        ts = self._ptr_ff_gap_to_var.get().strip()
+        if not fs and not ts:
+            return None, None, None
+        if (fs and not ts) or (not fs and ts):
+            return (
+                None,
+                None,
+                'Enter both “from” and “to”, or leave both empty to search the entire ROM.',
+            )
+        try:
+            lo = int(fs, 0)
+            hi = int(ts, 0)
+        except ValueError:
+            return None, None, "Invalid offset (use decimal or 0x hex)."
+        if GBA_ROM_BASE <= lo <= GBA_ROM_MAX:
+            lo -= GBA_ROM_BASE
+        if GBA_ROM_BASE <= hi <= GBA_ROM_MAX:
+            hi -= GBA_ROM_BASE
+        if lo < 0 or hi >= n:
+            return None, None, f"Offsets must lie within the ROM file (0 … 0x{n - 1:X})."
+        if hi < lo:
+            return None, None, "End offset must be ≥ start offset."
+        # Inclusive end → half-open [lo, hi + 1)
+        return lo, hi + 1, None
+
+    def _apply_pcs_ptr_string_write(self, fi: int, new_text: str) -> bool:
+        """Write PCS text at the current pointer; grow into trailing 0xFF padding or relocate into an FF gap."""
+        foff = self._pcs_ptr_field_file_off(fi)
+        if foff is None:
+            return False
+        data = self._hex.get_data()
+        if not data:
+            return False
+        ptr = int.from_bytes(data[foff:foff + 4], "little")
+        if (ptr >> 24) not in (0x08, 0x09):
+            messagebox.showwarning(
+                "Struct",
+                "Pointer must target ROM (0x08xxxxxx or 0x09xxxxxx). Set it under “Pointer (GBA)” first.",
+            )
+            return False
+        target_off = ptr - GBA_ROM_BASE
+        if target_off < 0 or target_off >= len(data):
+            messagebox.showwarning("Struct", "Pointer is outside the ROM file range.")
+            return False
+        need = pcs_encoded_payload_length(new_text)
+        cap = measure_pcs_rom_slot_capacity(data, target_off)
+        if need <= cap:
+            enc = encode_pcs_string(new_text, cap)
+            self._hex.write_bytes_at(target_off, enc)
+            return True
+        excl_lo, excl_hi = target_off, target_off + max(cap, 1)
+        w_lo, w_hi_ex, w_err = self._parse_ff_gap_search_window()
+        if w_err:
+            messagebox.showerror("Struct", w_err)
+            return False
+        if w_lo is not None and w_hi_ex is not None and (w_hi_ex - w_lo) < need:
+            messagebox.showerror(
+                "Struct",
+                f"The chosen search range is only {w_hi_ex - w_lo} byte(s) wide; "
+                f"the string needs {need} consecutive 0xFF byte(s) for relocation.",
+            )
+            return False
+        gap = find_disjoint_ff_gap_start(
+            data, need, excl_lo, excl_hi, window_lo=w_lo, window_hi=w_hi_ex
+        )
+        if gap is None:
+            hint = (
+                "\n\nAdjust “FF gap search from / through” to a known padding region, "
+                "or clear those fields to search the whole ROM."
+                if w_lo is not None
+                else "\n\nTry limiting the search to a region you know is padding (false positives often come "
+                "from unrelated 0xFF runs elsewhere in the ROM)."
+            )
+            messagebox.showerror(
+                "Struct",
+                f"This string needs {need} byte(s) (text + 0xFF end), but only {cap} byte(s) fit "
+                f"at the current address (including any 0xFF padding after the string).\n\n"
+                f"No qualifying block of {need} consecutive 0xFF bytes was found in the search range."
+                f"{hint}",
+            )
+            return False
+        gba_gap = gap + GBA_ROM_BASE
+        if w_lo is not None and w_hi_ex is not None:
+            range_note = (
+                f"\n\nSearch was limited to file 0x{w_lo:X} … 0x{w_hi_ex - 1:X} (inclusive)."
+            )
+        else:
+            range_note = "\n\nSearch used the entire ROM (set “FF gap search” fields to restrict)."
+        if not messagebox.askyesno(
+            "Relocate PCS string",
+            f"The string needs {need} byte(s) (including 0xFF terminator), but only {cap} byte(s) "
+            f"are available at the current address.\n\n"
+            f"Found a 0xFF padding region large enough at:\n"
+            f"  file offset 0x{gap:X}\n"
+            f"  GBA address 0x{gba_gap:08X}\n\n"
+            f"Write the string there and update this field’s pointer?"
+            f"{range_note}",
+        ):
+            return False
+        enc = encode_pcs_string(new_text, need)
+        self._hex.write_bytes_at(gap, enc)
+        self._hex.write_bytes_at(foff, gba_gap.to_bytes(4, "little"))
+        self._ptr_addr_var.set(f"0x{gba_gap:08X}")
+        if messagebox.askyesno(
+            "Clear old string",
+            f"Fill the previous slot ({cap} byte(s) at GBA 0x{target_off + GBA_ROM_BASE:08X}) "
+            f"with 0xFF (recommended)?",
+        ):
+            self._hex.write_bytes_at(target_off, bytes([0xFF]) * cap)
+        return True
+
+    def _on_ptr_pointer_apply(self) -> None:
+        """Write the GBA pointer from the panel into the struct field."""
         fi = self._ptr_text_fi
         if fi is None or fi >= len(self._fields):
             return
         fd = self._fields[fi]
         if fd["type"] != "pcs_ptr":
+            return
+        foff = self._pcs_ptr_field_file_off(fi)
+        if foff is None:
+            return
+        s = self._ptr_addr_var.get().strip()
+        try:
+            val = int(s, 0)
+        except ValueError:
+            messagebox.showwarning("Struct", "Invalid pointer. Use hex, e.g. 0x08123456.")
+            return
+        self._hex.write_bytes_at(foff, val.to_bytes(4, "little"))
+        self._refresh_pcs_ptr_tree_row(fi)
+        self._update_ptr_text_panel()
+
+    def _on_ptr_text_update(self) -> None:
+        """Apply PCS text using padding / 0xFF gap relocation rules."""
+        fi = self._ptr_text_fi
+        if fi is None or fi >= len(self._fields):
+            return
+        fd = self._fields[fi]
+        if fd["type"] != "pcs_ptr":
+            return
+        new_text = self._ptr_text_entry.get()
+        if self._apply_pcs_ptr_string_write(fi, new_text):
+            self._refresh_pcs_ptr_tree_row(fi)
+            self._update_ptr_text_panel()
+
+    def _update_list_enum_panel(self) -> None:
+        """Show ROM index combobox + TOML string editor for fields backed by [[List]]."""
+        sel = self._tree.selection()
+        if not sel or not sel[0].startswith("sf_"):
+            self._list_enum_frame.grid_remove()
+            self._list_enum_fi = None
+            return
+        fi = int(sel[0].split("_")[1])
+        if fi >= len(self._fields):
+            self._list_enum_frame.grid_remove()
+            self._list_enum_fi = None
+            return
+        fd = self._fields[fi]
+        if not self._is_toml_list_enum_field(fd):
+            self._list_enum_frame.grid_remove()
+            self._list_enum_fi = None
+            return
+        self._list_enum_fi = fi
+        self._list_enum_frame.grid(row=3, column=0, sticky="ew", pady=(0, 2))
+        data = self._hex.get_data()
+        if not data:
+            return
+        try:
+            entry_idx = int(self._idx_var.get())
+        except ValueError:
+            return
+        foff = self._base_off + entry_idx * self._struct_size + fd["offset"]
+        if foff + fd["size"] > len(data):
+            return
+        cur = int.from_bytes(data[foff:foff + fd["size"]], "little")
+        list_name = fd["enum"]
+        lm = self._lists.get(list_name, {})
+        self._list_enum_idx_by_combo = []
+        display_vals: List[str] = []
+        for idx in sorted(lm.keys()):
+            lab = lm[idx]
+            self._list_enum_idx_by_combo.append(idx)
+            short = lab.replace("\n", " ")
+            if len(short) > 52:
+                short = short[:49] + "…"
+            display_vals.append(f"{idx}: {short}")
+        self._list_enum_rom_combo["values"] = tuple(display_vals)
+        try:
+            pos = self._list_enum_idx_by_combo.index(cur)
+        except ValueError:
+            self._list_enum_rom_combo.set(f"(ROM index {cur} — not in TOML list)")
+        else:
+            self._list_enum_rom_combo.current(pos)
+        self._list_enum_toml_var.set(lm.get(cur, ""))
+
+    def _on_list_enum_rom_combo(self, event: Optional[tk.Event] = None) -> None:
+        fi = self._list_enum_fi
+        if fi is None or fi >= len(self._fields):
+            return
+        fd = self._fields[fi]
+        if not self._is_toml_list_enum_field(fd):
+            return
+        pos = self._list_enum_rom_combo.current()
+        if pos < 0 or pos >= len(self._list_enum_idx_by_combo):
+            return
+        new_idx = self._list_enum_idx_by_combo[pos]
+        data = self._hex.get_data()
+        if not data:
+            return
+        try:
+            entry_idx = int(self._idx_var.get())
+        except ValueError:
+            return
+        foff = self._base_off + entry_idx * self._struct_size + fd["offset"]
+        if foff + fd["size"] > len(data):
+            return
+        self._hex.write_bytes_at(foff, new_idx.to_bytes(fd["size"], "little"))
+        iid = f"sf_{fi}"
+        data2 = self._hex.get_data()
+        if data2 and self._tree.exists(iid):
+            raw = bytes(data2[foff:foff + fd["size"]])
+            self._tree.set(iid, "val", self._format_value(raw, fd))
+        self._list_enum_toml_var.set(self._lists[fd["enum"]].get(new_idx, ""))
+
+    def _on_list_enum_toml_apply(self) -> None:
+        fi = self._list_enum_fi
+        if fi is None or fi >= len(self._fields):
+            return
+        fd = self._fields[fi]
+        if not self._is_toml_list_enum_field(fd):
             return
         data = self._hex.get_data()
         if not data:
@@ -740,26 +1183,15 @@ class StructEditorFrame(ttk.Frame):
         except ValueError:
             return
         foff = self._base_off + entry_idx * self._struct_size + fd["offset"]
-        if foff + 4 > len(data):
+        if foff + fd["size"] > len(data):
             return
-        ptr = int.from_bytes(data[foff:foff + 4], "little")
-        if (ptr >> 24) not in (0x08, 0x09):
+        cur = int.from_bytes(data[foff:foff + fd["size"]], "little")
+        list_name = fd["enum"]
+        new_s = self._list_enum_toml_var.get()
+        if not self._hex.update_toml_list_string_at_index(list_name, cur, new_s):
             return
-        target_off = ptr - GBA_ROM_BASE
-        if target_off < 0 or target_off >= len(data):
-            return
-        old_len = 0
-        for i in range(256):
-            if target_off + i >= len(data):
-                break
-            if data[target_off + i] == 0xFF:
-                old_len = i + 1
-                break
-        else:
-            old_len = 256
-        new_text = self._ptr_text_entry.get()
-        enc = encode_pcs_string(new_text, max(old_len, 1))
-        self._hex.write_bytes_at(target_off, enc)
+        self._lists = self._hex.get_lists()
+        self._update_list_enum_panel()
         iid = f"sf_{fi}"
         data2 = self._hex.get_data()
         if data2 and self._tree.exists(iid):
@@ -907,6 +1339,8 @@ class StructEditorFrame(ttk.Frame):
         self._entry_index_context_pcs = None
         self._entry_index_name_label.grid_remove()
         self._entry_label_pcs_frame.grid_remove()
+        self._list_enum_frame.grid_remove()
+        self._list_enum_fi = None
         self._combo.set("")
         self._combo.configure(values=[a["name"] for a in self._anchors] if self._anchors else [])
         self._tree.delete(*self._tree.get_children())
@@ -924,6 +1358,8 @@ class StructEditorFrame(ttk.Frame):
         self._cancel_inline_edit()
         self._ptr_text_frame.grid_remove()
         self._ptr_text_fi = None
+        self._list_enum_frame.grid_remove()
+        self._list_enum_fi = None
         self._tree.delete(*self._tree.get_children())
         try:
             data = self._hex.get_data()
@@ -942,6 +1378,7 @@ class StructEditorFrame(ttk.Frame):
                 self._tree.insert("", tk.END, values=(fd["name"], val_str), iid=f"sf_{fi}")
         finally:
             self._update_entry_index_name_label()
+            self._sync_field_aux_panels()
 
     def _format_value(self, raw: bytes, fd: Dict[str, Any]) -> str:
         ftype = fd["type"]
@@ -972,6 +1409,8 @@ class StructEditorFrame(ttk.Frame):
         if enum_ref:
             label = self._resolve_enum(val, enum_ref)
             if label is not None:
+                if enum_ref in self._lists:
+                    return f"{label}  ▾"  # TOML List: use panel below to pick / edit TOML string
                 return label
         if fd.get("hex"):
             return f"0x{val:0{len(raw) * 2}X}"
@@ -1024,6 +1463,13 @@ class StructEditorFrame(ttk.Frame):
                 return f"{value} ({''.join(chars)})"
         return None
 
+    def _is_toml_list_enum_field(self, fd: Dict[str, Any]) -> bool:
+        return (
+            fd.get("type") == "uint"
+            and bool(fd.get("enum"))
+            and fd["enum"] in self._lists
+        )
+
     def _start_inline_edit(self, event: Optional[tk.Event] = None) -> None:
         if self._edit_entry:
             return
@@ -1037,6 +1483,10 @@ class StructEditorFrame(ttk.Frame):
         if fi >= len(self._fields):
             return
         fd = self._fields[fi]
+        if self._is_toml_list_enum_field(fd):
+            self._sync_field_aux_panels()
+            self._list_enum_rom_combo.focus_set()
+            return
         vals = self._tree.item(iid, "values")
         if len(vals) < 2:
             return
@@ -1081,7 +1531,8 @@ class StructEditorFrame(ttk.Frame):
     def _commit_inline_edit(self, event: Optional[tk.Event] = None) -> None:
         if not self._edit_entry or not self._edit_iid:
             return
-        text = self._edit_entry.get().strip()
+        raw_edit = self._edit_entry.get()
+        text = raw_edit.strip()
         fi = int(self._edit_iid.split("_")[1])
         if fi >= len(self._fields):
             self._cancel_inline_edit()
@@ -1098,6 +1549,7 @@ class StructEditorFrame(ttk.Frame):
             self._cancel_inline_edit()
             return
 
+        skip_tree_refresh = False
         if fd["type"] == "pcs":
             enc = encode_pcs_string(text, fd["size"])
             self._hex.write_bytes_at(foff, enc)
@@ -1111,26 +1563,15 @@ class StructEditorFrame(ttk.Frame):
                     return
                 self._hex.write_bytes_at(foff, val.to_bytes(4, "little"))
             elif (ptr >> 24) in (0x08, 0x09):
-                target_off = ptr - GBA_ROM_BASE
-                if target_off < 0 or target_off >= len(data):
+                if not self._apply_pcs_ptr_string_write(fi, raw_edit):
                     self._cancel_inline_edit()
                     return
-                old_len = 0
-                for i in range(256):
-                    if target_off + i >= len(data):
-                        break
-                    if data[target_off + i] == 0xFF:
-                        old_len = i + 1
-                        break
-                else:
-                    old_len = 256
-                enc = encode_pcs_string(text, max(old_len, 1))
-                self._hex.write_bytes_at(target_off, enc)
+                skip_tree_refresh = True
             else:
                 messagebox.showwarning(
                     "Struct",
-                    "This pointer does not target ROM. Set the field to a ROM address (e.g. 0x08XXXXXX) first, "
-                    "then edit the string.",
+                    "This pointer does not target ROM. Set Pointer (GBA) in the panel below, "
+                    "or type a ROM address (e.g. 0x08XXXXXX) here.",
                 )
                 self._cancel_inline_edit()
                 return
@@ -1146,8 +1587,11 @@ class StructEditorFrame(ttk.Frame):
             self._cancel_inline_edit()
             return
 
-        raw = bytes(self._hex.get_data()[foff:foff + fd["size"]])
-        self._tree.set(self._edit_iid, "val", self._format_value(raw, fd))
+        if not skip_tree_refresh:
+            raw = bytes(self._hex.get_data()[foff:foff + fd["size"]])
+            self._tree.set(self._edit_iid, "val", self._format_value(raw, fd))
+        else:
+            self._refresh_pcs_ptr_tree_row(fi)
         self._cancel_inline_edit()
         self._update_ptr_text_panel()
 
@@ -3314,6 +3758,65 @@ Format = "`f|u8`[u8 arg0]"
     def get_lists(self) -> Dict[str, Dict[int, str]]:
         """Return all [[List]] entries as {name: {index: label}}."""
         return _load_toml_lists(self._toml_data)
+
+    def update_toml_list_string_at_index(self, list_name: str, flat_index: int, new_label: str) -> bool:
+        """Update one string in a ``[[List]]`` table and rewrite the TOML file on disk."""
+        if not _TOMLI_W_AVAILABLE:
+            messagebox.showerror(
+                "Struct",
+                "Editing [[List]] text requires the tomli-w package.\n"
+                "Install with: pip install tomli-w",
+            )
+            return False
+        if not self._toml_path or not os.path.isfile(self._toml_path):
+            messagebox.showerror(
+                "Struct",
+                "No TOML file to write (open a ROM with a .toml, or use Load structure TOML).",
+            )
+            return False
+        lists_arr = self._toml_data.get("List")
+        if not isinstance(lists_arr, list):
+            messagebox.showerror("Struct", "TOML has no [[List]] section.")
+            return False
+        target: Optional[Dict[str, Any]] = None
+        want = list_name.strip()
+        for lst in lists_arr:
+            if not isinstance(lst, dict):
+                continue
+            name = str(lst.get("Name", "")).strip().strip("'\"")
+            if name == want:
+                target = lst
+                break
+        if target is None:
+            messagebox.showerror("Struct", f"List not found in TOML: {list_name!r}")
+            return False
+        coords = _list_table_key_and_offset(target, flat_index)
+        if coords is None:
+            messagebox.showerror(
+                "Struct",
+                f"Index {flat_index} is not defined in [[List]] {list_name!r}.",
+            )
+            return False
+        key, off = coords
+        val = target[key]
+        if isinstance(val, list):
+            if off < 0 or off >= len(val):
+                return False
+            val[off] = new_label
+        else:
+            if off != 0:
+                return False
+            target[key] = new_label
+        try:
+            with open(self._toml_path, "wb") as f:
+                tomli_w.dump(self._toml_data, f)
+        except OSError as e:
+            messagebox.showerror("Struct", f"Could not write TOML:\n{e}")
+            return False
+        except Exception as e:
+            messagebox.showerror("Struct", f"TOML write failed:\n{e}")
+            return False
+        return True
 
     def write_bytes_at(self, offset: int, data: bytes) -> None:
         if not self._data or offset < 0:
