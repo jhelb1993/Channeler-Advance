@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Regression check: decode graphics.pokedex.minibox (lzs4x8x4 + catchmap palette) via gbagfx.
+Regression check: decode graphics.pokedex.minibox (lzs4x8x4 + catchmap palette) via built-in gfx decode.
 
 Requires:
   - BPRE0_test.gba (or pass path as argv[1])
-  - deps/gbagfx Linux binary + WSL on Windows
+  - Pillow
 
 Usage:
   python scripts/test_pokedex_minibox_gbagfx.py [path/to/BPRE0_test.gba]

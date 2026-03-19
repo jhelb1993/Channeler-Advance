@@ -1,20 +1,17 @@
 """
-GBA graphics helpers: Nintendo-style LZ77 decompress and gbagfx (pret) invocation via WSL on Windows.
-Palette formats: ucp4, lzp4, ucp4:HEX… (each hex digit 0–F = a hardware palette index; ROM has one 32-byte chunk
-per digit in order), ucp8:N / lzp8:N. Multi–4bpp scatters chunks into a 512-byte master for gbagfx palette preview;
-4bpp sprites use only the first ROM chunk. 8bpp anchors used with 4bpp sprites are trimmed to 32 bytes.
-Sprite tile formats: ucs4xWxH / lzs4xWxH (and 8bpp variants), 8×8 tiles.
+GBA graphics helpers: LZ77 decompress (pret ``lz.c``) and **pure-Python** palette/tile decode aligned with pret
+``tools/gbagfx/gfx.c`` (``ReadGbaPalette``, 4bpp/8bpp tile layout). PNG output uses Pillow — no gbagfx binary.
+
+Palette formats: ucp4, lzp4, ucp4:HEX…, ucp8:N / lzp8:N. Sprite: ucs/lzs 4x8 tiles.
 """
 
 from __future__ import annotations
 
 import os
-import platform
 import re
-import subprocess
 import tempfile
 from dataclasses import dataclass, replace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 # Repo root: editors/common -> repo
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,120 +20,8 @@ GBAGFX_PATH = os.path.join(_REPO_ROOT, "deps", "gbagfx")
 
 
 def repo_gbagfx_path() -> str:
+    """Path to optional ``deps/gbagfx`` (not used for decode; kept for compatibility / manual use)."""
     return GBAGFX_PATH
-
-
-def _windows_path_for_wsl_arg(win_path: str) -> str:
-    """Normalize and use forward slashes.
-
-    Passing ``C:\\Users\\...`` to ``wsl wslpath`` can drop backslashes (e.g. ``\\U`` in
-    ``\\Users``), producing invalid paths like ``C:Users...``. WSL accepts ``C:/Users/...``.
-    """
-    p = os.path.normpath(os.path.abspath(win_path))
-    if platform.system() == "Windows":
-        return p.replace("\\", "/")
-    return p
-
-
-def _run_wslpath(win_path: str) -> Tuple[Optional[str], str]:
-    """Convert a Windows path for WSL. Returns (linux_path_or_None, error_text_if_failed)."""
-    path_arg = _windows_path_for_wsl_arg(win_path)
-    cmd_list = ["wsl", "wslpath", "-a", path_arg]
-    cmd_display = " ".join(cmd_list)
-    try:
-        r = subprocess.run(
-            cmd_list,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except OSError as e:
-        return None, f"{type(e).__name__}: {e}\ncommand: {cmd_display}"
-    except subprocess.TimeoutExpired as e:
-        return None, f"{type(e).__name__}: {e}\ncommand: {cmd_display}"
-
-    out = (r.stdout or "").strip()
-    err = (r.stderr or "").strip()
-    if r.returncode != 0:
-        parts = [f"wsl wslpath failed (exit {r.returncode})."]
-        if out:
-            parts.append(f"stdout:\n{out}")
-        if err:
-            parts.append(f"stderr:\n{err}")
-        if not out and not err:
-            parts.append("(no stdout or stderr from wslpath)")
-        parts.append(f"command: {cmd_display}")
-        return None, "\n".join(parts)
-    if not out:
-        return None, (
-            "wslpath returned exit 0 but empty stdout.\n"
-            f"stderr:\n{err or '(none)'}\n"
-            f"command: {cmd_display}"
-        )
-    return out, ""
-
-
-def run_gbagfx(
-    argv: List[str],
-    *,
-    cwd: Optional[str] = None,
-) -> Tuple[int, str, str]:
-    """
-    Run pret gbagfx. On Windows, invoke the Linux binary under WSL.
-    ``argv`` is the argument list *after* the program name (e.g. ``["a.4bpp", "a.png", "-palette", "a.pal", "-mwidth", "4"]``).
-    Paths may be Windows paths; they are converted for WSL as needed.
-    Returns (returncode, stdout, stderr combined log string for UI).
-    """
-    exe = GBAGFX_PATH
-    if not os.path.isfile(exe):
-        return (
-            127,
-            "",
-            f"gbagfx not found at {exe!r}. Place the Linux gbagfx binary at deps/gbagfx.\n",
-        )
-
-    cwd = cwd or os.getcwd()
-    if platform.system() == "Windows":
-        wsl_exe, wsl_err = _run_wslpath(exe)
-        if not wsl_exe:
-            return (1, "", wsl_err + "\n")
-        wsl_args: List[str] = []
-        for a in argv:
-            if os.path.isabs(a) or (len(a) > 1 and a[1] == ":"):
-                conv, conv_err = _run_wslpath(a)
-                if not conv:
-                    return (
-                        1,
-                        "",
-                        f"wslpath failed for gbagfx argument {a!r}:\n{conv_err}\n",
-                    )
-                wsl_args.append(conv)
-            else:
-                wsl_args.append(a)
-        cmd = ["wsl", wsl_exe] + wsl_args
-    else:
-        cmd = [exe] + argv
-
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except OSError as e:
-        return 1, "", f"Failed to run gbagfx: {e}\n"
-    except subprocess.TimeoutExpired:
-        return 1, "", "gbagfx timed out.\n"
-
-    log_parts = []
-    if proc.stdout:
-        log_parts.append(f"stdout:\n{proc.stdout}")
-    if proc.stderr:
-        log_parts.append(f"stderr:\n{proc.stderr}")
-    log = "\n".join(log_parts) if log_parts else "(no gbagfx output)\n"
-    return proc.returncode, proc.stdout or "", log
 
 
 def _hex_preview(data: bytes, max_bytes: int = 96) -> str:
@@ -296,22 +181,18 @@ def palette_4_chunk_count(spec: GraphicsAnchorSpec) -> int:
     return len(spec.palette_4_indices)
 
 
-# 4bpp: 16 hardware indices × 16 colors × 2 bytes (master layout for gbagfx / editor)
+# 4bpp: 16 hardware indices × 16 colors × 2 bytes (master layout for multi-slot palettes / PNG decode)
 GBA_4BPP_SUBPALETTE_BYTES = 32
 GBA_4BPP_MASTER_INDEX_COUNT = 16
 GBA_4BPP_MASTER_PALETTE_BYTES = GBA_4BPP_MASTER_INDEX_COUNT * GBA_4BPP_SUBPALETTE_BYTES  # 512
 
 
 def gba_rgb555_word_to_rgb888(word: int) -> Tuple[int, int, int]:
-    """Convert GBA 16-bit color (xBBBBBGGGGGRRRRR, little-endian in ROM) to 8-bit RGB."""
+    """pret ``gfx.c`` ``UPCONVERT_BIT_DEPTH``: (5-bit component * 255) // 31 → 8-bit RGB."""
     r5 = word & 0x1F
     g5 = (word >> 5) & 0x1F
     b5 = (word >> 10) & 0x1F
-    return (
-        min(255, (r5 * 255 + 15) // 31),
-        min(255, (g5 * 255 + 15) // 31),
-        min(255, (b5 * 255 + 15) // 31),
-    )
+    return ((r5 * 255) // 31, (g5 * 255) // 31, (b5 * 255) // 31)
 
 
 def decode_gba_palette32_to_rgb888(pal32: bytes) -> List[Tuple[int, int, int]]:
@@ -323,6 +204,143 @@ def decode_gba_palette32_to_rgb888(pal32: bytes) -> List[Tuple[int, int, int]]:
         w = pal32[i] | (pal32[i + 1] << 8)
         out.append(gba_rgb555_word_to_rgb888(w))
     return out
+
+
+def _require_pillow():
+    try:
+        from PIL import Image
+
+        return Image
+    except ImportError as e:
+        raise ImportError(
+            "Pillow is required for graphics PNG export. Install with: pip install Pillow"
+        ) from e
+
+
+def raw_gba_palette_to_rgb888_list(pal_data: bytes) -> List[Tuple[int, int, int]]:
+    """pret ``ReadGbaPalette``: little-endian u16 per entry, same RGB expansion as gba_rgb555_word_to_rgb888."""
+    if len(pal_data) % 2 != 0:
+        pal_data = pal_data[: len(pal_data) // 2 * 2]
+    colors: List[Tuple[int, int, int]] = []
+    for i in range(0, len(pal_data), 2):
+        w = pal_data[i] | (pal_data[i + 1] << 8)
+        colors.append(gba_rgb555_word_to_rgb888(w))
+    return colors
+
+
+def pret_pad_palette_over_16_colors(colors: List[Tuple[int, int, int]]) -> List[Tuple[int, int, int]]:
+    """pret ``ReadGbaPalette``: if more than 16 colors, pad with black to 256 entries."""
+    if len(colors) <= 16:
+        return colors
+    c = list(colors)
+    while len(c) < 256:
+        c.append((0, 0, 0))
+    return c
+
+
+def palette_rgb_for_4bpp_tile_decode(pal_bytes: bytes) -> List[Tuple[int, int, int]]:
+    colors = raw_gba_palette_to_rgb888_list(pal_bytes)
+    while len(colors) < 16:
+        colors.append((0, 0, 0))
+    return colors[:16]
+
+
+def palette_rgb_for_8bpp_tile_decode(pal_bytes: bytes) -> List[Tuple[int, int, int]]:
+    colors = raw_gba_palette_to_rgb888_list(pal_bytes)
+    colors = pret_pad_palette_over_16_colors(colors)
+    while len(colors) < 256:
+        colors.append((0, 0, 0))
+    return colors[:256]
+
+
+def decode_gba_tile_4bpp_indices(tile: bytes) -> Tuple[int, ...]:
+    """
+    One 8×8 4bpp tile (32 bytes). Nybble order matches pret ``ConvertFromTiles4Bpp`` on read
+    (low nybble first pixel, high nybble second).
+    """
+    tile = tile.ljust(32, b"\x00")[:32]
+    out: List[int] = []
+    for row in range(8):
+        for cb in range(4):
+            b = tile[row * 4 + cb]
+            out.append(b & 0xF)
+            out.append((b >> 4) & 0xF)
+    return tuple(out)
+
+
+def decode_gba_tile_8bpp_indices(tile: bytes) -> Tuple[int, ...]:
+    """One 8×8 8bpp tile (64 bytes), row-major (pret ``ConvertFromTiles8Bpp``)."""
+    return tuple(tile.ljust(64, b"\x00")[:64])
+
+
+def gba_tiles_to_rgba(
+    tile_data: bytes,
+    bpp: int,
+    tiles_wide: int,
+    tiles_high: int,
+    palette_rgb: List[Tuple[int, int, int]],
+) -> bytes:
+    """
+    Row-major tile order with ``tiles_wide`` as gbagfx ``-mwidth`` (metatile 1×1), matching pret
+    ``ReadTileImage`` + ``ConvertFromTiles*``.
+    """
+    tw, th = tiles_wide, tiles_high
+    pix_w, pix_h = tw * 8, th * 8
+    tile_sz = 32 if bpp == 4 else 64
+    n_tiles = tw * th
+    need = n_tiles * tile_sz
+    if len(tile_data) < need:
+        tile_data = tile_data.ljust(need, b"\x00")
+    buf = bytearray(pix_w * pix_h * 4)
+
+    for ti in range(n_tiles):
+        off = ti * tile_sz
+        chunk = tile_data[off : off + tile_sz]
+        idxs = decode_gba_tile_4bpp_indices(chunk) if bpp == 4 else decode_gba_tile_8bpp_indices(chunk)
+        tcx = (ti % tw) * 8
+        tcy = (ti // tw) * 8
+        k = 0
+        for y in range(8):
+            for x in range(8):
+                pi = idxs[k]
+                k += 1
+                if pi < len(palette_rgb):
+                    r, g, b = palette_rgb[pi]
+                else:
+                    r, g, b = (0, 0, 0)
+                q = ((tcy + y) * pix_w + (tcx + x)) * 4
+                buf[q : q + 4] = bytes((r, g, b, 255))
+    return bytes(buf)
+
+
+def write_rgba_png(path: str, width: int, height: int, rgba: bytes) -> None:
+    Image = _require_pillow()
+    expect = width * height * 4
+    if len(rgba) != expect:
+        raise ValueError(f"RGBA buffer length {len(rgba)} != {expect}")
+    im = Image.frombytes("RGBA", (width, height), rgba, "raw", "RGBA", 0, 1)
+    im.save(path, format="PNG")
+
+
+def write_palette_strip_png(
+    path: str,
+    colors: List[Tuple[int, int, int]],
+    *,
+    swatch_w: int = 14,
+    swatch_h: int = 28,
+) -> None:
+    Image = _require_pillow()
+    if not colors:
+        colors = [(0, 0, 0)]
+    w, h = len(colors) * swatch_w, swatch_h
+    im = Image.new("RGBA", (w, h), (0, 0, 0, 255))
+    px = im.load()
+    for i, (r, g, b) in enumerate(colors):
+        x0 = i * swatch_w
+        for yy in range(swatch_h):
+            for xx in range(swatch_w):
+                px[x0 + xx, yy] = (r, g, b, 255)
+    im.save(path, format="PNG")
 
 
 def get_palette_4_slot_bytes(spec: GraphicsAnchorSpec, pal_bytes: bytes, slot_index: int) -> bytes:
@@ -500,12 +518,11 @@ def palette_bytes_for_gbagfx(
     sprite_bpp: Optional[int] = None,
 ) -> bytes:
     """
-    Bytes written to .gbapal before gbagfx.
+    Raw palette bytes before RGB decode (pret ``ReadGbaPalette`` input).
 
-    - Multi-chunk 4bpp (``ucp4:`` with more than one hex digit): for **palette-only** preview, scatter chunks
-      into a 512-byte master by palette index. For **4bpp sprites**, use only the first ROM chunk (32 bytes).
-    - When ``sprite_bpp`` is 4 and the palette anchor is 8bpp-format (``ucp8`` / ``lzp8``), trim to the first
-      32 bytes.
+    - Multi-chunk ``ucp4:``: for **palette-only** preview, scatter into a 512-byte master; for **4bpp sprites**,
+      use only the first ROM chunk (32 bytes).
+    - ``sprite_bpp`` 4 + 8bpp-format palette anchor: trim to the first 32 bytes.
     """
     if spec.kind == "palette" and spec.bpp == 4 and palette_4_chunk_count(spec) > 1:
         if sprite_bpp == 4:
@@ -530,52 +547,15 @@ def extract_sprite_bytes(spec: GraphicsAnchorSpec, raw: bytes) -> bytes:
     return data[:need]
 
 
-def gbagfx_palette_pipeline(pal_bytes: bytes, work_dir: str, stem: str) -> Tuple[int, str, str]:
-    """Write .gbapal, run gbagfx -> .pal (PNG palette for -palette flag)."""
-    gbapal = os.path.join(work_dir, f"{stem}.gbapal")
-    pal_out = os.path.join(work_dir, f"{stem}.pal")
-    with open(gbapal, "wb") as f:
-        f.write(pal_bytes)
-    code, out, log = run_gbagfx([gbapal, pal_out], cwd=work_dir)
-    return code, out, log
-
-
-def gbagfx_sprite_pipeline(
-    tile_bytes: bytes,
-    bpp: int,
-    mwidth: int,
-    pal_path: str,
-    work_dir: str,
-    stem: str,
-) -> Tuple[int, str, str, str]:
-    """Write .4bpp or .8bpp, run gbagfx to PNG. Returns (code, stdout, log, png_path)."""
-    ext = "4bpp" if bpp == 4 else "8bpp"
-    bin_path = os.path.join(work_dir, f"{stem}.{ext}")
-    png_path = os.path.join(work_dir, f"{stem}.png")
-    with open(bin_path, "wb") as f:
-        f.write(tile_bytes)
-    argv = [
-        bin_path,
-        png_path,
-        "-palette",
-        pal_path,
-        "-mwidth",
-        str(mwidth),
-    ]
-    code, out, log = run_gbagfx(argv, cwd=work_dir)
-    return code, out, log, png_path
-
-
 def decode_palette_to_png_pal(
     rom: bytes,
     base_off: int,
     spec: GraphicsAnchorSpec,
 ) -> Tuple[Optional[str], str]:
     """
-    Read palette from ROM at base_off, produce a .pal file via gbagfx in a temp directory.
-    Returns (path to .pal or None, full log).
+    Read palette from ROM, write a strip preview PNG (pret ``ReadGbaPalette`` RGB conversion).
+    Returns (path to PNG or None, log text).
     """
-    logs: List[str] = []
     if base_off < 0 or base_off >= len(rom):
         return None, "Invalid ROM offset for palette.\n"
     raw = bytes(rom[base_off : base_off + min(len(rom) - base_off, 1 << 20)])
@@ -587,15 +567,42 @@ def decode_palette_to_png_pal(
 
     td = tempfile.mkdtemp(prefix="ch_gfx_")
     try:
-        code, _out, log = gbagfx_palette_pipeline(pal_bytes, td, "pal")
-        logs.append(log)
-        pal_path = os.path.join(td, "pal.pal")
-        if code != 0 or not os.path.isfile(pal_path):
-            return None, "".join(logs)
-        # Keep temp dir alive: caller uses file; return path inside td (note: td leaked until exit)
-        return pal_path, "".join(logs)
-    except OSError as e:
-        return None, f"{''.join(logs)}\nFilesystem error: {e}\n"
+        colors = raw_gba_palette_to_rgb888_list(pal_bytes)
+        colors = pret_pad_palette_over_16_colors(colors)
+        png_path = os.path.join(td, "palette.png")
+        write_palette_strip_png(png_path, colors)
+        n = len(raw_gba_palette_to_rgb888_list(pal_bytes))
+        log = (
+            f"Palette -> PNG ({n} GBA colors; pret gfx.c ReadGbaPalette / UPCONVERT_BIT_DEPTH).\n"
+        )
+        return png_path, log
+    except ImportError as e:
+        return None, f"{e}\n"
+    except (OSError, ValueError) as e:
+        return None, f"Palette PNG error: {e}\n"
+
+
+def _sprite_tiles_to_png_path(
+    tiles: bytes,
+    spec: GraphicsAnchorSpec,
+    pal_bytes: bytes,
+    td: str,
+    stem: str,
+) -> Tuple[str, str]:
+    if spec.bpp == 4:
+        pal_rgb = palette_rgb_for_4bpp_tile_decode(pal_bytes)
+    else:
+        pal_rgb = palette_rgb_for_8bpp_tile_decode(pal_bytes)
+    wpx = spec.width_tiles * 8
+    hpx = spec.height_tiles * 8
+    rgba = gba_tiles_to_rgba(
+        tiles, spec.bpp, spec.width_tiles, spec.height_tiles, pal_rgb
+    )
+    png_path = os.path.join(td, f"{stem}.png")
+    write_rgba_png(png_path, wpx, hpx, rgba)
+    return png_path, (
+        f"Sprite -> PNG {wpx}x{hpx} ({spec.bpp}bpp tiles, pret gfx.c tile order).\n"
+    )
 
 
 def decode_graphics_anchor_to_png(
@@ -608,7 +615,7 @@ def decode_graphics_anchor_to_png(
 ) -> Tuple[Optional[str], str]:
     """
     Decode a standalone graphics NamedAnchor (palette-only returns None PNG; sprite returns PNG path).
-    For palette-only anchors, returns (None, log) — use decode_palette_to_png_pal for .pal preview.
+    For palette-only anchors, returns (None, log) — use ``decode_palette_to_png_pal`` for strip preview.
 
     For sprite anchors with ``palette_anchor_name`` in TOML, pass the resolved palette as
     ``external_palette_spec`` + ``external_palette_base_off`` (or both None for default palette).
@@ -644,32 +651,14 @@ def decode_graphics_anchor_to_png(
             pal_bytes = palette_bytes_for_gbagfx(
                 external_palette_spec, pal_bytes, sprite_bpp=spec.bpp
             )
-            code, _o, log = gbagfx_palette_pipeline(pal_bytes, td, "ext")
-            logs.append(log)
-            pal_path = os.path.join(td, "ext.pal")
-            if code != 0 or not os.path.isfile(pal_path):
-                return None, "".join(logs)
         else:
-            # Default 16-color palette if none (gbagfx still needs -palette)
-            default_pal = bytes(32)
-            code, _o, log = gbagfx_palette_pipeline(default_pal, td, "default")
-            logs.append(log)
-            pal_path = os.path.join(td, "default.pal")
-            if code != 0 or not os.path.isfile(pal_path):
-                return None, "".join(logs)
+            pal_bytes = bytes(32)
 
-        code, _o, log2, png_path = gbagfx_sprite_pipeline(
-            tiles,
-            spec.bpp,
-            spec.width_tiles,
-            pal_path,
-            td,
-            stem,
-        )
-        logs.append(log2)
-        if code != 0 or not os.path.isfile(png_path):
-            return None, "".join(logs)
+        png_path, slog = _sprite_tiles_to_png_path(tiles, spec, pal_bytes, td, stem)
+        logs.append(slog)
         return png_path, "".join(logs)
+    except ImportError as e:
+        return None, f"{e}\n"
     except OSError as e:
         return None, f"{''.join(logs)}\nFilesystem error: {e}\n"
 
@@ -702,31 +691,14 @@ def decode_sprite_at_pointer(
             except ValueError as e:
                 return None, f"External palette decode error: {e}\n"
             pal_bytes = palette_bytes_for_gbagfx(palette_spec, pal_bytes, sprite_bpp=spec.bpp)
-            code, _o, log = gbagfx_palette_pipeline(pal_bytes, td, "ext")
-            logs.append(log)
-            pal_path = os.path.join(td, "ext.pal")
-            if code != 0 or not os.path.isfile(pal_path):
-                return None, "".join(logs)
         else:
-            default_pal = bytes(32)
-            code, _o, log = gbagfx_palette_pipeline(default_pal, td, "default")
-            logs.append(log)
-            pal_path = os.path.join(td, "default.pal")
-            if code != 0 or not os.path.isfile(pal_path):
-                return None, "".join(logs)
+            pal_bytes = bytes(32)
 
-        code, _o, log2, png_path = gbagfx_sprite_pipeline(
-            tiles,
-            spec.bpp,
-            spec.width_tiles,
-            pal_path,
-            td,
-            "sprite",
-        )
-        logs.append(log2)
-        if code != 0 or not os.path.isfile(png_path):
-            return None, "".join(logs)
+        png_path, slog = _sprite_tiles_to_png_path(tiles, spec, pal_bytes, td, "sprite")
+        logs.append(slog)
         return png_path, "".join(logs)
+    except ImportError as e:
+        return None, f"{e}\n"
     except OSError as e:
         return None, f"{''.join(logs)}\nFilesystem error: {e}\n"
 

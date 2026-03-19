@@ -25,7 +25,6 @@ from editors.common.gba_graphics import (
     parse_sprite_field_spec,
     compute_graphics_rom_span,
     resolve_gba_pointer,
-    repo_gbagfx_path,
 )
 
 _TOML_AVAILABLE = False
@@ -498,7 +497,7 @@ class PcsStringTableFrame(ttk.Frame):
 
 
 class GraphicsPreviewFrame(ttk.Frame):
-    """Decode GBA palettes/sprites with pret gbagfx (via WSL on Windows) and show PNG + gbagfx output."""
+    """Decode GBA palettes/sprites with built-in pret gfx.c–compatible logic (Pillow PNG); no gbagfx binary."""
 
     def __init__(self, parent: tk.Misc, hex_editor: "HexEditorFrame", **kwargs) -> None:
         super().__init__(parent, **kwargs)
@@ -543,7 +542,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._pal4_canvas.grid(row=2, column=0, sticky="ew", pady=(0, 4))
         self._pal4_canvas.grid_remove()
 
-        ttk.Label(self, text="gbagfx output:", font=("Consolas", 8)).grid(row=3, column=0, sticky="w")
+        ttk.Label(self, text="Decode log:", font=("Consolas", 8)).grid(row=3, column=0, sticky="w")
         self._log = tk.Text(self, height=5, font=("Consolas", 8), wrap=tk.WORD, state=tk.DISABLED)
         self._log.grid(row=4, column=0, sticky="ew", pady=(0, 4))
         self._img_label = ttk.Label(self, text="(no preview)")
@@ -614,7 +613,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         if not names:
             self._combo.set("")
             self._hide_palette_4_ui()
-            self._set_log(f"gbagfx path: {repo_gbagfx_path()}\n(no graphics NamedAnchors in TOML)")
+            self._set_log("Graphics: built-in decode (pret gfx.c palette/tiles + Pillow).\n(no graphics NamedAnchors in TOML)")
             self._clear_image()
 
     def show_anchor(self, anchor_name: str) -> None:
@@ -677,7 +676,7 @@ class GraphicsPreviewFrame(ttk.Frame):
             if pal_path:
                 self._try_show_image(pal_path)
             else:
-                self._clear_image("(gbagfx did not produce .pal)")
+                self._clear_image("(palette PNG not produced)")
             return
         self._hide_palette_4_ui()
         ext_ps: Optional[Any] = None
@@ -706,7 +705,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         if png_path:
             self._try_show_image(png_path)
         else:
-            self._clear_image("(gbagfx did not produce .png)")
+            self._clear_image("(sprite PNG not produced)")
 
 
 def _parse_struct_fields(fmt: str) -> Optional[List[Dict[str, Any]]]:
@@ -1036,14 +1035,14 @@ class StructEditorFrame(ttk.Frame):
             font=("Consolas", 7),
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
-        # sprite<`ucs4xWxH|palette.anchor`>: decode via gbagfx (WSL) + optional palette NamedAnchor
+        # sprite<`ucs4xWxH|palette.anchor`>: decode via built-in gfx + optional palette NamedAnchor
         self._gfx_sprite_frame = ttk.Frame(self)
         self._gfx_sprite_frame.columnconfigure(0, weight=1)
         ttk.Label(self._gfx_sprite_frame, text="sprite (graphics)", font=("Consolas", 8, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w"
         )
         ttk.Button(
-            self._gfx_sprite_frame, text="Decode preview (gbagfx)", command=self._on_decode_gfx_sprite
+            self._gfx_sprite_frame, text="Decode preview", command=self._on_decode_gfx_sprite
         ).grid(row=1, column=0, sticky="w", pady=(0, 4))
         self._gfx_log = tk.Text(
             self._gfx_sprite_frame, height=4, font=("Consolas", 7), wrap=tk.WORD, state=tk.DISABLED

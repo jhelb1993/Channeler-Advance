@@ -86,7 +86,7 @@ class FireRedEditor:
         self._struct_editor = StructEditorFrame(self._struct_inner, self._hex_editor)
         self._struct_editor.pack(fill=tk.BOTH, expand=True)
 
-        # Slot 2: graphics (gbagfx / WSL)
+        # Slot 2: graphics (built-in pret-compatible decode + Pillow)
         self._tool3_canvas, self._tool3_inner = self._make_scroll_slot()
         self._graphics_preview = GraphicsPreviewFrame(self._tool3_inner, self._hex_editor)
         self._graphics_preview.pack(fill=tk.BOTH, expand=True)
@@ -324,6 +324,6 @@ class FireRedEditor:
             "Uses pret/pokefirered for C code reference.\n\n"
             "Ctrl+T — show/hide tools pane\n"
             "Ctrl+Shift+1/2/3 — toggle Table / Struct / Graphics slot\n"
-            "Graphics: deps/gbagfx via WSL (Linux binary); install Pillow for PNG preview\n"
+            "Graphics: built-in decode (pret gfx.c–compatible); Pillow required for PNG preview\n"
             "Ctrl+M — Anchors browser: double-click a table/struct leaf to open it in Tools",
         )
