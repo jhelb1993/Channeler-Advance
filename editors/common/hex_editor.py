@@ -384,6 +384,19 @@ class HexEditorFrame(ttk.Frame):
         self.winfo_toplevel().bind("<Control-H>", self._toggle_hackmew_mode, add=True)
         self.winfo_toplevel().bind("<Control-i>", self._compile_hackmew_asm, add=True)
         self.winfo_toplevel().bind("<Control-I>", self._compile_hackmew_asm, add=True)
+        for w in (
+            self._text, self._text_ascii, self._goto_entry, self._encoding_combo,
+            self._asm_mode_combo, self._asm_frame, self._text_asm,
+            self._pseudo_c_frame, self._text_pseudo_c, outer,
+        ):
+            w.bind("<Control-f>", self._show_find_dialog)
+            w.bind("<Control-F>", self._show_find_dialog)
+            w.bind("<Control-r>", self._show_replace_dialog)
+            w.bind("<Control-R>", self._show_replace_dialog)
+        self.winfo_toplevel().bind("<Control-f>", self._show_find_dialog, add=True)
+        self.winfo_toplevel().bind("<Control-F>", self._show_find_dialog, add=True)
+        self.winfo_toplevel().bind("<Control-r>", self._show_replace_dialog, add=True)
+        self.winfo_toplevel().bind("<Control-R>", self._show_replace_dialog, add=True)
 
         self._text.bind("<Control-Shift-A>", lambda e: self._select_all())
         self._text_ascii.bind("<Control-Shift-A>", lambda e: self._select_all())
@@ -957,7 +970,7 @@ class HexEditorFrame(ttk.Frame):
     def _prevent_unwanted(self, event: tk.Event) -> Optional[str]:
         if event.keysym in ("Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next"):
             return None
-        if event.state & 0x4 and event.keysym.lower() in ("a", "b", "c", "g", "h", "i", "v", "x", "s"):
+        if event.state & 0x4 and event.keysym.lower() in ("a", "b", "c", "f", "g", "h", "i", "r", "v", "x", "s"):
             return None
         if event.char and event.char in HEX_DIGITS:
             return "break"
@@ -968,6 +981,256 @@ class HexEditorFrame(ttk.Frame):
                 return None
             return "break"
         return None
+
+    # ── Find / Replace ───────────────────────────────────────────────
+
+    def _parse_find_hex(self, text: str) -> Optional[bytearray]:
+        """Parse find string as hex (DE AD BE EF or DEADBEEF)."""
+        digits = "".join(c for c in text if c in HEX_DIGITS)
+        if len(digits) < 2:
+            return None
+        out = bytearray()
+        for i in range(0, len(digits) - 1, 2):
+            out.append(int(digits[i : i + 2], 16))
+        return out if out else None
+
+    def _parse_find_ascii(self, text: str) -> Optional[bytearray]:
+        """Parse find string as ASCII/PCS text."""
+        if not text:
+            return None
+        out = bytearray()
+        for c in text:
+            if self._encoding == "pcs":
+                b = _PCS_CHAR_TO_BYTE.get(c)
+                if b is not None:
+                    out.append(b)
+                elif 32 <= ord(c) <= 126:
+                    out.append(ord(c))
+            else:
+                if 32 <= ord(c) <= 126:
+                    out.append(ord(c))
+        return out if out else None
+
+    def _find_next(self, needle: bytes, forward: bool) -> Optional[int]:
+        """Find needle in _data. Forward: from cursor+1; backward: from cursor-1. Returns offset or None."""
+        if not self._data or not needle:
+            return None
+        data = self._data
+        start = self._cursor_byte_offset
+        if forward:
+            idx = data.find(needle, start + 1)
+            if idx < 0:
+                idx = data.find(needle, 0, start)  # wrap from start
+            return idx if idx >= 0 else None
+        else:
+            idx = data.rfind(needle, 0, start)
+            if idx < 0:
+                idx = data.rfind(needle, start + 1, len(data))  # wrap from end
+            return idx if idx >= 0 else None
+
+    def _select_at_offset(self, offset: int, length: int) -> None:
+        """Select bytes at offset, scroll into view, refresh."""
+        self._cursor_byte_offset = offset
+        self._selection_start = offset
+        self._selection_end = offset + length - 1
+        self._nibble_pos = 0
+        self._ensure_cursor_visible()
+        self._refresh_visible()
+        self._update_scrollbar()
+        self._refresh_asm_selection()
+
+    def _show_find_dialog(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Open Find dialog. Bound to Ctrl+F."""
+        if not self._data:
+            return "break"
+        d = tk.Toplevel(self.winfo_toplevel())
+        d.title("Find")
+        d.transient(self.winfo_toplevel())
+        d.grab_set()
+        d.geometry("420x140")
+        d.resizable(True, False)
+        focus = self.winfo_toplevel().focus_get()
+        default_hex = focus == self._text
+        frm = ttk.Frame(d, padding=8)
+        frm.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frm, text="Find:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
+        find_var = tk.StringVar()
+        find_entry = ttk.Entry(frm, textvariable=find_var, width=36)
+        find_entry.grid(row=0, column=1, sticky="ew", pady=2)
+        frm.columnconfigure(1, weight=1)
+        mode_var = tk.StringVar(value="hex" if default_hex else "ascii")
+        ttk.Radiobutton(frm, text="Hex", variable=mode_var, value="hex").grid(
+            row=1, column=1, sticky="w", pady=2
+        )
+        ttk.Radiobutton(frm, text="ASCII", variable=mode_var, value="ascii").grid(
+            row=2, column=1, sticky="w", pady=2
+        )
+
+        def do_find(forward: bool) -> None:
+            raw = find_var.get()
+            needle = self._parse_find_hex(raw) if mode_var.get() == "hex" else self._parse_find_ascii(raw)
+            if not needle:
+                messagebox.showwarning("Find", "Invalid or empty search string.", parent=d)
+                return
+            idx = self._find_next(needle, forward)
+            if idx is not None:
+                self._select_at_offset(idx, len(needle))
+            else:
+                messagebox.showinfo("Find", "No further matches found.", parent=d)
+
+        btn_frm = ttk.Frame(frm)
+        btn_frm.grid(row=3, column=1, sticky="w", pady=8)
+        ttk.Button(btn_frm, text="Find Next", command=lambda: do_find(True)).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(btn_frm, text="Find Previous", command=lambda: do_find(False)).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(btn_frm, text="Close", command=d.destroy).pack(side=tk.LEFT, padx=(0, 4))
+        find_entry.focus_set()
+        d.bind("<Return>", lambda e: do_find(True))
+        d.bind("<Shift-Return>", lambda e: do_find(False))
+        d.bind("<Escape>", lambda e: d.destroy())
+        return "break"
+
+    def _show_replace_dialog(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Open Find & Replace dialog. Bound to Ctrl+R."""
+        if not self._data:
+            return "break"
+        d = tk.Toplevel(self.winfo_toplevel())
+        d.title("Find & Replace")
+        d.transient(self.winfo_toplevel())
+        d.grab_set()
+        d.geometry("420x180")
+        d.resizable(True, False)
+        focus = self.winfo_toplevel().focus_get()
+        default_hex = focus == self._text
+        frm = ttk.Frame(d, padding=8)
+        frm.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frm, text="Find:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
+        find_var = tk.StringVar()
+        find_entry = ttk.Entry(frm, textvariable=find_var, width=36)
+        find_entry.grid(row=0, column=1, sticky="ew", pady=2)
+        ttk.Label(frm, text="Replace:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=2)
+        repl_var = tk.StringVar()
+        repl_entry = ttk.Entry(frm, textvariable=repl_var, width=36)
+        repl_entry.grid(row=1, column=1, sticky="ew", pady=2)
+        frm.columnconfigure(1, weight=1)
+        mode_var = tk.StringVar(value="hex" if default_hex else "ascii")
+        ttk.Radiobutton(frm, text="Hex", variable=mode_var, value="hex").grid(
+            row=2, column=1, sticky="w", pady=2
+        )
+        ttk.Radiobutton(frm, text="ASCII", variable=mode_var, value="ascii").grid(
+            row=3, column=1, sticky="w", pady=2
+        )
+        status_var = tk.StringVar(value="")
+
+        def get_needle() -> Optional[bytearray]:
+            raw = find_var.get()
+            return self._parse_find_hex(raw) if mode_var.get() == "hex" else self._parse_find_ascii(raw)
+
+        def get_replacement() -> Optional[bytearray]:
+            raw = repl_var.get()
+            return self._parse_find_hex(raw) if mode_var.get() == "hex" else self._parse_find_ascii(raw)
+
+        def selection_matches(needle: bytes) -> bool:
+            s = min(self._selection_start or 0, self._selection_end or 0)
+            e = max(self._selection_start or 0, self._selection_end or 0) + 1
+            return (e - s == len(needle) and
+                    s >= 0 and e <= len(self._data) and
+                    bytes(self._data[s:e]) == needle)
+
+        def do_replace_one() -> None:
+            needle = get_needle()
+            repl = get_replacement()
+            if not needle:
+                messagebox.showwarning("Replace", "Invalid or empty search string.", parent=d)
+                return
+            if repl is None:
+                repl = bytearray()
+            if not selection_matches(needle):
+                idx = self._find_next(needle, True)
+                if idx is None:
+                    messagebox.showinfo("Replace", "No matches found.", parent=d)
+                    return
+                self._select_at_offset(idx, len(needle))
+            s = min(self._selection_start or 0, self._selection_end or 0)
+            e = max(self._selection_start or 0, self._selection_end or 0) + 1
+            if len(repl) == len(needle):
+                self._data[s:e] = repl
+            elif len(repl) < len(needle):
+                del self._data[s + len(repl):e]
+                self._data[s:s + len(repl)] = repl
+            else:
+                self._data[s:e] = repl[:len(needle)]
+                self._data[s + len(needle):s + len(needle)] = repl[len(needle):]
+            self._modified = True
+            self._ldr_pc_targets_valid = False
+            self._cursor_byte_offset = min(s + len(repl), len(self._data) - 1) if self._data else 0
+            self._selection_start = self._cursor_byte_offset
+            self._selection_end = self._cursor_byte_offset
+            self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
+            self._ensure_cursor_visible()
+            self._refresh_visible()
+            self._update_scrollbar()
+            self._refresh_asm_selection()
+            status_var.set("Replaced 1 occurrence.")
+            idx = self._find_next(needle, True)
+            if idx is not None:
+                self._select_at_offset(idx, len(needle))
+
+        def do_replace_all() -> None:
+            needle = get_needle()
+            repl = get_replacement()
+            if not needle:
+                messagebox.showwarning("Replace", "Invalid or empty search string.", parent=d)
+                return
+            if repl is None:
+                repl = bytearray()
+            count = 0
+            pos = 0
+            while True:
+                idx = self._data.find(needle, pos)
+                if idx < 0:
+                    break
+                if len(repl) == len(needle):
+                    self._data[idx:idx + len(needle)] = repl
+                elif len(repl) < len(needle):
+                    del self._data[idx + len(repl):idx + len(needle)]
+                    self._data[idx:idx + len(repl)] = repl
+                else:
+                    self._data[idx:idx + len(needle)] = repl[:len(needle)]
+                    self._data[idx + len(needle):idx + len(needle)] = repl[len(needle):]
+                count += 1
+                pos = idx + len(repl)
+            if count > 0:
+                self._modified = True
+                self._ldr_pc_targets_valid = False
+                self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
+                self._refresh_visible()
+                self._refresh_asm_selection()
+            status_var.set(f"Replaced {count} occurrence(s)." if count else "No matches found.")
+            messagebox.showinfo("Replace All", status_var.get(), parent=d)
+
+        def do_find_next() -> None:
+            needle = get_needle()
+            if not needle:
+                messagebox.showwarning("Replace", "Invalid or empty search string.", parent=d)
+                return
+            idx = self._find_next(needle, True)
+            if idx is not None:
+                self._select_at_offset(idx, len(needle))
+            else:
+                messagebox.showinfo("Replace", "No matches found.", parent=d)
+
+        btn_frm = ttk.Frame(frm)
+        btn_frm.grid(row=4, column=1, sticky="w", pady=8)
+        ttk.Button(btn_frm, text="Find Next", command=do_find_next).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(btn_frm, text="Replace", command=do_replace_one).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(btn_frm, text="Replace All", command=do_replace_all).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(btn_frm, text="Close", command=d.destroy).pack(side=tk.LEFT, padx=(0, 4))
+        lbl = ttk.Label(frm, textvariable=status_var)
+        lbl.grid(row=5, column=1, sticky="w", pady=2)
+        find_entry.focus_set()
+        d.bind("<Return>", lambda e: do_replace_one())
+        d.bind("<Escape>", lambda e: d.destroy())
+        return "break"
 
     # ── Dynamic row count ────────────────────────────────────────────
 
