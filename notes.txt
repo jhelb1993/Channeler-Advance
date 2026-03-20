@@ -1,7 +1,8 @@
-lookup pointers carot
+don't allow typing of invalid characters in goto
 c injection
 automatic resize/index/palette adjust import mode
 python scripting
+update README with lots of info, shortcuts, and instructions
 addresses should be in hex (tomli-w)
 fix tilemap/tileset logic
 get rid of second scrollbar (tools)

@@ -3,28 +3,28 @@ Constants = [
 ]
 
 [[Structs]]
-Name = "Task"
-Format = "`s`{TaskFunc|*u8}{isActive|b8}{prev|u8}{next|u8}{priority|u8}{data[NUM_TASK_DATA]|s16}"
+Name = '''Task'''
+Format = '''`s`{TaskFunc|*u8}{isActive|b8}{prev|u8}{next|u8}{priority|u8}{data[NUM_TASK_DATA]|s16}'''
 
 [[FunctionAnchors]]
-Name = "funcs.trainer_card.DrawTrainerCardWindow"
-Address = 568520
-Format = "`f`[u8 windowId]"
+Name = '''funcs.trainer_card.DrawTrainerCardWindow'''
+Address = 0x08acc8
+Format = '''`f`[u8 windowId]'''
 
 [[FunctionAnchors]]
-Name = "funcs.trainer_card.Task_SetCardFlipped"
-Address = 570584
-Format = "`f|b8`[struct Task* task]"
+Name = '''funcs.trainer_card.Task_SetCardFlipped'''
+Address = 0x8b4d8
+Format = '''`f|b8`[struct Task* task]'''
 
 [[FunctionAnchors]]
-Name = "funcs.trainer_card.Task_BeginCardFlip"
-Address = 569940
-Format = "`f|b8`[struct Task* task]"
+Name = '''funcs.trainer_card.Task_BeginCardFlip'''
+Address = 0x8b254
+Format = '''`f|b8`[struct Task* task]'''
 
 [[FunctionAnchors]]
-Name = "funcs.trainer_card.Task_AnimateCardFlipUp"
-Address = 570688
-Format = "`f|b8`[struct Task* task]"
+Name = '''funcs.trainer_card.Task_AnimateCardFlipUp'''
+Address = 0x8b540
+Format = '''`f|b8`[struct Task* task]'''
 
 [[NamedAnchors]]
 Name = '''data.header.title'''

@@ -1,6 +1,6 @@
 """
 Shared hex editor for GBA ROM hacking.
-Supports pointer detection (0x08/0x09), follow, replace/insert mode, delete.
+Supports pointer detection (0x08/0x09), follow, incoming xref lists (.word vs BL), replace/insert mode, delete.
 ASCII/PCS (Pokemon GBA) encoding for the character pane.
 Optional Capstone disassembly (ARM7TDMI Thumb/ARM).
 """
@@ -105,10 +105,12 @@ except ImportError:
 _CAPSTONE_AVAILABLE = False
 try:
     from capstone import Cs, CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_THUMB
-    from capstone.arm import ARM_OP_MEM, ARM_REG_PC
+    from capstone.arm import ARM_OP_IMM, ARM_OP_MEM, ARM_REG_PC
     _CAPSTONE_AVAILABLE = True
 except ImportError:
-    pass
+    ARM_OP_IMM = None  # type: ignore[misc, assignment]
+    ARM_OP_MEM = None  # type: ignore[misc, assignment]
+    ARM_REG_PC = None  # type: ignore[misc, assignment]
 
 _PYGMENTS_AVAILABLE = False
 try:
@@ -125,7 +127,47 @@ GBA_EWRAM_END = 0x0203FFFF
 GBA_IWRAM_START = 0x03000000
 GBA_IWRAM_END = 0x03007FFF
 BYTES_PER_ROW = 16
+# Hex pane text layout: "RRRRRRRR  " (10) + caret strip (16) + "  " (2) + hex pairs…
+HEX_DISP_ADDR_END = 10
+HEX_DISP_CARET_START = 10
+HEX_DISP_CARET_END = 26  # exclusive
+HEX_DISP_HEX_START = 28  # column index of first hex digit for byte 0
 HEX_DIGITS = "0123456789ABCDEFabcdef"
+
+
+def _sign_extend_uint(v: int, bits: int) -> int:
+    """Sign-extend ``bits``-bit value ``v`` to a signed 32-bit integer."""
+    v &= (1 << bits) - 1
+    if v & (1 << (bits - 1)):
+        v -= 1 << bits
+    return v
+
+
+def thumb2_bl_immediate_target_gba(hw1: int, hw2: int, bl_instruction_addr: int) -> Optional[int]:
+    """
+    If (hw1, hw2) is a Thumb-2 ``BL`` immediate encoding, return the absolute GBA branch target.
+
+    ``bl_instruction_addr`` is the byte address of the **first** halfword of the 32-bit instruction
+    (must be 2-byte aligned). Uses ARM-Thumb PC rule: ``PC = address_of_BL + 4``.
+
+    This matches ROM scanning better than linear Capstone disassembly, which desynchronizes on data.
+    """
+    if ((hw1 >> 11) & 0x1F) != 0x1E:  # 11110
+        return None
+    if ((hw2 >> 11) & 0x1F) != 0x1F:  # 11111
+        return None
+    S = (hw1 >> 10) & 1
+    imm10 = hw1 & 0x3FF
+    J1 = (hw2 >> 13) & 1
+    J2 = (hw2 >> 11) & 1
+    imm11 = hw2 & 0x7FF
+    I1 = (~(J1 ^ S)) & 1
+    I2 = (~(J2 ^ S)) & 1
+    imm25 = (S << 24) | (I1 << 23) | (I2 << 22) | (imm10 << 12) | (imm11 << 1)
+    imm32 = _sign_extend_uint(imm25, 25)
+    # Thumb BL: branch address = PC + imm32, PC = Addr(BL) + 4
+    tgt = (bl_instruction_addr + 4 + imm32) & 0xFFFFFFFF
+    return tgt
 
 
 def _toml_named_anchor_address_hex_string(file_offset: int) -> str:
@@ -5217,6 +5259,11 @@ class HexEditorFrame(ttk.Frame):
         self._anchor_browser_path: List[str] = []
         self._ldr_pc_targets: Optional[Set[int]] = None
         self._ldr_pc_targets_valid = False
+        # Reverse refs: file offset T -> list of source file offsets (word pointers / BL sites)
+        self._xref_rom_word: Dict[int, List[int]] = {}
+        self._xref_bl: Dict[int, List[int]] = {}
+        self._xref_index_valid: bool = False
+        self._xref_rebuild_after_id: Optional[str] = None
         self._toml_path: Optional[str] = None
         self._toml_data: Dict[str, Any] = {}
         # When set, this file is loaded instead of auto-resolving {ROM}.toml (until cleared).
@@ -5285,8 +5332,8 @@ class HexEditorFrame(ttk.Frame):
         body.rowconfigure(0, weight=0)
         body.rowconfigure(1, weight=1)
 
-        hex_width = 10 + 3 * BYTES_PER_ROW - 1
-        hex_header_text = " " * 10 + "  ".join(f"{i:X}" for i in range(BYTES_PER_ROW))
+        hex_width = HEX_DISP_HEX_START + 3 * BYTES_PER_ROW - 1
+        hex_header_text = " " * HEX_DISP_HEX_START + "  ".join(f"{i:X}" for i in range(BYTES_PER_ROW))
         self._hex_header = ttk.Label(body, text=hex_header_text, font=("Consolas", 10))
         self._hex_header.grid(row=0, column=0, sticky="w", padx=(0, 0), pady=(0, 0))
 
@@ -5406,6 +5453,7 @@ class HexEditorFrame(ttk.Frame):
             self._anchor_frame.grid_remove()
 
         self._text.tag_configure("pointer", foreground="red")
+        self._text.tag_configure("xref_caret", foreground="#1565C0")
         self._text.tag_configure("sel_hex", background="#add8e6", foreground="black")
         self._text.tag_configure("cursor_byte", background="#e0e0e0")
         self._text_ascii.tag_configure("pointer", foreground="red")
@@ -5838,6 +5886,7 @@ class HexEditorFrame(ttk.Frame):
             self._data[start + i] = 0xFF
         self._modified = True
         self._ldr_pc_targets_valid = False
+        self._schedule_xref_rebuild()
         self._hackmew_mode = False
         self._asm_frame.configure(text=" Disassembly ")
         self._refresh_asm_selection()
@@ -6308,6 +6357,7 @@ class HexEditorFrame(ttk.Frame):
             self._data[off] = byte_val
             self._modified = True
             self._ldr_pc_targets_valid = False
+            self._schedule_xref_rebuild()
             self._refresh_visible()
             self._update_scrollbar()
             self._refresh_asm_selection()
@@ -6395,6 +6445,7 @@ class HexEditorFrame(ttk.Frame):
         self._data[pos:end] = data[:count]
         self._modified = True
         self._ldr_pc_targets_valid = False
+        self._schedule_xref_rebuild()
         self._nibble_pos = 0
         self._cursor_byte_offset = min(pos + count, len(self._data) - 1) if self._data else 0
         self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
@@ -6420,6 +6471,7 @@ class HexEditorFrame(ttk.Frame):
         self._data[pos:pos] = data
         self._modified = True
         self._ldr_pc_targets_valid = False
+        self._schedule_xref_rebuild()
         self._nibble_pos = 0
         self._cursor_byte_offset = min(pos + len(data), len(self._data) - 1)
         self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
@@ -6659,6 +6711,7 @@ class HexEditorFrame(ttk.Frame):
                 self._data[s + len(needle) : s + len(needle)] = eff_repl[len(needle) :]
             self._modified = True
             self._ldr_pc_targets_valid = False
+            self._schedule_xref_rebuild()
             self._cursor_byte_offset = min(s + len(eff_repl), len(self._data) - 1) if self._data else 0
             self._selection_start = self._cursor_byte_offset
             self._selection_end = self._cursor_byte_offset
@@ -6702,6 +6755,7 @@ class HexEditorFrame(ttk.Frame):
             if count > 0:
                 self._modified = True
                 self._ldr_pc_targets_valid = False
+                self._schedule_xref_rebuild()
                 self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
                 self._refresh_visible()
                 self._refresh_asm_selection()
@@ -6780,10 +6834,18 @@ class HexEditorFrame(ttk.Frame):
         self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW if self._data else 0
         self._visible_row_start = 0
         self._load_toml_for_rom()
+        self._invalidate_xref_index()
+        if self._xref_rebuild_after_id is not None:
+            try:
+                self.after_cancel(self._xref_rebuild_after_id)
+            except (tk.TclError, ValueError):
+                pass
+            self._xref_rebuild_after_id = None
         self._refresh_visible()
         self._update_scrollbar()
         self._refresh_asm_selection()
         self._text.focus_set()
+        self.after(200, self._xref_build_after_load)
         return True
 
     def save_file(self) -> bool:
@@ -7916,6 +7978,7 @@ Format = "`f|u8`[u8 arg0]"
         )
         if n:
             self._modified = True
+            self._schedule_xref_rebuild()
             self._refresh_visible()
         return n
 
@@ -7926,6 +7989,7 @@ Format = "`f|u8`[u8 arg0]"
             if offset + i < len(self._data):
                 self._data[offset + i] = b
         self._modified = True
+        self._schedule_xref_rebuild()
         self._refresh_visible()
 
     # ── File menu: static ROM imports (user-chosen offsets / FF gaps) ─
@@ -8984,13 +9048,22 @@ Format = "`f|u8`[u8 arg0]"
             rb = self._data[rs: rs + BYTES_PER_ROW]
             hx = " ".join(f"{b:02X}" for b in rb)
             asc = "".join(self._byte_to_char(b) for b in rb)
-            hex_lines.append(f"{rs:08X}  {hx.ljust(3 * BYTES_PER_ROW - 1)}\n")
+            carets: List[str] = []
+            for bi in range(BYTES_PER_ROW):
+                bo = rs + bi
+                has = False
+                if self._xref_index_valid:
+                    has = bo in self._xref_rom_word or bo in self._xref_bl
+                carets.append("›" if has else "·")
+            caret_str = "".join(carets)
+            hex_lines.append(f"{rs:08X}  {caret_str}  {hx.ljust(3 * BYTES_PER_ROW - 1)}\n")
             ascii_lines.append(f"|{asc}|\n")
         self._text.insert("1.0", "".join(hex_lines))
         self._text_ascii.insert("1.0", "".join(ascii_lines))
 
         # Pointer tags (both widgets)
         self._text.tag_remove("pointer", "1.0", tk.END)
+        self._text.tag_remove("xref_caret", "1.0", tk.END)
         self._text_ascii.tag_remove("pointer", "1.0", tk.END)
         vis_start = self._visible_row_start * BYTES_PER_ROW
         vis_end = row_end * BYTES_PER_ROW
@@ -9003,9 +9076,25 @@ Format = "`f|u8`[u8 arg0]"
                     bc = bo % BYTES_PER_ROW
                     if self._visible_row_start <= br < row_end:
                         dr = br - self._visible_row_start + 1
-                        self._text.tag_add("pointer", f"{dr}.{10 + bc * 3}", f"{dr}.{12 + bc * 3}")
+                        self._text.tag_add(
+                            "pointer",
+                            f"{dr}.{HEX_DISP_HEX_START + bc * 3}",
+                            f"{dr}.{HEX_DISP_HEX_START + 2 + bc * 3}",
+                        )
                         self._text_ascii.tag_add("pointer", f"{dr}.{1 + bc}", f"{dr}.{2 + bc}")
             off += 4
+        # Blue carets (incoming refs)
+        for row in range(self._visible_row_start, row_end):
+            rs = row * BYTES_PER_ROW
+            dr = row - self._visible_row_start + 1
+            for bi in range(BYTES_PER_ROW):
+                bo = rs + bi
+                if self._xref_index_valid and (bo in self._xref_rom_word or bo in self._xref_bl):
+                    cc = HEX_DISP_CARET_START + bi
+                    self._text.tag_add("xref_caret", f"{dr}.{cc}", f"{dr}.{cc + 1}")
+
+        self._text.tag_raise("xref_caret")
+        self._text.tag_raise("pointer")
 
         self._update_cursor_display()
 
@@ -9018,7 +9107,7 @@ Format = "`f|u8`[u8 arg0]"
         if fr < self._visible_row_start or fr >= self._visible_row_start + self._visible_row_count:
             return None
         dr = fr - self._visible_row_start + 1
-        return f"{dr}.{10 + (offset % BYTES_PER_ROW) * 3}"
+        return f"{dr}.{HEX_DISP_HEX_START + (offset % BYTES_PER_ROW) * 3}"
 
     def _index_to_offset(self, index: str) -> Optional[int]:
         """Map hex widget index to byte offset. Address (col 0-9) maps to first byte of row."""
@@ -9031,10 +9120,15 @@ Format = "`f|u8`[u8 arg0]"
         if ln < 1 or not self._data:
             return None
         fr = self._visible_row_start + (ln - 1)
-        if cn < 10:
+        if cn < HEX_DISP_ADDR_END:
+            off = fr * BYTES_PER_ROW
+        elif cn < HEX_DISP_CARET_END:
+            bc = cn - HEX_DISP_CARET_START
+            off = fr * BYTES_PER_ROW + min(bc, BYTES_PER_ROW - 1)
+        elif cn < HEX_DISP_HEX_START:
             off = fr * BYTES_PER_ROW
         else:
-            bc = (cn - 10) // 3
+            bc = (cn - HEX_DISP_HEX_START) // 3
             if bc >= BYTES_PER_ROW:
                 off = fr * BYTES_PER_ROW + BYTES_PER_ROW - 1
             else:
@@ -9278,13 +9372,27 @@ Format = "`f|u8`[u8 arg0]"
             self._on_click(event)
             return "break"
 
-        # Determine if click is on address column (col < 10) vs hex data
         try:
             _, cn = idx.split(".")
-            on_addr_col = int(cn) < 10
+            cn_i = int(cn)
         except (ValueError, TypeError):
-            on_addr_col = False
-        if not on_addr_col:
+            cn_i = HEX_DISP_HEX_START
+        # Caret strip (blue ›): show incoming xref picker
+        if HEX_DISP_CARET_START <= cn_i < HEX_DISP_CARET_END:
+            try:
+                line, _ = idx.split(".")
+                ln = int(line)
+                fr = self._visible_row_start + (ln - 1)
+                bc = cn_i - HEX_DISP_CARET_START
+                tgt = fr * BYTES_PER_ROW + bc
+            except (ValueError, TypeError):
+                tgt = off
+            self._show_xref_dialog(tgt)
+            return "break"
+
+        on_addr_col = cn_i < HEX_DISP_ADDR_END
+
+        if not on_addr_col and cn_i >= HEX_DISP_HEX_START:
             # Hex data: double-click a GBA pointer word → jump to target (overrides table/struct highlight)
             ptr_start = (off // 4) * 4
             if self._get_pointer_at_offset(ptr_start) is not None:
@@ -9324,6 +9432,11 @@ Format = "`f|u8`[u8 arg0]"
                 ptr_start = s
         if ptr_start is not None:
             menu.add_command(label="Follow pointer", command=lambda: self._follow_pointer_at(ptr_start))
+        if off is not None:
+            menu.add_command(
+                label="Incoming references to this byte…",
+                command=lambda o=off: self._show_xref_dialog(o),
+            )
         menu.add_command(label="Select all", command=lambda: self._select_all())
         menu.add_command(label="Go to offset...", command=self._on_goto_offset)
         menu.add_separator()
@@ -9431,6 +9544,177 @@ Format = "`f|u8`[u8 arg0]"
             return True
         return False
 
+    def _invalidate_xref_index(self) -> None:
+        self._xref_index_valid = False
+        self._xref_rom_word.clear()
+        self._xref_bl.clear()
+
+    def _xref_build_after_load(self) -> None:
+        """Build xref maps after opening a ROM (deferred so the window appears first)."""
+        if not self._data:
+            return
+        self._build_xref_index()
+        self._refresh_visible()
+        self._update_cursor_display()
+
+    def _schedule_xref_rebuild(self) -> None:
+        """Debounce full xref scan (ROM words + BL) after ROM edits."""
+        self._invalidate_xref_index()
+        if self._xref_rebuild_after_id is not None:
+            try:
+                self.after_cancel(self._xref_rebuild_after_id)
+            except (tk.TclError, ValueError):
+                pass
+            self._xref_rebuild_after_id = None
+        if not self._data:
+            return
+
+        def _run() -> None:
+            self._xref_rebuild_after_id = None
+            if not self._data:
+                return
+            self._build_xref_index()
+            self._refresh_visible()
+            self._update_cursor_display()
+
+        self._xref_rebuild_after_id = self.after(450, _run)
+
+    def _build_xref_index(self) -> None:
+        """Map each target file offset → sources: word-aligned ROM pointers, and Thumb BL/BLX sites (separate)."""
+        self._xref_rom_word.clear()
+        self._xref_bl.clear()
+        n = len(self._data)
+        if n <= 0:
+            self._xref_index_valid = True
+            return
+        data = bytes(self._data)
+        for off in range(0, n - 3, 4):
+            ptr = int.from_bytes(data[off : off + 4], "little")
+            if (ptr >> 24) in (0x08, 0x09):
+                tgt = ptr - GBA_ROM_BASE
+                if 0 <= tgt < n:
+                    self._xref_rom_word.setdefault(tgt, []).append(off)
+        # Thumb-2 BL: scan every 2 bytes and decode immediates manually. Linear Capstone disassembly
+        # misses many BLs in mixed data/code ROMs because it loses instruction alignment.
+        for off in range(0, n - 3, 2):
+            hw1 = data[off] | (data[off + 1] << 8)
+            hw2 = data[off + 2] | (data[off + 3] << 8)
+            bl_addr = GBA_ROM_BASE + off
+            tgt_gba = thumb2_bl_immediate_target_gba(hw1, hw2, bl_addr)
+            if tgt_gba is None:
+                continue
+            if GBA_ROM_BASE <= tgt_gba <= GBA_ROM_MAX:
+                tgt_fo = tgt_gba - GBA_ROM_BASE
+                if 0 <= tgt_fo < n:
+                    self._xref_bl.setdefault(tgt_fo, []).append(off)
+        self._xref_index_valid = True
+
+    def _ensure_xref_index(self) -> None:
+        if not self._data:
+            return
+        if not self._xref_index_valid:
+            self._build_xref_index()
+
+    def _show_xref_dialog(self, target_off: int) -> None:
+        """List incoming .word pointers and BL instructions; double-click to jump to source."""
+        if not self._data:
+            return
+        self._ensure_xref_index()
+        target_off = max(0, min(target_off, len(self._data) - 1))
+        words = sorted(set(self._xref_rom_word.get(target_off, [])))
+        bls = sorted(set(self._xref_bl.get(target_off, [])))
+        if not words and not bls:
+            messagebox.showinfo(
+                "Cross-references",
+                f"No references to file offset 0x{target_off:08X}\n"
+                f"(GBA 0x{target_off + GBA_ROM_BASE:08X}).",
+                parent=self.winfo_toplevel(),
+            )
+            return
+        top = tk.Toplevel(self.winfo_toplevel())
+        top.title(f"Refs to 0x{target_off:08X} (GBA 0x{target_off + GBA_ROM_BASE:08X})")
+        top.transient(self.winfo_toplevel())
+        ttk.Label(
+            top,
+            text="ROM .word pointers (0x08…… / 0x09……) that point here:",
+            font=("Consolas", 9),
+        ).grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
+        lb_w = tk.Listbox(top, font=("Consolas", 9), height=8, width=72, selectmode=tk.SINGLE)
+        lb_w.grid(row=1, column=0, sticky="nsew", padx=6, pady=2)
+        sw = ttk.Scrollbar(top, command=lb_w.yview)
+        sw.grid(row=1, column=1, sticky="ns", pady=2)
+        lb_w.configure(yscrollcommand=sw.set)
+        for s in words:
+            lb_w.insert(tk.END, f"file 0x{s:08X}  (word at start of pointer)  →  GBA 0x{s + GBA_ROM_BASE:08X}")
+        if not words:
+            lb_w.insert(tk.END, "(none)")
+
+        ttk.Label(
+            top,
+            text="Thumb BL / BLX instructions that branch here (separate from .word pointers):",
+            font=("Consolas", 9),
+        ).grid(row=2, column=0, sticky="w", padx=6, pady=(8, 2))
+        lb_b = tk.Listbox(top, font=("Consolas", 9), height=8, width=72, selectmode=tk.SINGLE)
+        lb_b.grid(row=3, column=0, sticky="nsew", padx=6, pady=2)
+        sb = ttk.Scrollbar(top, command=lb_b.yview)
+        sb.grid(row=3, column=1, sticky="ns", pady=2)
+        lb_b.configure(yscrollcommand=sb.set)
+        for s in bls:
+            lb_b.insert(tk.END, f"file 0x{s:08X}  (start of BL/BLX)  →  GBA 0x{s + GBA_ROM_BASE:08X}")
+        if not bls:
+            lb_b.insert(tk.END, "(none)")
+
+        top.columnconfigure(0, weight=1)
+        top.rowconfigure(1, weight=1)
+        top.rowconfigure(3, weight=1)
+
+        def _jump_from(off: int) -> None:
+            if off < 0 or off >= len(self._data):
+                return
+            self._do_goto(off)
+            top.destroy()
+
+        def _on_w_double(_e: tk.Event) -> None:
+            if not words:
+                return
+            i = lb_w.curselection()
+            if not i:
+                return
+            _jump_from(words[i[0]])
+
+        def _on_b_double(_e: tk.Event) -> None:
+            if not bls:
+                return
+            i = lb_b.curselection()
+            if not i:
+                return
+            _jump_from(bls[i[0]])
+
+        lb_w.bind("<Double-Button-1>", _on_w_double)
+        lb_b.bind("<Double-Button-1>", _on_b_double)
+
+        def _go_word_btn() -> None:
+            if not words:
+                return
+            i = lb_w.curselection()
+            if not i:
+                return
+            _jump_from(words[i[0]])
+
+        def _go_bl_btn() -> None:
+            if not bls:
+                return
+            i = lb_b.curselection()
+            if not i:
+                return
+            _jump_from(bls[i[0]])
+
+        bf = ttk.Frame(top)
+        bf.grid(row=4, column=0, columnspan=2, pady=6)
+        ttk.Button(bf, text="Go to selected (.word)", command=_go_word_btn).pack(side=tk.LEFT, padx=4)
+        ttk.Button(bf, text="Go to selected (BL)", command=_go_bl_btn).pack(side=tk.LEFT, padx=4)
+        ttk.Button(bf, text="Close", command=top.destroy).pack(side=tk.LEFT, padx=12)
+
     # ── Dialogs ──────────────────────────────────────────────────────
 
     def _on_goto_offset(self) -> None:
@@ -9498,6 +9782,7 @@ Format = "`f|u8`[u8 arg0]"
                 self._data.insert(self._cursor_byte_offset, 0)
                 self._modified = True
                 self._ldr_pc_targets_valid = False
+                self._schedule_xref_rebuild()
             b = self._data[self._cursor_byte_offset]
             if self._nibble_pos == 0:
                 self._data[self._cursor_byte_offset] = (b & 0x0F) | (digit << 4)
@@ -9508,6 +9793,7 @@ Format = "`f|u8`[u8 arg0]"
                 self._cursor_byte_offset = min(self._cursor_byte_offset + 1, len(self._data) - 1)
             self._modified = True
             self._ldr_pc_targets_valid = False
+            self._schedule_xref_rebuild()
             self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
             self._ensure_cursor_visible()
             self._refresh_visible()
@@ -9531,6 +9817,7 @@ Format = "`f|u8`[u8 arg0]"
                 self._cursor_byte_offset = min(self._cursor_byte_offset, len(self._data) - 1)
         self._modified = True
         self._ldr_pc_targets_valid = False
+        self._schedule_xref_rebuild()
         self._nibble_pos = 0
         self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
         self._ensure_cursor_visible()
@@ -9549,6 +9836,7 @@ Format = "`f|u8`[u8 arg0]"
             self._cursor_byte_offset -= 1
             self._modified = True
             self._ldr_pc_targets_valid = False
+            self._schedule_xref_rebuild()
             self._nibble_pos = 0
             self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
             self._ensure_cursor_visible()
