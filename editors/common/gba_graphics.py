@@ -978,6 +978,80 @@ def raw_gba_palette_to_rgb888_list(pal_data: bytes) -> List[Tuple[int, int, int]
     return colors
 
 
+SPRITE_PALETTE_ROM_BYTE_COUNT = {4: 32, 6: 128, 8: 512}
+"""Raw GBA RGB555 palette size at ROM: 16 / 64 / 256 colors × 2 bytes."""
+
+
+def read_raw_sprite_palette_at_rom_offset(
+    rom: bytes,
+    file_off: int,
+    palette_bpp: int,
+) -> Tuple[Optional[bytes], str]:
+    """
+    Read a contiguous GBA palette at ``file_off``: 32 / 128 / 512 bytes for 4 / 6 / 8 bpp display modes.
+    (6bpp sprites index 64 colors → 128 bytes.)
+    """
+    if palette_bpp not in SPRITE_PALETTE_ROM_BYTE_COUNT:
+        return None, "Palette mode must be 4, 6, or 8 bpp."
+    need = SPRITE_PALETTE_ROM_BYTE_COUNT[palette_bpp]
+    if file_off < 0:
+        return None, "Offset must be ≥ 0."
+    if file_off >= len(rom):
+        return None, "Offset past end of ROM."
+    if file_off + need > len(rom):
+        return None, f"Need {need} bytes at offset (palette {palette_bpp}bpp); ROM ends early."
+    return bytes(rom[file_off : file_off + need]), ""
+
+
+def read_sprite_preview_palette_at_rom_offset(
+    rom: bytes,
+    file_off: int,
+    palette_bpp: int,
+    *,
+    lz77: bool,
+) -> Tuple[Optional[bytes], str]:
+    """
+    Palette bytes for sprite preview at ``file_off``: either **raw** RGB555 (same as
+    :func:`read_raw_sprite_palette_at_rom_offset`) or **LZ77-compressed** (GBA type ``0x10``)
+    data starting at ``file_off``, decompressed and then truncated to 32 / 128 / 512 bytes.
+    """
+    if palette_bpp not in SPRITE_PALETTE_ROM_BYTE_COUNT:
+        return None, "Palette mode must be 4, 6, or 8 bpp."
+    need = SPRITE_PALETTE_ROM_BYTE_COUNT[palette_bpp]
+    if not lz77:
+        return read_raw_sprite_palette_at_rom_offset(rom, file_off, palette_bpp)
+    if file_off < 0:
+        return None, "Offset must be ≥ 0."
+    if file_off >= len(rom):
+        return None, "Offset past end of ROM."
+    lz_blob = bytes(rom[file_off:])
+    if len(lz_blob) < 4:
+        return None, "LZ77 data too short (need at least 4 bytes for a header)."
+    try:
+        dec = decompress_gba_lz77(lz_blob)
+    except ValueError as e:
+        return None, f"LZ77 decompress failed: {e}"
+    if len(dec) < need:
+        return None, (
+            f"Decompressed data too short for {palette_bpp}bpp palette: need {need} bytes, "
+            f"got {len(dec)} after LZ77."
+        )
+    return bytes(dec[:need]), ""
+
+
+def synthetic_palette_spec_for_sprite_import_write(sprite_bpp: int) -> GraphicsAnchorSpec:
+    """
+    Minimal palette :class:`GraphicsAnchorSpec` for ``measure_palette_rom_footprint`` /
+    ``prepare_palette_rom_body_from_import`` when writing to a raw file offset.
+    """
+    if sprite_bpp == 4:
+        return GraphicsAnchorSpec(kind="palette", bpp=4, lz=False, palette_4_indices=None)
+    if sprite_bpp == 6:
+        # 128 bytes = 64 colors (two 32-byte rows in ucp8 terms)
+        return GraphicsAnchorSpec(kind="palette", bpp=8, lz=False, palette_hex_digit="4")
+    return GraphicsAnchorSpec(kind="palette", bpp=8, lz=False, palette_hex_digit="1")
+
+
 def pret_pad_palette_over_16_colors(colors: List[Tuple[int, int, int]]) -> List[Tuple[int, int, int]]:
     """pret ``ReadGbaPalette``: if more than 16 colors, pad with black to 256 entries."""
     if len(colors) <= 16:
@@ -1940,6 +2014,7 @@ def decode_graphics_anchor_to_png(
     external_tileset_spec: Optional[GraphicsAnchorSpec] = None,
     external_tileset_base_off: Optional[int] = None,
     sprite_layout_height: Optional[int] = None,
+    override_sprite_palette_bytes: Optional[bytes] = None,
 ) -> Tuple[Optional[str], str]:
     """
     Decode a standalone graphics NamedAnchor (palette-only returns None PNG; sprite/tilemap return PNG path).
@@ -1952,6 +2027,9 @@ def decode_graphics_anchor_to_png(
 
     For **sprites**, ``sprite_layout_height`` sets the number of **tile rows** (``H``); width is
     ``ceil(tile_count / H)``. If omitted, variable strips use one row; fixed formats use TOML ``WxH``.
+
+    If ``override_sprite_palette_bytes`` is set (raw GBA RGB555 data), it is used for sprite preview instead
+    of ``external_palette_*`` (length must match sprite bpp: 32 / 128 / 512 bytes).
     """
     logs: List[str] = []
     if spec.kind == "palette":
@@ -2037,7 +2115,17 @@ def decode_graphics_anchor_to_png(
     td = tempfile.mkdtemp(prefix="ch_gfx_")
     stem = "gfx"
     try:
-        if external_palette_spec is not None and external_palette_base_off is not None:
+        if override_sprite_palette_bytes is not None:
+            need = SPRITE_PALETTE_ROM_BYTE_COUNT.get(spec.bpp)
+            if need is None:
+                return None, f"Unsupported sprite bpp for palette override: {spec.bpp}.\n"
+            if len(override_sprite_palette_bytes) < need:
+                return None, (
+                    f"Preview palette override too short: need {need} bytes for {spec.bpp}bpp sprite, "
+                    f"have {len(override_sprite_palette_bytes)}.\n"
+                )
+            pal_bytes = bytes(override_sprite_palette_bytes[:need])
+        elif external_palette_spec is not None and external_palette_base_off is not None:
             praw = bytes(
                 rom[
                     external_palette_base_off : external_palette_base_off
@@ -2052,7 +2140,12 @@ def decode_graphics_anchor_to_png(
                 external_palette_spec, pal_bytes, sprite_bpp=spec.bpp
             )
         else:
-            pal_bytes = bytes(128) if spec.bpp == 6 else bytes(32)
+            if spec.bpp == 8:
+                pal_bytes = bytes(512)
+            elif spec.bpp == 6:
+                pal_bytes = bytes(128)
+            else:
+                pal_bytes = bytes(32)
 
         per = sprite_bytes_per_tile(spec.bpp)
         nt = len(tiles) // per
@@ -2092,9 +2185,13 @@ def decode_sprite_at_pointer(
     palette_base_off: Optional[int],
     *,
     sprite_layout_height: Optional[int] = None,
+    override_sprite_palette_bytes: Optional[bytes] = None,
 ) -> Tuple[Optional[str], str]:
     """
     Decode sprite from ROM at sprite_file_off using optional external palette anchor.
+
+    If ``override_sprite_palette_bytes`` is set (raw GBA RGB555 data), it is used instead of the
+    resolved palette anchor (length must match sprite bpp: 32 / 128 / 512 bytes).
     """
     logs: List[str] = []
     if sprite_file_off < 0 or sprite_file_off >= len(rom):
@@ -2107,7 +2204,17 @@ def decode_sprite_at_pointer(
 
     td = tempfile.mkdtemp(prefix="ch_gfx_sp_")
     try:
-        if palette_spec is not None and palette_base_off is not None:
+        if override_sprite_palette_bytes is not None:
+            need = SPRITE_PALETTE_ROM_BYTE_COUNT.get(spec.bpp)
+            if need is None:
+                return None, f"Unsupported sprite bpp for palette override: {spec.bpp}.\n"
+            if len(override_sprite_palette_bytes) < need:
+                return None, (
+                    f"Preview palette override too short: need {need} bytes for {spec.bpp}bpp sprite, "
+                    f"have {len(override_sprite_palette_bytes)}.\n"
+                )
+            pal_bytes = bytes(override_sprite_palette_bytes[:need])
+        elif palette_spec is not None and palette_base_off is not None:
             praw = bytes(rom[palette_base_off : palette_base_off + min(len(rom) - palette_base_off, 1 << 20)])
             try:
                 pal_bytes = extract_palette_bytes(palette_spec, praw)
@@ -2115,7 +2222,12 @@ def decode_sprite_at_pointer(
                 return None, f"External palette decode error: {e}\n"
             pal_bytes = palette_bytes_for_gbagfx(palette_spec, pal_bytes, sprite_bpp=spec.bpp)
         else:
-            pal_bytes = bytes(128) if spec.bpp == 6 else bytes(32)
+            if spec.bpp == 8:
+                pal_bytes = bytes(512)
+            elif spec.bpp == 6:
+                pal_bytes = bytes(128)
+            else:
+                pal_bytes = bytes(32)
 
         per = sprite_bytes_per_tile(spec.bpp)
         nt = len(tiles) // per

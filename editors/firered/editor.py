@@ -144,7 +144,15 @@ class FireRedEditor:
             canvas.configure(scrollregion=canvas.bbox("all"))
 
         def _sync_canvas(e):
-            canvas.itemconfigure(wid, width=e.width, height=e.height)
+            # Size inner to at least canvas width but allow wider content so widgets don't paint into the next tool slot.
+            try:
+                req_w = inner.winfo_reqwidth()
+                req_h = inner.winfo_reqheight()
+            except tk.TclError:
+                req_w, req_h = 0, 0
+            w = max(e.width, req_w)
+            h = max(e.height, req_h)
+            canvas.itemconfigure(wid, width=w, height=h)
             canvas.configure(scrollregion=canvas.bbox("all"))
 
         inner.bind("<Configure>", _sync_inner)

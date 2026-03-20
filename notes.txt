@@ -1,11 +1,14 @@
-fix tilemap/tileset logic
-load palette from offset option
-palette editing/insertion
-automatic resize/index/palette adjust import mode
+lookup pointers carot
 c injection
+automatic resize/index/palette adjust import mode
+python scripting
+addresses should be in hex (tomli-w)
+fix tilemap/tileset logic
+get rid of second scrollbar (tools)
 undo (ctrl + z)
 port firered editor code to hex_editor.py
 generate toml (other option)
+palette replacement
 trainer team editing
 overworld sprite editing
 egg moves

@@ -44,11 +44,13 @@ from editors.common.gba_graphics import (
     parse_tilemap_dimension_spec,
     prepare_palette_rom_body_from_import,
     raw_gba_palette_to_rgb888_list,
+    read_sprite_preview_palette_at_rom_offset,
     resolve_gba_pointer,
     rewrite_standalone_sprite_format_dimensions,
     suggest_sprite_grid_for_tile_count,
     sprite_bytes_per_tile,
     sprite_import_png,
+    synthetic_palette_spec_for_sprite_import_write,
     tilemap_png_to_tileset_map_palette,
 )
 
@@ -1250,6 +1252,9 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._pal8_colors: Optional[List[Tuple[int, int, int]]] = None
         self._gfx_filter_job: Optional[str] = None
         self._gfx_sprite_anchor_name: Optional[str] = None
+        self._gfx_decode_anchor_name: Optional[str] = None
+        # (file_off, palette_bpp 4|6|8, lz77: read palette from LZ-compressed blob at offset)
+        self._sprite_palette_override: Optional[Tuple[int, int, bool]] = None
         self._build()
 
     def _build(self) -> None:
@@ -1260,12 +1265,14 @@ class GraphicsPreviewFrame(ttk.Frame):
         top.columnconfigure(1, weight=1)
         ttk.Label(top, text="Graphics:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w", padx=(0, 4))
         self._combo = ttk.Combobox(top, font=("Consolas", 8), state="readonly")
-        self._combo.grid(row=0, column=1, sticky="ew", padx=(0, 4))
+        self._combo.grid(row=0, column=1, columnspan=3, sticky="ew", padx=(0, 4))
         self._combo.bind("<<ComboboxSelected>>", lambda e: self._decode_selected())
-        ttk.Button(top, text="Decode", command=self._decode_selected).grid(row=0, column=2, sticky="e", padx=(0, 4))
-        ttk.Button(top, text="Import graphic…", command=self._on_import_graphic).grid(row=0, column=3, sticky="e")
+        gfx_btn_row = ttk.Frame(top)
+        gfx_btn_row.grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        ttk.Button(gfx_btn_row, text="Decode", command=self._decode_selected).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(gfx_btn_row, text="Import graphic…", command=self._on_import_graphic).pack(side=tk.LEFT)
         srow = ttk.Frame(top)
-        srow.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(2, 0))
+        srow.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(2, 0))
         srow.columnconfigure(1, weight=1)
         ttk.Label(srow, text="Search:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w", padx=(0, 4))
         self._combo_search_var = tk.StringVar()
@@ -1273,7 +1280,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._combo_search_var.trace_add("write", lambda *_: self._schedule_gfx_combo_filter())
 
         self._table_nav = ttk.Frame(top)
-        self._table_nav.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(2, 0))
+        self._table_nav.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(2, 0))
         self._table_nav.grid_remove()
         ttk.Label(self._table_nav, text="Table row:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w")
         self._table_idx_spin = ttk.Spinbox(
@@ -1291,7 +1298,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._table_row_label.grid(row=0, column=2, sticky="w")
 
         self._sprite_layout_row = ttk.Frame(top)
-        self._sprite_layout_row.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        self._sprite_layout_row.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self._sprite_layout_row.grid_remove()
         ttk.Label(self._sprite_layout_row, text="Tile rows (H):", font=("Consolas", 8)).grid(
             row=0, column=0, sticky="w", padx=(0, 4)
@@ -1310,6 +1317,62 @@ class GraphicsPreviewFrame(ttk.Frame):
         ttk.Button(self._sprite_layout_row, text="Apply layout", command=self._decode_selected).grid(
             row=0, column=2, sticky="w"
         )
+
+        self._sprite_pal_override_row = ttk.Frame(top)
+        self._sprite_pal_override_row.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        self._sprite_pal_override_row.grid_remove()
+        self._sprite_pal_override_row.columnconfigure(1, weight=1)
+        ttk.Label(
+            self._sprite_pal_override_row,
+            text="Preview palette (ROM):",
+            font=("Consolas", 8),
+        ).grid(row=0, column=0, sticky="nw", padx=(0, 4), pady=(2, 0))
+        self._sprite_pal_off_var = tk.StringVar(value="")
+        ttk.Entry(
+            self._sprite_pal_override_row,
+            textvariable=self._sprite_pal_off_var,
+            width=12,
+            font=("Consolas", 8),
+        ).grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=(2, 0))
+        ttk.Label(self._sprite_pal_override_row, text="bpp:", font=("Consolas", 8)).grid(
+            row=1, column=0, sticky="w", padx=(0, 4), pady=(2, 0)
+        )
+        self._sprite_pal_bpp_var = tk.StringVar(value="4")
+        self._sprite_pal_bpp_combo = ttk.Combobox(
+            self._sprite_pal_override_row,
+            textvariable=self._sprite_pal_bpp_var,
+            values=("4", "6", "8"),
+            width=3,
+            state="readonly",
+            font=("Consolas", 8),
+        )
+        self._sprite_pal_bpp_combo.grid(row=1, column=1, sticky="w", padx=(0, 12), pady=(2, 0))
+        ttk.Label(self._sprite_pal_override_row, text="Data:", font=("Consolas", 8)).grid(
+            row=1, column=2, sticky="w", padx=(0, 4), pady=(2, 0)
+        )
+        self._sprite_pal_storage_var = tk.StringVar(value="raw")
+        ttk.Combobox(
+            self._sprite_pal_override_row,
+            textvariable=self._sprite_pal_storage_var,
+            values=("raw", "lz77"),
+            width=7,
+            state="readonly",
+            font=("Consolas", 8),
+        ).grid(row=1, column=3, sticky="w", padx=(0, 8), pady=(2, 0))
+        pal_btns = ttk.Frame(self._sprite_pal_override_row)
+        pal_btns.grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        ttk.Button(pal_btns, text="Load", command=self._on_sprite_preview_palette_load).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        ttk.Button(pal_btns, text="Clear", command=self._on_sprite_preview_palette_clear).pack(side=tk.LEFT)
+        self._sprite_pal_status = ttk.Label(
+            self._sprite_pal_override_row,
+            text="",
+            font=("Consolas", 8),
+            foreground="#060",
+            wraplength=320,
+        )
+        self._sprite_pal_status.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
 
         self._pal4_row = ttk.Frame(self)
         self._pal4_row.grid(row=1, column=0, sticky="w", pady=(0, 2))
@@ -1446,7 +1509,11 @@ class GraphicsPreviewFrame(ttk.Frame):
             self._hide_palette_8_ui()
             self._table_nav.grid_remove()
             self._sprite_layout_row.grid_remove()
+            self._sprite_pal_override_row.grid_remove()
             self._gfx_sprite_anchor_name = None
+            self._gfx_decode_anchor_name = None
+            self._sprite_palette_override = None
+            self._sprite_pal_status.configure(text="")
             self._set_log("Graphics: built-in decode (pret gfx.c palette/tiles + Pillow).\n(no graphics NamedAnchors in TOML)")
             self._clear_image()
 
@@ -1616,6 +1683,10 @@ class GraphicsPreviewFrame(ttk.Frame):
         rom = self._hex.get_data()
         if not rom:
             return
+        if self._gfx_decode_anchor_name is not None and name != self._gfx_decode_anchor_name:
+            self._sprite_palette_override = None
+            self._sprite_pal_status.configure(text="")
+        self._gfx_decode_anchor_name = name
         info = next((a for a in self._hex.get_graphics_anchors() if str(a["name"]) == name), None)
         if not info:
             self._set_log("Anchor missing.")
@@ -1637,6 +1708,7 @@ class GraphicsPreviewFrame(ttk.Frame):
 
         if spec.kind == "sprite":
             self._sprite_layout_row.grid()
+            self._sprite_pal_override_row.grid()
             if self._gfx_sprite_anchor_name != name:
                 self._gfx_sprite_anchor_name = name
                 if spec.width_tiles == 0 and spec.height_tiles == 0:
@@ -1661,6 +1733,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                 self._sprite_rows_spin.configure(from_=1, to=9999)
         else:
             self._sprite_layout_row.grid_remove()
+            self._sprite_pal_override_row.grid_remove()
             self._gfx_sprite_anchor_name = None
 
         logs: List[str] = []
@@ -1778,7 +1851,28 @@ class GraphicsPreviewFrame(ttk.Frame):
                 self._clear_image("(tilemap PNG not produced)")
             return
 
-        if spec.kind == "sprite" and getattr(spec, "palette_anchor_name", None):
+        override_pal_bytes: Optional[bytes] = None
+        if spec.kind == "sprite" and self._sprite_palette_override is not None:
+            ov_off, ov_bpp, ov_lz = self._sprite_palette_override
+            if ov_bpp != spec.bpp:
+                logs.append(
+                    f"Preview palette override ignored: loaded {ov_bpp}bpp data but this sprite is {spec.bpp}bpp.\n"
+                )
+            else:
+                raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
+                    bytes(rom), ov_off, ov_bpp, lz77=ov_lz
+                )
+                if raw_ov is None:
+                    logs.append(f"Preview palette override: {oerr}\n")
+                else:
+                    override_pal_bytes = raw_ov
+                    src = "LZ77→" if ov_lz else "raw "
+                    logs.append(
+                        f"Preview palette: {src}file offset 0x{ov_off:X} ({ov_bpp}bpp, {len(raw_ov)} bytes); "
+                        f"linked |palette ignored for preview.\n"
+                    )
+
+        if spec.kind == "sprite" and getattr(spec, "palette_anchor_name", None) and override_pal_bytes is None:
             pan = spec.palette_anchor_name
             ext_ps, ext_pb, pal_notes = self._hex.resolve_palette_for_graphics_row(pan, tbl_idx)
             if ext_ps is None or ext_pb is None:
@@ -1797,6 +1891,7 @@ class GraphicsPreviewFrame(ttk.Frame):
             external_palette_spec=ext_ps,
             external_palette_base_off=ext_pb,
             sprite_layout_height=layout_h,
+            override_sprite_palette_bytes=override_pal_bytes,
         )
         logs.append(log_pre + log)
         self._set_log("\n".join(logs))
@@ -1804,6 +1899,61 @@ class GraphicsPreviewFrame(ttk.Frame):
             self._try_show_image(png_path)
         else:
             self._clear_image("(sprite PNG not produced)")
+
+    def _on_sprite_preview_palette_load(self) -> None:
+        name = self._combo.get().strip()
+        if not name:
+            messagebox.showinfo("Preview palette", "Select a graphics NamedAnchor first.")
+            return
+        rom = self._hex.get_data()
+        if not rom:
+            messagebox.showwarning("Preview palette", "No ROM loaded.")
+            return
+        info = next((a for a in self._hex.get_graphics_anchors() if str(a["name"]) == name), None)
+        if not info or info["spec"].kind != "sprite":
+            messagebox.showinfo("Preview palette", "Select a sprite anchor (uct/lzt/ucs/lzs…).")
+            return
+        sp = info["spec"]
+        s = self._sprite_pal_off_var.get().strip()
+        off, err = parse_rom_file_offset(s)
+        if off is None:
+            messagebox.showwarning("Preview palette", err or "Invalid offset.")
+            return
+        try:
+            pb = int(str(self._sprite_pal_bpp_var.get()))
+        except (ValueError, tk.TclError):
+            pb = 4
+        if pb not in (4, 6, 8):
+            messagebox.showwarning("Preview palette", "Select palette mode 4, 6, or 8 bpp.")
+            return
+        if pb != sp.bpp:
+            messagebox.showerror(
+                "Preview palette",
+                f"This sprite is {sp.bpp}bpp; set the palette mode to {sp.bpp}bpp "
+                f"(4→16 colors, 6→64, 8→256).",
+            )
+            return
+        use_lz = str(self._sprite_pal_storage_var.get()).strip().lower() == "lz77"
+        raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(rom), off, pb, lz77=use_lz)
+        if raw is None:
+            messagebox.showerror("Preview palette", rerr or "Could not read palette bytes.")
+            return
+        self._sprite_palette_override = (off, pb, use_lz)
+        src = "LZ77 at offset" if use_lz else "Raw bytes at"
+        self._sprite_pal_status.configure(
+            text=(
+                f"{src} 0x{off:X} — {pb}bpp preview ({len(raw)} bytes decoded). "
+                "Import still writes uncompressed palette bytes unless the anchor uses LZ in TOML."
+            ),
+            foreground="#060",
+        )
+        self._gfx_decode_anchor_name = name
+        self._decode_selected()
+
+    def _on_sprite_preview_palette_clear(self) -> None:
+        self._sprite_palette_override = None
+        self._sprite_pal_status.configure(text="")
+        self._decode_selected()
 
     def _gfx_import_write_blob(
         self,
@@ -1996,56 +2146,70 @@ class GraphicsPreviewFrame(ttk.Frame):
                 )
 
         pan = getattr(spec, "palette_anchor_name", None)
-        if spec.bpp == 8:
-            if not pan:
-                messagebox.showerror(
-                    "Import graphic",
-                    "8bpp sprites need a linked palette NamedAnchor (|palette… in TOML).",
+        ov = self._sprite_palette_override
+        use_pal_override = ov is not None and ov[1] == spec.bpp
+        if use_pal_override:
+            linked = pan.strip() if pan else ""
+            lz_note = ""
+            if ov[2]:
+                lz_note = (
+                    "\n\nPreview was loaded from LZ77 at that offset; import still writes an "
+                    "**uncompressed** palette body there (same as raw preview imports)."
                 )
-                self._set_log("".join(logs))
-                return
-            ext_ps, ext_pb, _paln = self._hex.resolve_palette_for_graphics_row(pan.strip(), tbl_idx)
-            if ext_ps is None or ext_pb is None:
-                messagebox.showerror("Import graphic", "Could not resolve 8bpp palette data in ROM.")
-                self._set_log("".join(logs))
-                return
-            ga_p = self._hex.find_graphics_anchor_by_name(pan.strip())
-            pal_table_b = int(ga_p["row_byte_size"]) if ga_p and ga_p.get("graphics_table") else None
-            pal_is_table = bool(ga_p and ga_p.get("graphics_table"))
-            try:
-                pal_cap = measure_palette_rom_footprint(
-                    bytes(rom), ext_pb, ext_ps, graphics_table_row_bytes=pal_table_b
-                )
-            except ValueError as e:
-                self._set_log("".join(logs))
-                messagebox.showerror("Import graphic", str(e))
-                return
-            pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
-            pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
-            pal_anchor_name = pan.strip() if ga_p and ga_p["spec"].kind == "palette" else None
-            if pal_anchor_name and pal_is_table:
-                pal_anchor_name = None
-            ok_p, log_p = self._gfx_import_write_blob(
-                "Palette",
-                ext_pb,
-                pal_payload,
-                pal_cap,
-                is_table=pal_is_table,
-                named_anchor_for_reloc=pal_anchor_name,
+            messagebox.showinfo(
+                "Import graphic",
+                "A preview palette ROM offset is active.\n\n"
+                "The imported palette will be written to file offset "
+                f"0x{ov[0]:08X} (GBA 0x{ov[0] + GBA_ROM_BASE:08X}), "
+                "not to the linked |palette NamedAnchor"
+                + (f" ({linked!r})." if linked else ".")
+                + lz_note,
             )
-            logs.append(log_p)
-            if not ok_p:
-                self._set_log("".join(logs))
+
+        if spec.bpp == 8:
+            if use_pal_override:
+                ext_ps = synthetic_palette_spec_for_sprite_import_write(8)
+                ext_pb = int(ov[0])
+                try:
+                    pal_cap = measure_palette_rom_footprint(
+                        bytes(rom), ext_pb, ext_ps, graphics_table_row_bytes=None
+                    )
+                except ValueError as e:
+                    self._set_log("".join(logs))
+                    messagebox.showerror("Import graphic", str(e))
+                    return
+                pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
+                pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                ok_p, log_p = self._gfx_import_write_blob(
+                    "Palette",
+                    ext_pb,
+                    pal_payload,
+                    pal_cap,
+                    is_table=False,
+                    named_anchor_for_reloc=None,
+                )
+                logs.append(log_p)
+                if not ok_p:
+                    self._set_log("".join(logs))
+                    messagebox.showerror(
+                        "Import graphic",
+                        "Palette import failed; sprite data may already be written. See decode log.",
+                    )
+                    return
+            elif not pan:
                 messagebox.showerror(
                     "Import graphic",
-                    "Palette import failed; sprite data may already be written. See decode log.",
+                    "8bpp sprites need a linked palette NamedAnchor (|palette… in TOML), "
+                    "or load a preview palette from a ROM offset (8 bpp / 256 colors).",
                 )
+                self._set_log("".join(logs))
                 return
-        elif spec.bpp == 4 and pan:
-            ext_ps, ext_pb, pal_notes = self._hex.resolve_palette_for_graphics_row(pan.strip(), tbl_idx)
-            if ext_ps is None or ext_pb is None:
-                logs.append(pal_notes or "Palette not resolved; skipped palette write.\n")
             else:
+                ext_ps, ext_pb, _paln = self._hex.resolve_palette_for_graphics_row(pan.strip(), tbl_idx)
+                if ext_ps is None or ext_pb is None:
+                    messagebox.showerror("Import graphic", "Could not resolve 8bpp palette data in ROM.")
+                    self._set_log("".join(logs))
+                    return
                 ga_p = self._hex.find_graphics_anchor_by_name(pan.strip())
                 pal_table_b = int(ga_p["row_byte_size"]) if ga_p and ga_p.get("graphics_table") else None
                 pal_is_table = bool(ga_p and ga_p.get("graphics_table"))
@@ -2079,7 +2243,76 @@ class GraphicsPreviewFrame(ttk.Frame):
                     )
                     return
         elif spec.bpp == 4:
-            logs.append("No |palette anchor on this sprite: tiles imported; preview uses default grayscale palette.\n")
+            if use_pal_override:
+                ext_ps = synthetic_palette_spec_for_sprite_import_write(4)
+                ext_pb = int(ov[0])
+                try:
+                    pal_cap = measure_palette_rom_footprint(
+                        bytes(rom), ext_pb, ext_ps, graphics_table_row_bytes=None
+                    )
+                except ValueError as e:
+                    self._set_log("".join(logs))
+                    messagebox.showerror("Import graphic", str(e))
+                    return
+                pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
+                pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                ok_p, log_p = self._gfx_import_write_blob(
+                    "Palette",
+                    ext_pb,
+                    pal_payload,
+                    pal_cap,
+                    is_table=False,
+                    named_anchor_for_reloc=None,
+                )
+                logs.append(log_p)
+                if not ok_p:
+                    self._set_log("".join(logs))
+                    messagebox.showerror(
+                        "Import graphic",
+                        "Palette import failed; sprite data may already be written. See decode log.",
+                    )
+                    return
+            elif pan:
+                ext_ps, ext_pb, pal_notes = self._hex.resolve_palette_for_graphics_row(pan.strip(), tbl_idx)
+                if ext_ps is None or ext_pb is None:
+                    logs.append(pal_notes or "Palette not resolved; skipped palette write.\n")
+                else:
+                    ga_p = self._hex.find_graphics_anchor_by_name(pan.strip())
+                    pal_table_b = int(ga_p["row_byte_size"]) if ga_p and ga_p.get("graphics_table") else None
+                    pal_is_table = bool(ga_p and ga_p.get("graphics_table"))
+                    try:
+                        pal_cap = measure_palette_rom_footprint(
+                            bytes(rom), ext_pb, ext_ps, graphics_table_row_bytes=pal_table_b
+                        )
+                    except ValueError as e:
+                        self._set_log("".join(logs))
+                        messagebox.showerror("Import graphic", str(e))
+                        return
+                    pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
+                    pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                    pal_anchor_name = pan.strip() if ga_p and ga_p["spec"].kind == "palette" else None
+                    if pal_anchor_name and pal_is_table:
+                        pal_anchor_name = None
+                    ok_p, log_p = self._gfx_import_write_blob(
+                        "Palette",
+                        ext_pb,
+                        pal_payload,
+                        pal_cap,
+                        is_table=pal_is_table,
+                        named_anchor_for_reloc=pal_anchor_name,
+                    )
+                    logs.append(log_p)
+                    if not ok_p:
+                        self._set_log("".join(logs))
+                        messagebox.showerror(
+                            "Import graphic",
+                            "Palette import failed; sprite data may already be written. See decode log.",
+                        )
+                        return
+            else:
+                logs.append(
+                    "No |palette anchor on this sprite: tiles imported; preview uses default grayscale palette.\n"
+                )
 
         self._set_log("".join(logs) + "\nRe-decoding preview…\n")
         self._decode_selected()
@@ -3052,12 +3285,17 @@ class StructEditorFrame(ttk.Frame):
             row=0, column=0, columnspan=3, sticky="w"
         )
         gfx_nav = ttk.Frame(self._gfx_sprite_frame)
-        gfx_nav.grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 4))
-        ttk.Button(gfx_nav, text="Decode preview", command=self._on_decode_gfx_sprite).pack(side=tk.LEFT)
-        ttk.Label(gfx_nav, text="Tile rows (H):", font=("Consolas", 8)).pack(side=tk.LEFT, padx=(12, 4))
+        gfx_nav.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        gfx_nav.columnconfigure(0, weight=1)
+        gfx_nav_top = ttk.Frame(gfx_nav)
+        gfx_nav_top.grid(row=0, column=0, sticky="ew")
+        ttk.Button(gfx_nav_top, text="Decode preview", command=self._on_decode_gfx_sprite).pack(
+            side=tk.LEFT
+        )
+        ttk.Label(gfx_nav_top, text="Tile rows (H):", font=("Consolas", 8)).pack(side=tk.LEFT, padx=(12, 4))
         self._gfx_struct_sprite_rows_var = tk.IntVar(value=1)
         self._gfx_struct_sprite_rows_spin = ttk.Spinbox(
-            gfx_nav,
+            gfx_nav_top,
             from_=1,
             to=9999,
             width=5,
@@ -3066,18 +3304,78 @@ class StructEditorFrame(ttk.Frame):
         )
         self._gfx_struct_sprite_rows_spin.pack(side=tk.LEFT, padx=(0, 4))
         self._gfx_struct_sprite_rows_spin.bind("<Return>", lambda _e: self._on_decode_gfx_sprite())
-        ttk.Button(gfx_nav, text="Apply layout", command=self._on_decode_gfx_sprite).pack(side=tk.LEFT)
+        ttk.Button(gfx_nav_top, text="Apply layout", command=self._on_decode_gfx_sprite).pack(side=tk.LEFT)
+        self._gfx_struct_sprite_pal_row = ttk.Frame(self._gfx_sprite_frame)
+        self._gfx_struct_sprite_pal_row.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        self._gfx_struct_sprite_pal_row.columnconfigure(1, weight=1)
+        ttk.Label(
+            self._gfx_struct_sprite_pal_row,
+            text="Preview palette (ROM):",
+            font=("Consolas", 8),
+        ).grid(row=0, column=0, sticky="nw", padx=(0, 4), pady=(2, 0))
+        self._gfx_struct_sprite_pal_off_var = tk.StringVar(value="")
+        ttk.Entry(
+            self._gfx_struct_sprite_pal_row,
+            textvariable=self._gfx_struct_sprite_pal_off_var,
+            width=12,
+            font=("Consolas", 8),
+        ).grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=(2, 0))
+        ttk.Label(self._gfx_struct_sprite_pal_row, text="bpp:", font=("Consolas", 8)).grid(
+            row=1, column=0, sticky="w", padx=(0, 4), pady=(2, 0)
+        )
+        self._gfx_struct_sprite_pal_bpp_var = tk.StringVar(value="4")
+        ttk.Combobox(
+            self._gfx_struct_sprite_pal_row,
+            textvariable=self._gfx_struct_sprite_pal_bpp_var,
+            values=("4", "6", "8"),
+            width=3,
+            state="readonly",
+            font=("Consolas", 8),
+        ).grid(row=1, column=1, sticky="w", padx=(0, 12), pady=(2, 0))
+        ttk.Label(self._gfx_struct_sprite_pal_row, text="Data:", font=("Consolas", 8)).grid(
+            row=1, column=2, sticky="w", padx=(0, 4), pady=(2, 0)
+        )
+        self._gfx_struct_sprite_pal_storage_var = tk.StringVar(value="raw")
+        ttk.Combobox(
+            self._gfx_struct_sprite_pal_row,
+            textvariable=self._gfx_struct_sprite_pal_storage_var,
+            values=("raw", "lz77"),
+            width=7,
+            state="readonly",
+            font=("Consolas", 8),
+        ).grid(row=1, column=3, sticky="w", padx=(0, 8), pady=(2, 0))
+        struct_pal_btns = ttk.Frame(self._gfx_struct_sprite_pal_row)
+        struct_pal_btns.grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        ttk.Button(
+            struct_pal_btns,
+            text="Load",
+            command=self._on_struct_sprite_preview_palette_load,
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            struct_pal_btns,
+            text="Clear",
+            command=self._on_struct_sprite_preview_palette_clear,
+        ).pack(side=tk.LEFT)
+        self._gfx_struct_sprite_pal_status = ttk.Label(
+            self._gfx_struct_sprite_pal_row,
+            text="",
+            font=("Consolas", 7),
+            foreground="#060",
+            wraplength=280,
+        )
+        self._gfx_struct_sprite_pal_status.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         self._gfx_log = tk.Text(
             self._gfx_sprite_frame, height=4, font=("Consolas", 7), wrap=tk.WORD, state=tk.DISABLED
         )
-        self._gfx_log.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        self._gfx_log.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 4))
         self._gfx_img_label = ttk.Label(self._gfx_sprite_frame, text="")
-        self._gfx_img_label.grid(row=3, column=0, sticky="nw")
+        self._gfx_img_label.grid(row=4, column=0, sticky="nw")
         self._gfx_sprite_frame.grid(row=5, column=0, sticky="ew", pady=(0, 2))
         self._gfx_sprite_frame.grid_remove()
         self._gfx_fi: Optional[int] = None
         self._gfx_sprite_last_fi: Optional[int] = None
         self._gfx_photo: Optional[Any] = None
+        self._gfx_struct_sprite_palette_override: Optional[Tuple[int, int, bool]] = None
 
         # tileset<`lzt4`> tilemap<`lzm4xWxH|…`> palette<`ucp4`>: composite tilemap decode
         self._gfx_tilemap_frame = ttk.Frame(self)
@@ -3351,31 +3649,42 @@ class StructEditorFrame(ttk.Frame):
         else:
             self._gfx_tm_img_label.configure(image="", text="(decode failed)")
 
+    def _clear_gfx_struct_sprite_palette_override(self) -> None:
+        self._gfx_struct_sprite_palette_override = None
+        self._gfx_struct_sprite_pal_status.configure(text="")
+
     def _update_gfx_sprite_panel(self) -> None:
         self._gfx_tilemap_frame.grid_remove()
+        prev_fi = self._gfx_fi
         sel = self._tree.selection()
         if not sel or not sel[0].startswith("sf_"):
             self._gfx_sprite_frame.grid_remove()
             self._gfx_fi = None
             self._gfx_sprite_last_fi = None
+            self._clear_gfx_struct_sprite_palette_override()
             return
         fi, sp = parse_struct_tree_iid(sel[0])
         if _struct_tree_spec_is_nested(sp):
             self._gfx_sprite_frame.grid_remove()
             self._gfx_fi = None
             self._gfx_sprite_last_fi = None
+            self._clear_gfx_struct_sprite_palette_override()
             return
         if fi >= len(self._fields):
             self._gfx_sprite_frame.grid_remove()
             self._gfx_fi = None
             self._gfx_sprite_last_fi = None
+            self._clear_gfx_struct_sprite_palette_override()
             return
         fd = self._fields[fi]
         if fd.get("type") != "gfx_sprite":
             self._gfx_sprite_frame.grid_remove()
             self._gfx_fi = None
             self._gfx_sprite_last_fi = None
+            self._clear_gfx_struct_sprite_palette_override()
             return
+        if prev_fi is not None and prev_fi != fi:
+            self._clear_gfx_struct_sprite_palette_override()
         self._gfx_fi = fi
         self._gfx_sprite_frame.grid(row=5, column=0, sticky="ew", pady=(0, 2))
         spec = fd.get("gfx_spec")
@@ -3412,20 +3721,42 @@ class StructEditorFrame(ttk.Frame):
             self._set_gfx_log("Pointer does not reference ROM (need 0x08…/0x09… GBA address).")
             self._gfx_img_label.configure(image="", text="(bad pointer)")
             return
+        log_extra = ""
+        override_pal_bytes: Optional[bytes] = None
+        ov = self._gfx_struct_sprite_palette_override
+        if ov is not None:
+            ov_off, ov_bpp, ov_lz = ov
+            if ov_bpp != spec.bpp:
+                log_extra += (
+                    f"\nPreview palette override ignored: {ov_bpp}bpp ROM data vs {spec.bpp}bpp sprite field.\n"
+                )
+            else:
+                raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
+                    bytes(data), ov_off, ov_bpp, lz77=ov_lz
+                )
+                if raw_ov is None:
+                    log_extra += f"\nPreview palette override: {oerr}\n"
+                else:
+                    override_pal_bytes = raw_ov
+                    src = "LZ77→" if ov_lz else "raw "
+                    log_extra += (
+                        f"\nPreview palette: {src}file offset 0x{ov_off:X} ({ov_bpp}bpp, {len(raw_ov)} bytes); "
+                        f"linked palette ignored for preview.\n"
+                    )
+
         pal_name = fd.get("gfx_palette_name")
         pal_spec = None
         pal_base = None
-        log_extra = ""
-        if pal_name:
+        if override_pal_bytes is None and pal_name:
             pal_spec, pal_base, pal_notes = self._hex.resolve_palette_for_graphics_row(pal_name, entry_idx)
             if pal_spec is None or pal_base is None:
                 dpal = "64-color (empty)" if spec.bpp == 6 else "16-color"
-                log_extra = (
+                log_extra += (
                     (pal_notes or f"\nWarning: could not resolve palette {pal_name!r}.\n")
                     + f"Using default {dpal} palette.\n"
                 )
             else:
-                log_extra = ("\n" + pal_notes) if pal_notes else ""
+                log_extra += ("\n" + pal_notes) if pal_notes else ""
         raw_pre = bytes(data[tgt : tgt + min(len(data) - tgt, 4 << 20)])
         try:
             tb = extract_sprite_bytes(spec, raw_pre)
@@ -3443,7 +3774,13 @@ class StructEditorFrame(ttk.Frame):
             self._gfx_struct_sprite_rows_spin.configure(from_=1, to=9999)
         layout_h = max(1, int(self._gfx_struct_sprite_rows_var.get()))
         png_path, log = decode_sprite_at_pointer(
-            bytes(data), tgt, spec, pal_spec, pal_base, sprite_layout_height=layout_h
+            bytes(data),
+            tgt,
+            spec,
+            pal_spec,
+            pal_base,
+            sprite_layout_height=layout_h,
+            override_sprite_palette_bytes=override_pal_bytes,
         )
         self._set_gfx_log(log_extra + log)
         self._gfx_photo = None
@@ -3468,6 +3805,61 @@ class StructEditorFrame(ttk.Frame):
                 self._gfx_img_label.configure(image="", text=f"Image error: {e}")
         else:
             self._gfx_img_label.configure(image="", text="(decode failed)")
+
+    def _on_struct_sprite_preview_palette_load(self) -> None:
+        fi = self._gfx_fi
+        if fi is None or fi >= len(self._fields):
+            messagebox.showinfo("Preview palette", "Select a sprite field in the struct tree first.")
+            return
+        fd = self._fields[fi]
+        if fd.get("type") != "gfx_sprite":
+            return
+        spec = fd.get("gfx_spec")
+        if spec is None or getattr(spec, "kind", None) != "sprite":
+            messagebox.showwarning("Preview palette", "Invalid sprite graphics spec on this field.")
+            return
+        data = self._hex.get_data()
+        if not data:
+            messagebox.showwarning("Preview palette", "No ROM loaded.")
+            return
+        s = self._gfx_struct_sprite_pal_off_var.get().strip()
+        off, err = parse_rom_file_offset(s)
+        if off is None:
+            messagebox.showwarning("Preview palette", err or "Invalid offset.")
+            return
+        try:
+            pb = int(str(self._gfx_struct_sprite_pal_bpp_var.get()))
+        except (ValueError, tk.TclError):
+            pb = 4
+        if pb not in (4, 6, 8):
+            messagebox.showwarning("Preview palette", "Select palette mode 4, 6, or 8 bpp.")
+            return
+        if pb != spec.bpp:
+            messagebox.showerror(
+                "Preview palette",
+                f"This sprite field is {spec.bpp}bpp; set the palette mode to {spec.bpp}bpp "
+                f"(4→16 colors, 6→64, 8→256).",
+            )
+            return
+        use_lz = str(self._gfx_struct_sprite_pal_storage_var.get()).strip().lower() == "lz77"
+        raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(data), off, pb, lz77=use_lz)
+        if raw is None:
+            messagebox.showerror("Preview palette", rerr or "Could not read palette bytes.")
+            return
+        self._gfx_struct_sprite_palette_override = (off, pb, use_lz)
+        src = "LZ77 at" if use_lz else "Raw at"
+        self._gfx_struct_sprite_pal_status.configure(
+            text=(
+                f"{src} 0x{off:X} — {pb}bpp ({len(raw)} bytes decoded). "
+                "Decode uses this instead of the linked palette."
+            ),
+            foreground="#060",
+        )
+        self._on_decode_gfx_sprite()
+
+    def _on_struct_sprite_preview_palette_clear(self) -> None:
+        self._clear_gfx_struct_sprite_palette_override()
+        self._on_decode_gfx_sprite()
 
     def _start_inline_edit_after_click(self) -> None:
         if self._tree.selection():
