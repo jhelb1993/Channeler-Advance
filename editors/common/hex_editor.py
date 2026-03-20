@@ -4460,6 +4460,51 @@ Format = "`f|u8`[u8 arg0]"
                 return anchor
         return None
 
+    def _build_toml_sub_name_map(self) -> Dict[int, str]:
+        """Map normalized GBA code address (Thumb bit cleared) -> full anchor Name for TOML-labeled functions.
+
+        Used to rewrite angr's ``sub_DEADBEEF`` identifiers to e.g. ``funcs.trainer_card.DrawTrainerCardWindow``.
+        FunctionAnchors are processed before NamedAnchors; first entry wins on duplicate addresses.
+        """
+        out: Dict[int, str] = {}
+        if not self._toml_data:
+            return out
+        for key in ("FunctionAnchors", "NamedAnchors"):
+            for anchor in self._toml_data.get(key, []):
+                addr = anchor.get("Address")
+                if addr is None:
+                    continue
+                raw_name = anchor.get("Name")
+                if raw_name is None or not str(raw_name).strip():
+                    continue
+                name = str(raw_name).strip().strip("'\"")
+                try:
+                    gba = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+                except (ValueError, TypeError):
+                    continue
+                if gba < GBA_ROM_BASE:
+                    gba += GBA_ROM_BASE
+                norm = gba & ~1
+                if norm not in out:
+                    out[norm] = name
+        return out
+
+    def _rewrite_angr_sub_names(self, text: str, name_by_norm_addr: Dict[int, str]) -> str:
+        """Replace ``sub_<hex>`` with TOML names where ``int(hex,16) & ~1`` is a known anchor address."""
+        if not text or not name_by_norm_addr:
+            return text
+
+        def repl(m: re.Match[str]) -> str:
+            try:
+                h = int(m.group(1), 16)
+            except ValueError:
+                return m.group(0)
+            norm = h & ~1
+            mapped = name_by_norm_addr.get(norm)
+            return mapped if mapped is not None else m.group(0)
+
+        return re.sub(r"\bsub_([0-9a-fA-F]+)\b", repl, text)
+
     def _extract_extern_lines(self, text: str) -> List[str]:
         """Extract lines that are extern declarations from decompiler output."""
         lines: List[str] = []
@@ -5332,10 +5377,12 @@ Format = "`f|u8`[u8 arg0]"
         if not funcs_in_region:
             funcs_in_region = list(cfg.kb.functions.items())
         constants = {c["Name"]: c.get("Value", 0) for c in self._toml_data.get("Constants", [])}
+        toml_sub_names = self._build_toml_sub_name_map()
         for addr, func in sorted(funcs_in_region, key=lambda x: x[0]):
             try:
                 dec = proj.analyses.Decompiler(func, cfg=cfg)
                 if dec and dec.codegen and dec.codegen.text:
+                    raw_codegen = dec.codegen.text
                     anchor = self._get_function_anchor_for_addr(addr)
                     if anchor:
                         # Replace angr output with TOML-derived struct(s) + externs + signature
@@ -5344,14 +5391,17 @@ Format = "`f|u8`[u8 arg0]"
                             repl.append(struct_def)
                         if repl:
                             repl.append("")
-                        externs = self._extract_extern_lines(dec.codegen.text)
+                        externs = self._extract_extern_lines(raw_codegen)
                         if externs:
-                            repl.extend(externs)
+                            repl.extend(
+                                self._rewrite_angr_sub_names(e, toml_sub_names) for e in externs
+                            )
                             repl.append("")
                         sig = self._format_sig_from_anchor(anchor, constants)
                         repl.append(sig)
-                        body = self._extract_angr_function_body(dec.codegen.text)
+                        body = self._extract_angr_function_body(raw_codegen)
                         if body:
+                            body = self._rewrite_angr_sub_names(body, toml_sub_names)
                             struct_names = self._get_struct_names_from_anchor(anchor)
                             body = self._rewrite_angr_struct_refs(body, struct_names)
                             param_names = self._get_param_names_from_anchor(anchor)
@@ -5365,7 +5415,9 @@ Format = "`f|u8`[u8 arg0]"
                         out_lines.extend(repl)
                     else:
                         out_lines.append(f"/* sub_{addr:08X} */")
-                        out_lines.append(dec.codegen.text.strip())
+                        out_lines.append(
+                            self._rewrite_angr_sub_names(raw_codegen.strip(), toml_sub_names)
+                        )
                     out_lines.append("")
             except Exception as e:
                 err_msg = str(e).replace("\n", " ")[:120]
