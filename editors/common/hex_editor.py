@@ -17,6 +17,7 @@ from typing import Optional, Dict, List, Tuple, Set, Any
 
 from editors.common.gba_graphics import (
     build_sprite_payload_for_rom,
+    build_tilemap_payload_for_rom,
     compute_graphics_rom_span,
     decode_graphics_anchor_to_png,
     decode_palette_to_png_pal,
@@ -29,6 +30,7 @@ from editors.common.gba_graphics import (
     max_sprite_height_tiles,
     measure_palette_rom_footprint,
     measure_sprite_rom_footprint,
+    measure_tilemap_rom_footprint,
     palette_bytes_for_gbagfx,
     palette_payload_for_rom,
     parse_graphics_anchor_format,
@@ -39,8 +41,10 @@ from editors.common.gba_graphics import (
     raw_gba_palette_to_rgb888_list,
     resolve_gba_pointer,
     rewrite_standalone_sprite_format_dimensions,
+    suggest_sprite_grid_for_tile_count,
     sprite_bytes_per_tile,
     sprite_import_png,
+    tilemap_png_to_tileset_map_palette,
 )
 
 _TOML_AVAILABLE = False
@@ -419,6 +423,7 @@ class _GfxRelocateDialog:
         old_gba_addr: int,
     ) -> None:
         self.result: Optional[int] = None
+        self.fill_old_slot: bool = False
         self._need = need_bytes
         self._excl_lo = excl_lo
         self._excl_hi = excl_hi
@@ -457,8 +462,14 @@ class _GfxRelocateDialog:
         ttk.Entry(gap_f, textvariable=self._from_var, width=14, font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Entry(gap_f, textvariable=self._to_var, width=14, font=("Consolas", 8)).pack(side=tk.LEFT)
         ttk.Button(f, text="Search FF gap", command=self._on_search).grid(row=3, column=1, sticky="e", pady=(6, 0))
+        self._fill_old_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            f,
+            text="Fill original slot with 0xFF after moving (reclaim as free space)",
+            variable=self._fill_old_var,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
         btnf = ttk.Frame(f)
-        btnf.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btnf.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
         ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
         f.columnconfigure(1, weight=1)
@@ -520,6 +531,7 @@ class _GfxRelocateDialog:
                 f"but ROM size is {len(data)} bytes (would end at 0x{off + self._need:X}).",
             )
             return
+        self.fill_old_slot = bool(self._fill_old_var.get())
         self.result = off
         self._dlg.destroy()
 
@@ -1443,7 +1455,10 @@ class GraphicsPreviewFrame(ttk.Frame):
         new_off = dlg.result
         if new_off is None:
             return False, f"{label}: relocate cancelled.\n"
+        fill_old = bool(getattr(dlg, "fill_old_slot", False))
         self._hex.write_bytes_at(new_off, payload)
+        if fill_old:
+            self._hex.write_bytes_at(blob_off, bytes([0xFF]) * cap)
         new_gba = new_off + GBA_ROM_BASE
         excl_ranges: List[Tuple[int, int]] = [
             (blob_off, blob_off + max(cap, 1)),
@@ -1455,6 +1470,12 @@ class GraphicsPreviewFrame(ttk.Frame):
         log = (
             f"{label}: wrote {len(payload)} byte(s) at file 0x{new_off:X} "
             f"(GBA 0x{new_gba:08X}).\n"
+        )
+        if fill_old:
+            log += (
+                f"{label}: filled original slot ({cap} byte(s) at file 0x{blob_off:X}) with 0xFF.\n"
+            )
+        log += (
             f"{label}: updated {ptr_n} word-aligned pointer(s) "
             f"0x{old_gba:08X} → 0x{new_gba:08X} (ROM scan; old/new blob regions excluded).\n"
         )
@@ -1493,10 +1514,13 @@ class GraphicsPreviewFrame(ttk.Frame):
             messagebox.showerror("Import graphic", "Anchor missing.")
             return
         spec = info["spec"]
+        if spec.kind == "tilemap":
+            self._import_tilemap_from_png(name, info, spec)
+            return
         if spec.kind != "sprite":
             messagebox.showinfo(
                 "Import graphic",
-                "Import is only implemented for sprite anchors (uct/lzt/ucs/lzs…), not palette-only or tilemap.",
+                "Import is only implemented for sprite (uct/lzt/ucs/lzs…) or tilemap (ucm/lzm…) anchors, not palette-only.",
             )
             return
         if spec.bpp not in (4, 8):
@@ -1668,6 +1692,234 @@ class GraphicsPreviewFrame(ttk.Frame):
                     return
         elif spec.bpp == 4:
             logs.append("No |palette anchor on this sprite: tiles imported; preview uses default grayscale palette.\n")
+
+        self._set_log("".join(logs) + "\nRe-decoding preview…\n")
+        self._decode_selected()
+
+    def _import_tilemap_from_png(self, name: str, info: Dict[str, Any], spec: Any) -> None:
+        """
+        Tilemap Studio–style import: one PNG (full map at 8 px/tile) → deduped tileset + non-affine map + palette.
+
+        Writes the tileset NamedAnchor blob, this tilemap blob, and the linked palette anchor when resolvable.
+        """
+        rom = self._hex.get_data()
+        if not rom:
+            messagebox.showwarning("Import tilemap", "No ROM loaded.")
+            return
+        if spec.bpp not in (4, 8):
+            messagebox.showinfo("Import tilemap", "Only 4bpp or 8bpp tilemaps are supported.")
+            return
+
+        tsn = getattr(spec, "tileset_anchor_name", None) or ""
+        ga_ts = self._hex.find_graphics_anchor_by_name(tsn.strip()) if tsn.strip() else None
+        if ga_ts is None or ga_ts["spec"].kind != "sprite":
+            messagebox.showerror(
+                "Import tilemap",
+                f"Tilemap needs a valid tile sheet NamedAnchor (uct/lzt/ucs/lzs…); missing or invalid: {tsn!r}",
+            )
+            return
+        ts_spec = ga_ts["spec"]
+        if ts_spec.bpp not in (4, 8):
+            messagebox.showinfo("Import tilemap", "Tileset must be 4bpp or 8bpp for this import path.")
+            return
+        if ts_spec.bpp != spec.bpp:
+            messagebox.showerror(
+                "Import tilemap",
+                f"Tilemap is {spec.bpp}bpp but tileset {tsn!r} is {ts_spec.bpp}bpp; they must match.",
+            )
+            return
+
+        tbl_idx, _eff, tbl_warn = self._effective_table_state(info)
+        blob_off_map = int(info["base_off"])
+        if info.get("graphics_table"):
+            blob_off_map = int(info["base_off"]) + tbl_idx * int(info["row_byte_size"])
+        is_table_tm = bool(info.get("graphics_table"))
+        table_row_b_tm = int(info["row_byte_size"]) if is_table_tm else None
+
+        ts_off = int(ga_ts["base_off"])
+        if ga_ts.get("graphics_table"):
+            ts_off = int(ga_ts["base_off"]) + tbl_idx * int(ga_ts["row_byte_size"])
+        is_table_ts = bool(ga_ts.get("graphics_table"))
+        table_row_b_ts = int(ga_ts["row_byte_size"]) if is_table_ts else None
+
+        pan_tm = getattr(spec, "palette_anchor_name", None)
+        if not pan_tm:
+            pan_tm = getattr(ts_spec, "palette_anchor_name", None)
+        pan_key = pan_tm.strip() if pan_tm else ""
+
+        if spec.bpp == 8 and not pan_key:
+            messagebox.showerror(
+                "Import tilemap",
+                "8bpp tilemaps need a linked palette NamedAnchor (|palette… on tilemap or tileset).",
+            )
+            return
+
+        try:
+            map_cap = measure_tilemap_rom_footprint(
+                bytes(rom), blob_off_map, spec, graphics_table_row_bytes=table_row_b_tm
+            )
+        except ValueError as e:
+            messagebox.showerror("Import tilemap", str(e))
+            return
+
+        try:
+            ts_cap = measure_sprite_rom_footprint(
+                bytes(rom), ts_off, ts_spec, graphics_table_row_bytes=table_row_b_ts
+            )
+        except ValueError as e:
+            messagebox.showerror(
+                "Import tilemap",
+                f"Could not size the tileset slot ({e}). Use a fixed uct/ucs WxH or LZ (lzt/lzs) in TOML.",
+            )
+            return
+
+        path = filedialog.askopenfilename(
+            title="Import tilemap PNG",
+            filetypes=[("PNG images", "*.png"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        mw, mh = int(spec.map_w_tiles), int(spec.map_h_tiles)
+        raw_map, tile_body, pal_flat, n_unique, err = tilemap_png_to_tileset_map_palette(
+            path,
+            map_w_tiles=mw,
+            map_h_tiles=mh,
+            bpp=spec.bpp,
+        )
+        if err:
+            messagebox.showerror("Import tilemap", err)
+            return
+
+        logs: List[str] = [
+            tbl_warn or "",
+            "Import tilemap: PNG → deduped tileset + non-affine map (Tilemap Studio–style image→tiles; "
+            "see https://github.com/Rangi42/tilemap-studio ).\n",
+            f"  Unique tiles after dedupe (incl. flips): {n_unique} (hardware limit 1024).\n",
+        ]
+
+        try:
+            map_payload = build_tilemap_payload_for_rom(raw_map, spec)
+        except ValueError as e:
+            messagebox.showerror("Import tilemap", str(e))
+            return
+
+        try:
+            ts_payload = build_sprite_payload_for_rom(tile_body, ts_spec, lz=ts_spec.lz)
+        except ValueError as e:
+            messagebox.showerror("Import tilemap", f"Tileset compress: {e}")
+            return
+
+        ts_name = str(ga_ts["name"])
+
+        ok_ts, log_ts = self._gfx_import_write_blob(
+            "Tileset",
+            ts_off,
+            ts_payload,
+            ts_cap,
+            is_table=is_table_ts,
+            named_anchor_for_reloc=None if is_table_ts else ts_name,
+        )
+        logs.append(log_ts)
+        if not ok_ts:
+            self._set_log("".join(logs))
+            messagebox.showerror("Import tilemap", "Tileset write failed; see decode log.")
+            return
+
+        ok_m, log_m = self._gfx_import_write_blob(
+            "Tilemap",
+            blob_off_map,
+            map_payload,
+            map_cap,
+            is_table=is_table_tm,
+            named_anchor_for_reloc=None if is_table_tm else name,
+        )
+        logs.append(log_m)
+        if not ok_m:
+            self._set_log("".join(logs))
+            messagebox.showerror(
+                "Import tilemap",
+                "Tilemap write failed; tileset may already be written. See decode log.",
+            )
+            return
+
+        if pan_key:
+            ext_ps, ext_pb, pal_notes = self._hex.resolve_palette_for_graphics_row(pan_key, tbl_idx)
+            if ext_ps is None or ext_pb is None:
+                logs.append(pal_notes or "Palette not resolved; skipped palette write.\n")
+            else:
+                ga_p = self._hex.find_graphics_anchor_by_name(pan_key)
+                pal_table_b = int(ga_p["row_byte_size"]) if ga_p and ga_p.get("graphics_table") else None
+                pal_is_table = bool(ga_p and ga_p.get("graphics_table"))
+                rom_now = self._hex.get_data()
+                try:
+                    pal_cap = measure_palette_rom_footprint(
+                        bytes(rom_now or b""),
+                        ext_pb,
+                        ext_ps,
+                        graphics_table_row_bytes=pal_table_b,
+                    )
+                except ValueError as e:
+                    self._set_log("".join(logs))
+                    messagebox.showerror("Import tilemap", str(e))
+                    return
+                pal_body = prepare_palette_rom_body_from_import(ext_ps, pal_flat)
+                pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                pal_anchor_name = pan_key if ga_p and ga_p["spec"].kind == "palette" else None
+                if pal_anchor_name and pal_is_table:
+                    pal_anchor_name = None
+                ok_p, log_p = self._gfx_import_write_blob(
+                    "Palette",
+                    ext_pb,
+                    pal_payload,
+                    pal_cap,
+                    is_table=pal_is_table,
+                    named_anchor_for_reloc=pal_anchor_name,
+                )
+                logs.append(log_p)
+                if not ok_p:
+                    self._set_log("".join(logs))
+                    messagebox.showerror(
+                        "Import tilemap",
+                        "Palette write failed; tileset/tilemap may already be written. See decode log.",
+                    )
+                    return
+        else:
+            logs.append("No |palette anchor: tileset + map written; palette bytes not written.\n")
+
+        # Resize tileset TOML WxH so preview matches unique tile count (packed grid).
+        try:
+            tw, th = suggest_sprite_grid_for_tile_count(n_unique)
+        except ValueError as e:
+            logs.append(f"TOML: {e}\n")
+            tw, th = 1, 1
+
+        def _should_rewrite_tileset_grid(sp: Any, w: int, h: int) -> bool:
+            if getattr(sp, "kind", None) != "sprite":
+                return False
+            if sp.width_tiles == 0 and sp.height_tiles == 0:
+                return True
+            return (w, h) != (int(sp.width_tiles), int(sp.height_tiles))
+
+        if _should_rewrite_tileset_grid(ts_spec, tw, th):
+            cur_fmt = str(ga_ts["anchor"].get("Format", "") or "")
+            new_fmt = rewrite_standalone_sprite_format_dimensions(cur_fmt, tw, th)
+            if new_fmt:
+                ga_ts["anchor"]["Format"] = new_fmt
+                ok_toml, err_toml = self._hex.persist_toml_data()
+                if ok_toml:
+                    if self._hex.reload_toml_from_disk():
+                        logs.append(
+                            f"TOML: Tileset {ts_name!r} Format → {tw}×{th} tiles ({n_unique} unique); reloaded.\n"
+                        )
+                    else:
+                        logs.append("TOML: tileset Format saved but reload from disk failed.\n")
+                else:
+                    logs.append(f"TOML: could not save tileset Format ({err_toml}).\n")
+            else:
+                logs.append(
+                    "TOML: could not auto-rewrite tileset Format; adjust WxH manually if preview is wrong.\n"
+                )
 
         self._set_log("".join(logs) + "\nRe-decoding preview…\n")
         self._decode_selected()

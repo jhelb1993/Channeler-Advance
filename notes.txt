@@ -1,7 +1,7 @@
 option to null out old graphics when importing to free space
-fix tilemap/tileset logic
-built-in toml format editor
 tilemap/tileset replacement/insertion
+fix tilemap/tileset logic
+load palette from offset option
 palette editing/insertion
 automatic resize/index/palette adjust import mode
 c injection

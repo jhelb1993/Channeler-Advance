@@ -393,6 +393,104 @@ def sprite_import_png(
     return tb, pb, "", tw, th
 
 
+def tilemap_png_to_tileset_map_palette(
+    png_path: str,
+    *,
+    map_w_tiles: int,
+    map_h_tiles: int,
+    bpp: int,
+) -> Tuple[bytes, bytes, bytes, int, str]:
+    """
+    Tilemap Studio–style **image → tiles**: quantize the full map image, dedupe 8×8 tiles (with H/V flips),
+    and build raw non-affine map bytes + linear tileset + GBA palette bytes.
+
+    The PNG is composited onto a white ``map_w×map_h`` tile canvas (8 px/tile); smaller images align top-left.
+
+    Returns ``(map_body, tileset_body, palette_flat, n_unique_tiles, err)`` where ``map_body`` is
+    ``map_w * map_h * 2`` bytes (little-endian u16 per cell). ``palette_flat`` is 32 bytes (4bpp) or
+    512 bytes (8bpp), suitable for :func:`prepare_palette_rom_body_from_import`.
+    """
+    if map_w_tiles < 1 or map_h_tiles < 1:
+        return b"", b"", b"", 0, "Invalid tilemap dimensions."
+    if bpp not in (4, 8):
+        return b"", b"", b"", 0, "Tilemap bpp must be 4 or 8."
+    Image = _require_pillow()
+    try:
+        im = Image.open(png_path)
+    except OSError as e:
+        return b"", b"", b"", 0, str(e)
+    rgba = im.convert("RGBA")
+    wpx, hpx = map_w_tiles * 8, map_h_tiles * 8
+    bg = Image.new("RGBA", (wpx, hpx), (255, 255, 255, 255))
+    bg.paste(rgba, (0, 0), rgba.split()[3])
+    rgb = bg.convert("RGB")
+    ncols = 16 if bpp == 4 else 256
+    try:
+        q = rgb.quantize(colors=ncols, method=Image.Quantize.MEDIANCUT)  # type: ignore[attr-defined]
+    except AttributeError:
+        q = rgb.quantize(colors=ncols, method=2)
+    pal_raw = q.getpalette()
+    if not pal_raw:
+        return b"", b"", b"", 0, "Could not build palette from image."
+    colors: List[Tuple[int, int, int]] = []
+    for i in range(ncols):
+        if i * 3 + 2 < len(pal_raw):
+            colors.append((pal_raw[i * 3], pal_raw[i * 3 + 1], pal_raw[i * 3 + 2]))
+        else:
+            colors.append((0, 0, 0))
+    pal_bytes = gba_palette_bytes_from_rgb888_list(colors, ncols)
+    if bpp == 4:
+        pal_bytes = pal_bytes[:32].ljust(32, b"\x00")
+    else:
+        pal_bytes = pal_bytes[:512].ljust(512, b"\x00")
+
+    idx_flat = list(q.getdata())
+    if len(idx_flat) != wpx * hpx:
+        return b"", b"", b"", 0, "Internal error: quantized buffer size mismatch."
+
+    unique: List[bytes] = []
+    map_words: List[int] = []
+    palno = 0
+
+    for my in range(map_h_tiles):
+        for mx in range(map_w_tiles):
+            cell: List[int] = []
+            for py in range(8):
+                for px in range(8):
+                    ix = mx * 8 + px
+                    iy = my * 8 + py
+                    cell.append(idx_flat[iy * wpx + ix])
+            want = tuple(cell)
+            m = _match_tile_index_and_flips(unique, want, bpp)
+            if m is None:
+                if len(unique) >= 1024:
+                    return (
+                        b"",
+                        b"",
+                        b"",
+                        0,
+                        "More than 1024 unique tiles after dedupe (GBA non-affine limit).",
+                    )
+                if bpp == 4:
+                    tb = encode_gba_tile_4bpp_from_indices(list(want))
+                else:
+                    tb = encode_gba_tile_8bpp_from_indices(list(want))
+                unique.append(tb)
+                ti = len(unique) - 1
+                hf = False
+                vf = False
+            else:
+                ti, hf, vf = m
+            w = encode_non_affine_tilemap_u16(ti, hf, vf, palno)
+            map_words.append(w)
+
+    raw_map = bytearray()
+    for word in map_words:
+        raw_map.extend(word.to_bytes(2, "little"))
+    tileset_body = b"".join(unique)
+    return bytes(raw_map), tileset_body, pal_bytes, len(unique), ""
+
+
 def palette_byte_count_for_spec(spec: GraphicsAnchorSpec) -> int:
     """Bytes written for a palette anchor (uncompressed body)."""
     if spec.kind != "palette" or spec.bpp != 4:
@@ -559,6 +657,56 @@ def measure_palette_rom_footprint(
         _dec, consumed = decompress_gba_lz77_with_consumed(raw)
         return (consumed + 3) & ~3
     return palette_byte_count_for_spec(spec)
+
+
+def measure_tilemap_rom_footprint(
+    rom: bytes,
+    blob_off: int,
+    spec: GraphicsAnchorSpec,
+    *,
+    graphics_table_row_bytes: Optional[int] = None,
+) -> int:
+    """Byte length of the existing tilemap blob (LZ compressed length, or raw fixed map size)."""
+    if spec.kind != "tilemap":
+        raise ValueError("tilemap spec required")
+    if graphics_table_row_bytes is not None:
+        return int(graphics_table_row_bytes)
+    if blob_off < 0 or blob_off >= len(rom):
+        return 0
+    raw = bytes(rom[blob_off:])
+    if spec.lz:
+        if len(raw) < 4 or raw[0] != 0x10:
+            raise ValueError("Tilemap data is not valid GBA LZ77 (expected type byte 0x10).")
+        _dec, consumed = decompress_gba_lz77_with_consumed(raw)
+        return (consumed + 3) & ~3
+    need = spec.map_w_tiles * spec.map_h_tiles * 2
+    return max(1, need)
+
+
+def build_tilemap_payload_for_rom(map_body: bytes, spec: GraphicsAnchorSpec) -> bytes:
+    """Wrap raw tilemap u16 data (``map_w * map_h * 2`` bytes) with optional LZ."""
+    if spec.kind != "tilemap":
+        raise ValueError("tilemap spec required")
+    need = spec.map_w_tiles * spec.map_h_tiles * 2
+    if len(map_body) != need:
+        raise ValueError(f"Tilemap body length {len(map_body)} != expected {need}")
+    if spec.lz:
+        return compress_gba_lz77(map_body)
+    return map_body
+
+
+def suggest_sprite_grid_for_tile_count(n_tiles: int) -> Tuple[int, int]:
+    """
+    Minimal ``W×H`` tile grid holding ``n_tiles`` tiles (row-major), for TOML ``uct/lzt/ucs/lzs`` previews.
+    GBA hardware allows tile indices 0..1023.
+    """
+    if n_tiles < 1:
+        return 1, 1
+    if n_tiles > 1024:
+        raise ValueError(f"Unique tile count {n_tiles} exceeds 1024 (GBA non-affine tile index limit).")
+    w = min(32, n_tiles)
+    h = (n_tiles + w - 1) // w
+    return w, h
 
 
 # 4bpp: 16 hardware indices × 16 colors × 2 bytes (master layout for multi-slot palettes / PNG decode)
@@ -729,6 +877,55 @@ def _decode_non_affine_tilemap_entry(word: int) -> Tuple[int, bool, bool, int]:
     vflip = bool((word >> 11) & 1)
     palno = (word >> 12) & 0xF
     return tile_index, hflip, vflip, palno
+
+
+def encode_non_affine_tilemap_u16(
+    tile_index: int,
+    hflip: bool,
+    vflip: bool,
+    palno: int,
+) -> int:
+    """Pack one tilemap cell (same layout as :func:`_decode_non_affine_tilemap_entry`)."""
+    w = tile_index & 0x3FF
+    if hflip:
+        w |= 1 << 10
+    if vflip:
+        w |= 1 << 11
+    w |= (palno & 0xF) << 12
+    return w
+
+
+def _apply_non_affine_flips_to_indices(
+    idxs: Tuple[int, ...],
+    hflip: bool,
+    vflip: bool,
+) -> Tuple[int, ...]:
+    """Match :func:`tilemap_non_affine_to_rgba` (horizontal flip, then vertical)."""
+    cur = idxs
+    if hflip:
+        cur = _flip_tile_indices_horizontal(cur)
+    if vflip:
+        cur = _flip_tile_indices_vertical(cur)
+    return cur
+
+
+def _match_tile_index_and_flips(
+    unique_tiles: List[bytes],
+    want: Tuple[int, ...],
+    bpp: int,
+) -> Optional[Tuple[int, bool, bool]]:
+    """
+    Find an existing tile (optionally flipped) matching ``want`` indices.
+    Used for Tilemap-Studio-style dedup when building a map from a PNG.
+    """
+    for ti, tb in enumerate(unique_tiles):
+        base = decode_gba_tile_4bpp_indices(tb) if bpp == 4 else decode_gba_tile_8bpp_indices(tb)
+        for hf in (False, True):
+            for vf in (False, True):
+                got = _apply_non_affine_flips_to_indices(base, hf, vf)
+                if got == want:
+                    return ti, hf, vf
+    return None
 
 
 def _flip_tile_indices_horizontal(idxs: Tuple[int, ...]) -> Tuple[int, ...]:
