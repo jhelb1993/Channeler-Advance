@@ -4504,15 +4504,15 @@ class HexEditorFrame(ttk.Frame):
         Shape matches :meth:`_find_named_anchor_at_offset` results for use with
         ``set_on_pointer_to_named_anchor`` (e.g. FireRed tools pane).
         """
-        want = anchor_name.strip()
+        want = anchor_name.strip().lower()
         for info in self._get_pcs_table_anchors():
-            if info["name"] == want:
+            if str(info["name"]).strip().lower() == want:
                 return {**info, "type": "pcs"}
         for info in self.get_struct_anchors():
-            if info["name"] == want:
+            if str(info["name"]).strip().lower() == want:
                 return {**info, "type": "struct"}
         for info in self.get_graphics_anchors():
-            if info["name"] == want:
+            if str(info["name"]).strip().lower() == want:
                 return {**info, "type": "graphics"}
         return None
 
@@ -4618,6 +4618,49 @@ class HexEditorFrame(ttk.Frame):
             self._goto_var.set(f"{self._cursor_byte_offset:08X}")
             self._goto_entry.select_range(0, tk.END)
 
+    def _goto_resolve_and_maybe_open_tool(self, s: str) -> bool:
+        """If ``s`` is a NamedAnchor name or a file/GBA offset inside one, select that anchor and notify tools."""
+        s = s.strip()
+        if not s or not self._data:
+            return False
+        cb = self._on_pointer_to_named_anchor_cb
+        ai = self._named_anchor_info_for_tools(s)
+        if ai:
+            self._select_named_anchor_extent(ai)
+            if cb:
+                snap = dict(ai)
+                self.after(10, lambda s=snap: cb(s))
+            return True
+        sym_offset = self._get_function_anchor_offset_by_name(s)
+        if sym_offset is not None and 0 <= sym_offset < len(self._data):
+            ai2 = self._find_named_anchor_at_offset(sym_offset, exact=False)
+            if ai2:
+                self._select_named_anchor_extent(ai2)
+                if cb:
+                    snap = dict(ai2)
+                    self.after(10, lambda s=snap: cb(s))
+                return True
+        ts = s
+        if ts.startswith("0x") or ts.startswith("0X"):
+            ts = ts[2:]
+        if not ts:
+            return False
+        try:
+            val = int(ts, 16)
+        except ValueError:
+            return False
+        if val >= GBA_ROM_BASE and val < GBA_ROM_BASE + len(self._data):
+            val = val - GBA_ROM_BASE
+        if 0 <= val < len(self._data):
+            ai3 = self._find_named_anchor_at_offset(val, exact=False)
+            if ai3:
+                self._select_named_anchor_extent(ai3)
+                if cb:
+                    snap = dict(ai3)
+                    self.after(10, lambda s=snap: cb(s))
+                return True
+        return False
+
     def _on_goto_entry_change(self, event: Optional[tk.Event] = None) -> None:
         if not self._data:
             return
@@ -4628,6 +4671,8 @@ class HexEditorFrame(ttk.Frame):
             return
         s = self._goto_var.get().strip()
         if not s:
+            return
+        if self._goto_resolve_and_maybe_open_tool(s):
             return
         sym_offset = self._get_function_anchor_offset_by_name(s)
         if sym_offset is not None and 0 <= sym_offset < len(self._data):
@@ -7506,7 +7551,11 @@ Format = "`f|u8`[u8 arg0]"
         dialog.title("Go to offset")
         dialog.transient(self.winfo_toplevel())
         dialog.grab_set()
-        ttk.Label(dialog, text="Offset (hex):").grid(row=0, column=0, padx=5, pady=5)
+        ttk.Label(
+            dialog,
+            text="Anchor name, offset (hex), or GBA 0x08…:",
+            font=("Consolas", 9),
+        ).grid(row=0, column=0, padx=5, pady=5)
         entry = ttk.Entry(dialog, width=12)
         entry.grid(row=0, column=1, padx=5, pady=5)
         entry.insert(0, f"{self._cursor_byte_offset:08X}")
@@ -7514,11 +7563,22 @@ Format = "`f|u8`[u8 arg0]"
         entry.focus_set()
 
         def do_goto() -> None:
+            raw = entry.get().strip()
+            if not raw:
+                return
+            if self._goto_resolve_and_maybe_open_tool(raw):
+                dialog.destroy()
+                return
+            ts = raw
+            if ts.startswith("0x") or ts.startswith("0X"):
+                ts = ts[2:]
             try:
-                val = int(entry.get(), 16)
+                val = int(ts, 16)
+                if val >= GBA_ROM_BASE and val < GBA_ROM_BASE + len(self._data):
+                    val = val - GBA_ROM_BASE
                 if 0 <= val < len(self._data):
                     self._do_goto(val)
-                dialog.destroy()
+                    dialog.destroy()
             except ValueError:
                 pass
 

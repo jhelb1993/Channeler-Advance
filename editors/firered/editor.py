@@ -332,5 +332,6 @@ class FireRedEditor:
             "Ctrl+T — show/hide tools pane\n"
             "Ctrl+Shift+1/2/3 — toggle Table / Struct / Graphics slot\n"
             "Graphics: built-in decode (pret gfx.c–compatible); Pillow required for PNG preview\n"
-            "Ctrl+M — Anchors browser: double-click a table/struct leaf to open it in Tools",
+            "Ctrl+M — Anchors browser: double-click a table/struct leaf to open it in Tools\n"
+            "Goto box: NamedAnchor name, file offset, or 0x08… address opens the matching tool when valid",
         )

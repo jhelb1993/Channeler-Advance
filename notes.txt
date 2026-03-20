@@ -1,4 +1,3 @@
-ctrl + g pulls up table if you goto its starting offset
 graphics replacement/insertion
 palette editing/insertion
 c injection
