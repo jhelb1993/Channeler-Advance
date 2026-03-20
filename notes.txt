@@ -1,5 +1,6 @@
-using a field inside of a struct as the table that struct indexes into (using / in the TOML)
-graphics and palette editing/insertion
+ctrl + g pulls up table if you goto its starting offset
+graphics replacement/insertion
+palette editing/insertion
 c injection
 undo (ctrl + z)
 port firered editor code to hex_editor.py

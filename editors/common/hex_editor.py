@@ -1172,11 +1172,28 @@ def _split_enum_field_ref(enum_ref: Optional[str]) -> Tuple[str, int]:
     return s, 0
 
 
-def parse_struct_tree_iid(iid: str) -> Tuple[int, Optional[int]]:
-    """Parse tree row id: ``sf_3`` → field index 3; ``sf_3_b0`` → field 3, bitfield part 0."""
+def parse_struct_tree_iid(iid: str) -> Tuple[int, Any]:
+    """Parse tree row id: ``sf_3`` → (3, None); ``sf_3_b0`` → (3, 0);
+    ``sf_na_5_0_2`` → (5, (\"na\", 0, 2)); ``sf_nab_5_0_2_1`` → (5, (\"nab\", 0, 2, 1))."""
     if not iid.startswith("sf_"):
         return -1, None
     rest = iid[3:]
+    if rest.startswith("nab_"):
+        sub = rest[4:]
+        parts = sub.split("_")
+        if len(parts) >= 4:
+            try:
+                return int(parts[0]), ("nab", int(parts[1]), int(parts[2]), int(parts[3]))
+            except ValueError:
+                return -1, None
+    if rest.startswith("na_"):
+        sub = rest[3:]
+        parts = sub.split("_")
+        if len(parts) >= 3:
+            try:
+                return int(parts[0]), ("na", int(parts[1]), int(parts[2]))
+            except ValueError:
+                return -1, None
     if "_b" in rest:
         a, b = rest.split("_b", 1)
         try:
@@ -1187,6 +1204,11 @@ def parse_struct_tree_iid(iid: str) -> Tuple[int, Optional[int]]:
         return int(rest), None
     except ValueError:
         return -1, None
+
+
+def _struct_tree_spec_is_nested(spec: Any) -> bool:
+    """True if ``parse_struct_tree_iid`` returned a nested-array row id (``na`` / ``nab``)."""
+    return isinstance(spec, tuple) and len(spec) > 0 and spec[0] in ("na", "nab")
 
 
 def _parse_bitfield_token(token: str) -> Optional[Dict[str, Any]]:
@@ -1253,28 +1275,8 @@ def _parse_helper_field_token(token: str) -> Optional[Dict[str, Any]]:
     return {"name": name, "size": 0, "type": "helper", "enum": None, "helper_refs": refs}
 
 
-def _parse_struct_fields(fmt: str) -> Optional[List[Dict[str, Any]]]:
-    """Parse the fields inside a Format like '[field1. field2: ...]count'.
-    Returns list of field descriptors with byte offsets, or None if not a struct format."""
-    s = fmt.strip()
-    if s.startswith("^"):
-        s = s[1:]
-    if not s.startswith("["):
-        return None
-    depth = 0
-    close = -1
-    for i, ch in enumerate(s):
-        if ch == "[":
-            depth += 1
-        elif ch == "]":
-            depth -= 1
-            if depth == 0:
-                close = i
-                break
-    if close < 0:
-        return None
-    inner = s[1:close]
-
+def _tokenize_struct_body(inner: str) -> List[str]:
+    """Split struct inner on spaces respecting nested ``<>[]()`` depth."""
     tokens: List[str] = []
     buf = ""
     d_angle, d_bracket, d_paren = 0, 0, 0
@@ -1299,8 +1301,11 @@ def _parse_struct_fields(fmt: str) -> Optional[List[Dict[str, Any]]]:
             buf += ch
     if buf:
         tokens.append(buf)
+    return tokens
 
-    # Merge tokens so an incomplete ``…|t|`` + continuation (split on spaces) becomes one bitfield token.
+
+def _merge_bitfield_tokens_list(tokens: List[str]) -> List[str]:
+    """Merge tokens so an incomplete ``…|t|`` + continuation (split on spaces) becomes one bitfield token."""
     merged: List[str] = []
     ti = 0
     while ti < len(tokens):
@@ -1319,8 +1324,16 @@ def _parse_struct_fields(fmt: str) -> Optional[List[Dict[str, Any]]]:
                 continue
         merged.append(t)
         ti += 1
-    tokens = merged
+    return merged
 
+
+def _parse_struct_inner_content_to_fields(inner: str) -> Optional[List[Dict[str, Any]]]:
+    """Parse inner struct body like ``text<""> unused::`` (no outer ``[count]`` wrapper)."""
+    inner = inner.strip()
+    if not inner:
+        return None
+    tokens = _tokenize_struct_body(inner)
+    tokens = _merge_bitfield_tokens_list(tokens)
     fields: List[Dict[str, Any]] = []
     offset = 0
     for tok in tokens:
@@ -1328,11 +1341,218 @@ def _parse_struct_fields(fmt: str) -> Optional[List[Dict[str, Any]]]:
         if fd is None:
             fd = _parse_single_field(tok)
         if fd:
+            if fd.get("type") == "nested_array":
+                return None
+            if fd.get("type") == "helper":
+                return None
             fd["offset"] = offset
-            if fd.get("type") != "helper":
-                offset += fd["size"]
+            offset += int(fd["size"])
             fields.append(fd)
     return fields if fields else None
+
+
+def _parse_struct_fields(fmt: str) -> Optional[List[Dict[str, Any]]]:
+    """Parse the fields inside a Format like '[field1. field2: ...]count'.
+    Returns list of field descriptors with byte offsets, or None if not a struct format."""
+    s = fmt.strip()
+    if s.startswith("^"):
+        s = s[1:]
+    if not s.startswith("["):
+        return None
+    depth = 0
+    close = -1
+    for i, ch in enumerate(s):
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                close = i
+                break
+    if close < 0:
+        return None
+    inner = s[1:close]
+
+    tokens = _tokenize_struct_body(inner)
+    tokens = _merge_bitfield_tokens_list(tokens)
+
+    fields: List[Dict[str, Any]] = []
+    for tok in tokens:
+        fd = _parse_helper_field_token(tok)
+        if fd is None:
+            fd = _parse_single_field(tok)
+        if fd:
+            if fd.get("type") == "nested_array":
+                fd["size"] = 0
+            fields.append(fd)
+    if not _validate_nested_array_fields(fields):
+        return None
+    _assign_struct_field_offsets(fields)
+    return fields
+
+
+def _assign_struct_field_offsets(fields: List[Dict[str, Any]]) -> None:
+    """Lay out fields in declaration order: helpers (0 bytes), uints, nested_array (consumes max span), etc."""
+    offset = 0
+    for fd in fields:
+        if fd.get("type") == "helper":
+            fd["offset"] = offset
+            continue
+        if fd.get("type") == "nested_array":
+            fd["offset"] = offset
+            if fd.get("base_ptr_field"):
+                pass
+            elif _nested_array_implicit_row_pointer(fields, fd):
+                offset += 4
+            else:
+                offset += _nested_array_max_span_bytes(fd, fields)
+            continue
+        fd["offset"] = offset
+        offset += int(fd["size"])
+
+
+def _validate_nested_array_fields(fields: List[Dict[str, Any]]) -> bool:
+    """Each ``nested_array`` names a ``/countField`` uint elsewhere in the same struct.
+
+    Valid layouts:
+    - **Count first:** ``count`` appears before ``name<[inner]/count>``, and the nested field must be **last**
+      (fixed-size tail only before it, e.g. ``[count:: … options<…/count>]``).
+    - **Count last:** ``name<[inner]/count>`` appears before ``count``, and the **count** field must be **last**
+      (e.g. ``[options<…/count> count::]``).
+    """
+    names = [str(f.get("name", "")) for f in fields]
+    for i, fd in enumerate(fields):
+        if fd.get("type") != "nested_array":
+            continue
+        cf_name = str(fd.get("count_field") or "")
+        if not cf_name or cf_name not in names:
+            return False
+        ci = names.index(cf_name)
+        ni = names.index(str(fd["name"]))
+        if ci < ni:
+            if i != len(fields) - 1:
+                return False
+        elif ni < ci:
+            if ci != len(fields) - 1:
+                return False
+        else:
+            return False
+        bpf = fd.get("base_ptr_field")
+        if bpf:
+            bf = next((x for x in fields if str(x.get("name")) == str(bpf)), None)
+            if bf is None or bf.get("type") not in ("ptr", "pcs_ptr"):
+                return False
+            if names.index(str(bpf)) >= ni:
+                return False
+    return True
+
+
+def _nested_array_max_span_bytes(fd: Dict[str, Any], fields: List[Dict[str, Any]]) -> int:
+    """Upper bound on bytes for ``nested_array`` from count field uint width."""
+    cf = next((f for f in fields if f.get("name") == fd.get("count_field")), None)
+    if not cf or cf.get("type") != "uint":
+        return 0
+    w = int(cf["size"])
+    mx = min((1 << (8 * w)) - 1, 65535)
+    return int(fd["inner_stride"]) * mx
+
+
+def _nested_array_implicit_row_pointer(fields: List[Dict[str, Any]], na_fd: Dict[str, Any]) -> bool:
+    """True for ``[options<…/count> count::]`` — row is implicit 4-byte GBA ptr @0 + ``count``; data at ``*ptr``."""
+    if na_fd.get("base_ptr_field") or na_fd.get("type") != "nested_array":
+        return False
+    names = [str(f.get("name", "")) for f in fields]
+    try:
+        ni = names.index(str(na_fd["name"]))
+        ci = names.index(str(na_fd.get("count_field") or ""))
+    except ValueError:
+        return False
+    if not (ni < ci and ci == len(fields) - 1 and ni == 0):
+        return False
+    return True
+
+
+def _struct_row_byte_size(fields: List[Dict[str, Any]]) -> int:
+    """Total bytes per struct row: fixed fields + upper bound for each inline ``nested_array``."""
+    n = 0
+    for f in fields:
+        t = f.get("type")
+        if t == "helper":
+            continue
+        if t == "nested_array":
+            if f.get("base_ptr_field"):
+                continue
+            if _nested_array_implicit_row_pointer(fields, f):
+                n += 4
+            else:
+                n += _nested_array_max_span_bytes(f, fields)
+        else:
+            n += int(f["size"])
+    return n
+
+
+def _try_parse_nested_array_token(token: str) -> Optional[Dict[str, Any]]:
+    """Parse ``name<[inner]/countField>`` or ``…/count>*ptrField`` — inner rows at ptr or inline."""
+    raw = token.strip()
+    base_ptr_field: Optional[str] = None
+    if "*" in raw:
+        head, tail = raw.rsplit("*", 1)
+        h, t = head.strip(), tail.strip()
+        if re.match(r"^\w+$", t) and h.endswith(">"):
+            raw = h
+            base_ptr_field = t
+    if "<[" not in raw or not raw.endswith(">"):
+        return None
+    m = re.match(r"^(\w+)<(\[)", raw)
+    if not m:
+        return None
+    name = m.group(1)
+    start_bracket = m.start(2)
+    depth = 0
+    close_bracket = -1
+    i = start_bracket
+    while i < len(raw):
+        if raw[i] == "[":
+            depth += 1
+        elif raw[i] == "]":
+            depth -= 1
+            if depth == 0:
+                close_bracket = i
+                break
+        i += 1
+    if close_bracket < 0:
+        return None
+    rest = raw[close_bracket + 1 :]
+    m2 = re.match(r"^/(\w+)>\s*$", rest)
+    if not m2:
+        return None
+    count_field = m2.group(1)
+    inner_bracketed = raw[start_bracket : close_bracket + 1]
+    inner_s = inner_bracketed.strip()
+    if not inner_s.startswith("[") or not inner_s.endswith("]"):
+        return None
+    inner_body = inner_s[1:-1].strip()
+    inner_fields = _parse_struct_inner_content_to_fields(inner_body)
+    if not inner_fields:
+        return None
+    inner_stride = sum(
+        int(f["size"]) for f in inner_fields if f.get("type") not in ("helper",)
+    )
+    if inner_stride <= 0:
+        return None
+    out: Dict[str, Any] = {
+        "name": name,
+        "size": 0,
+        "type": "nested_array",
+        "enum": None,
+        "hex": False,
+        "inner_fields": inner_fields,
+        "inner_stride": inner_stride,
+        "count_field": count_field,
+    }
+    if base_ptr_field:
+        out["base_ptr_field"] = base_ptr_field
+    return out
 
 
 def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
@@ -1340,6 +1560,9 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
     bf = _parse_bitfield_token(token)
     if bf is not None:
         return bf
+    na = _try_parse_nested_array_token(token)
+    if na is not None:
+        return na
     if "|s=" in token:
         token = token.split("|s=")[0]
     hex_hint = False
@@ -1871,7 +2094,9 @@ class StructEditorFrame(ttk.Frame):
         sel = self._tree.selection()
         if not sel or not sel[0].startswith("sf_"):
             return
-        fi, _ = parse_struct_tree_iid(sel[0])
+        fi, sp = parse_struct_tree_iid(sel[0])
+        if _struct_tree_spec_is_nested(sp):
+            return
         allowed = {ts_i, tm_i}
         if pl_i is not None:
             allowed.add(pl_i)
@@ -1978,7 +2203,12 @@ class StructEditorFrame(ttk.Frame):
             self._gfx_fi = None
             self._gfx_sprite_last_fi = None
             return
-        fi, _ = parse_struct_tree_iid(sel[0])
+        fi, sp = parse_struct_tree_iid(sel[0])
+        if _struct_tree_spec_is_nested(sp):
+            self._gfx_sprite_frame.grid_remove()
+            self._gfx_fi = None
+            self._gfx_sprite_last_fi = None
+            return
         if fi >= len(self._fields):
             self._gfx_sprite_frame.grid_remove()
             self._gfx_fi = None
@@ -2094,7 +2324,11 @@ class StructEditorFrame(ttk.Frame):
             self._ptr_text_frame.grid_remove()
             self._ptr_text_fi = None
             return
-        fi, _ = parse_struct_tree_iid(sel[0])
+        fi, sp = parse_struct_tree_iid(sel[0])
+        if _struct_tree_spec_is_nested(sp):
+            self._ptr_text_frame.grid_remove()
+            self._ptr_text_fi = None
+            return
         if fi >= len(self._fields):
             self._ptr_text_frame.grid_remove()
             self._ptr_text_fi = None
@@ -2191,9 +2425,11 @@ class StructEditorFrame(ttk.Frame):
         # Inclusive end → half-open [lo, hi + 1)
         return lo, hi + 1, None
 
-    def _apply_pcs_ptr_string_write(self, fi: int, new_text: str) -> bool:
+    def _apply_pcs_ptr_string_write(
+        self, fi: int, new_text: str, *, file_off: Optional[int] = None
+    ) -> bool:
         """Write PCS text at the current pointer; grow into trailing 0xFF padding or relocate into an FF gap."""
-        foff = self._pcs_ptr_field_file_off(fi)
+        foff = file_off if file_off is not None else self._pcs_ptr_field_file_off(fi)
         if foff is None:
             return False
         data = self._hex.get_data()
@@ -2346,7 +2582,12 @@ class StructEditorFrame(ttk.Frame):
             self._list_enum_fi = None
             self._list_enum_active_pcs = None
             return
-        fi, _ = parse_struct_tree_iid(sel[0])
+        fi, sp = parse_struct_tree_iid(sel[0])
+        if _struct_tree_spec_is_nested(sp):
+            self._list_enum_frame.grid_remove()
+            self._list_enum_fi = None
+            self._list_enum_active_pcs = None
+            return
         if fi >= len(self._fields):
             self._list_enum_frame.grid_remove()
             self._list_enum_fi = None
@@ -2755,6 +2996,73 @@ class StructEditorFrame(ttk.Frame):
         self._combo.current(vals.index(want))
         self._on_combo_select()
 
+    def _read_nested_array_count(self, entry_base: int, na_fd: Dict[str, Any]) -> int:
+        cf_name = str(na_fd.get("count_field") or "")
+        cf = next((f for f in self._fields if f.get("name") == cf_name), None)
+        if not cf or cf.get("type") != "uint":
+            return 0
+        data = self._hex.get_data()
+        if not data:
+            return 0
+        roff = entry_base + int(cf["offset"])
+        rsz = int(cf["size"])
+        if roff + rsz > len(data):
+            return 0
+        raw = int.from_bytes(data[roff : roff + rsz], "little")
+        mx = min((1 << (8 * rsz)) - 1, 65535)
+        return max(0, min(raw, mx))
+
+    def _nested_array_data_base(self, entry_base: int, na_fd: Dict[str, Any], data: bytes) -> Optional[int]:
+        """File offset where nested rows live: inline, implicit ptr@0 + count, or ``*base_ptr`` field."""
+        if _nested_array_implicit_row_pointer(self._fields, na_fd):
+            poff = entry_base
+            if poff + 4 > len(data):
+                return None
+            ptr = int.from_bytes(data[poff : poff + 4], "little")
+            if (ptr >> 24) not in (0x08, 0x09):
+                return None
+            fo = ptr - GBA_ROM_BASE
+            if fo < 0 or fo >= len(data):
+                return None
+            return fo
+        if not bpf:
+            return entry_base + int(na_fd["offset"])
+        pfd = next((f for f in self._fields if str(f.get("name")) == str(bpf)), None)
+        if not pfd or pfd.get("type") not in ("ptr", "pcs_ptr"):
+            return None
+        poff = entry_base + int(pfd["offset"])
+        if poff + 4 > len(data):
+            return None
+        ptr = int.from_bytes(data[poff : poff + 4], "little")
+        if (ptr >> 24) not in (0x08, 0x09):
+            return None
+        fo = ptr - GBA_ROM_BASE
+        if fo < 0 or fo >= len(data):
+            return None
+        return fo
+
+    def _nested_element_file_off(
+        self, entry_base: int, na_fd: Dict[str, Any], ai: int, ij: int
+    ) -> Optional[int]:
+        inner = na_fd.get("inner_fields") or []
+        if ij < 0 or ij >= len(inner):
+            return None
+        ifd = inner[ij]
+        stride = int(na_fd["inner_stride"])
+        data = self._hex.get_data()
+        if not data:
+            return None
+        na_base = self._nested_array_data_base(entry_base, na_fd, bytes(data))
+        if na_base is None:
+            return None
+        return na_base + ai * stride + int(ifd["offset"])
+
+    def _count_field_drives_nested(self, count_field_name: str) -> bool:
+        for f in self._fields:
+            if f.get("type") == "nested_array" and str(f.get("count_field")) == count_field_name:
+                return True
+        return False
+
     def _load_entry(self, entry_idx: int) -> None:
         self._cancel_inline_edit()
         self._ptr_text_frame.grid_remove()
@@ -2776,6 +3084,41 @@ class StructEditorFrame(ttk.Frame):
                 if fd.get("type") == "helper":
                     val_str = self._format_value(b"", fd, entry_base=off)
                     self._tree.insert("", tk.END, values=(fd["name"], val_str), iid=f"sf_{fi}")
+                    continue
+                if fd.get("type") == "nested_array":
+                    inner = fd.get("inner_fields") or []
+                    stride = int(fd["inner_stride"])
+                    n_sub = self._read_nested_array_count(off, fd)
+                    na_base = self._nested_array_data_base(off, fd, bytes(data))
+                    if na_base is None:
+                        continue
+                    for ai in range(n_sub):
+                        for ij, ifd in enumerate(inner):
+                            if ifd.get("type") == "bitfield":
+                                foff = na_base + ai * stride + int(ifd["offset"])
+                                sz = int(ifd["size"])
+                                if foff + sz > len(data):
+                                    break
+                                raw = bytes(data[foff : foff + sz])
+                                val = int.from_bytes(raw, "little")
+                                for j, p in enumerate(ifd["parts"]):
+                                    subv = (val >> p["shift"]) & ((1 << p["bits"]) - 1)
+                                    label = f"{fd['name']}[{ai}].{p['name']}"
+                                    self._tree.insert(
+                                        "",
+                                        tk.END,
+                                        values=(label, str(subv)),
+                                        iid=f"sf_nab_{fi}_{ai}_{ij}_{j}",
+                                    )
+                            else:
+                                foff = na_base + ai * stride + int(ifd["offset"])
+                                sz = int(ifd["size"])
+                                if foff + sz > len(data):
+                                    break
+                                raw = bytes(data[foff:foff + sz])
+                                val_str = self._format_value(raw, ifd, entry_base=off)
+                                label = f"{fd['name']}[{ai}].{ifd['name']}"
+                                self._tree.insert("", tk.END, values=(label, val_str), iid=f"sf_na_{fi}_{ai}_{ij}")
                     continue
                 if fd.get("type") == "bitfield":
                     foff = off + fd["offset"]
@@ -2956,24 +3299,60 @@ class StructEditorFrame(ttk.Frame):
         iid = sel[0]
         if not iid.startswith("sf_"):
             return
-        fi, _bi = parse_struct_tree_iid(iid)
+        fi, spec = parse_struct_tree_iid(iid)
         if fi < 0 or fi >= len(self._fields):
-            return
-        fd = self._fields[fi]
-        if self._is_enum_panel_field(fd):
-            self._sync_field_aux_panels()
-            self._list_enum_rom_combo.focus_set()
-            return
-        if fd.get("type") == "helper":
-            return
-        vals = self._tree.item(iid, "values")
-        if len(vals) < 2:
             return
         try:
             entry_idx = int(self._idx_var.get())
         except ValueError:
             return
-        foff = self._base_off + entry_idx * self._struct_size + fd["offset"]
+        entry_base = self._base_off + entry_idx * self._struct_size
+
+        fd: Dict[str, Any]
+        foff: Optional[int] = None
+
+        if isinstance(spec, tuple) and spec[0] == "nab":
+            _, ai, ij, bk = spec
+            na_fd = self._fields[fi]
+            if na_fd.get("type") != "nested_array":
+                return
+            inner = na_fd.get("inner_fields") or []
+            if ij >= len(inner):
+                return
+            ifd = inner[ij]
+            if ifd.get("type") != "bitfield" or bk >= len(ifd["parts"]):
+                return
+            fd = ifd
+            foff = self._nested_element_file_off(entry_base, na_fd, ai, ij)
+        elif isinstance(spec, tuple) and spec[0] == "na":
+            _, ai, ij = spec
+            na_fd = self._fields[fi]
+            if na_fd.get("type") != "nested_array":
+                return
+            inner = na_fd.get("inner_fields") or []
+            if ij >= len(inner):
+                return
+            ifd = inner[ij]
+            if ifd.get("type") == "bitfield":
+                return
+            fd = ifd
+            foff = self._nested_element_file_off(entry_base, na_fd, ai, ij)
+        else:
+            fd = self._fields[fi]
+            if self._is_enum_panel_field(fd):
+                self._sync_field_aux_panels()
+                self._list_enum_rom_combo.focus_set()
+                return
+            if fd.get("type") == "helper":
+                return
+            foff = entry_base + int(fd["offset"])
+
+        if foff is None:
+            return
+
+        vals = self._tree.item(iid, "values")
+        if len(vals) < 2:
+            return
         try:
             bbox = self._tree.bbox(iid, "#2")
         except tk.TclError:
@@ -3018,23 +3397,137 @@ class StructEditorFrame(ttk.Frame):
         if fi < 0 or fi >= len(self._fields):
             self._cancel_inline_edit()
             return
-        fd = self._fields[fi]
         try:
             entry_idx = int(self._idx_var.get())
         except ValueError:
             self._cancel_inline_edit()
             return
+        entry_base = self._base_off + entry_idx * self._struct_size
+        data = self._hex.get_data()
+        if not data:
+            self._cancel_inline_edit()
+            return
+
+        na_fd = self._fields[fi]
+
+        if isinstance(bi, tuple) and bi[0] == "nab":
+            if na_fd.get("type") != "nested_array":
+                self._cancel_inline_edit()
+                return
+            _, ai, ij, bk = bi
+            inner = na_fd.get("inner_fields") or []
+            if ij >= len(inner):
+                self._cancel_inline_edit()
+                return
+            fd = inner[ij]
+            if fd.get("type") != "bitfield" or bk >= len(fd["parts"]):
+                self._cancel_inline_edit()
+                return
+            foff = self._nested_element_file_off(entry_base, na_fd, ai, ij)
+            if foff is None or foff + int(fd["size"]) > len(data):
+                self._cancel_inline_edit()
+                return
+            try:
+                new_val = int(text, 0)
+            except ValueError:
+                self._cancel_inline_edit()
+                return
+            part = fd["parts"][bk]
+            mx = (1 << part["bits"]) - 1
+            if new_val < 0 or new_val > mx:
+                messagebox.showwarning("Struct", f"Value must be in 0 … {mx} for this bitfield.")
+                self._cancel_inline_edit()
+                return
+            cur = int.from_bytes(data[foff : foff + fd["size"]], "little")
+            m = ((1 << part["bits"]) - 1) << part["shift"]
+            cur = (cur & ~m) | ((new_val & ((1 << part["bits"]) - 1)) << part["shift"])
+            self._hex.write_bytes_at(foff, cur.to_bytes(fd["size"], "little"))
+            for j, pp in enumerate(fd["parts"]):
+                subv = (cur >> pp["shift"]) & ((1 << pp["bits"]) - 1)
+                self._tree.set(f"sf_nab_{fi}_{ai}_{ij}_{j}", "val", str(subv))
+            self._refresh_helper_field_rows(entry_base)
+            self._cancel_inline_edit()
+            self._sync_field_aux_panels()
+            return
+
+        if isinstance(bi, tuple) and bi[0] == "na":
+            if na_fd.get("type") != "nested_array":
+                self._cancel_inline_edit()
+                return
+            _, ai, ij = bi
+            inner = na_fd.get("inner_fields") or []
+            if ij >= len(inner):
+                self._cancel_inline_edit()
+                return
+            fd = inner[ij]
+            if fd.get("type") == "bitfield":
+                self._cancel_inline_edit()
+                return
+            foff = self._nested_element_file_off(entry_base, na_fd, ai, ij)
+            if foff is None or foff + int(fd["size"]) > len(data):
+                self._cancel_inline_edit()
+                return
+            if fd["type"] == "pcs":
+                enc = encode_pcs_string(text, fd["size"])
+                self._hex.write_bytes_at(foff, enc)
+            elif fd["type"] == "ascii":
+                enc = encode_ascii_slot(text, fd["size"])
+                self._hex.write_bytes_at(foff, enc)
+            elif fd["type"] == "pcs_ptr":
+                ptr = int.from_bytes(data[foff:foff + 4], "little")
+                if re.fullmatch(r"0[xX][0-9A-Fa-f]{1,8}", text):
+                    try:
+                        val = int(text, 0)
+                    except ValueError:
+                        self._cancel_inline_edit()
+                        return
+                    self._hex.write_bytes_at(foff, val.to_bytes(4, "little"))
+                elif (ptr >> 24) in (0x08, 0x09):
+                    if not self._apply_pcs_ptr_string_write(fi, raw_edit, file_off=foff):
+                        self._cancel_inline_edit()
+                        return
+                else:
+                    messagebox.showwarning(
+                        "Struct",
+                        "This pointer does not target ROM. Set Pointer (GBA) in the panel below, "
+                        "or type a ROM address (e.g. 0x08XXXXXX) here.",
+                    )
+                    self._cancel_inline_edit()
+                    return
+            elif fd["type"] in ("uint", "ptr", "gfx_sprite", "gfx_tileset", "gfx_tilemap", "gfx_palette"):
+                try:
+                    val = int(text, 0)
+                except ValueError:
+                    self._cancel_inline_edit()
+                    return
+                enc = val.to_bytes(fd["size"], "little")
+                self._hex.write_bytes_at(foff, enc)
+                if fd.get("type") == "uint" and self._count_field_drives_nested(str(fd["name"])):
+                    self._load_entry(entry_idx)
+                    self._cancel_inline_edit()
+                    self._sync_field_aux_panels()
+                    return
+            else:
+                self._cancel_inline_edit()
+                return
+
+            raw = bytes(self._hex.get_data()[foff:foff + fd["size"]])
+            self._tree.set(self._edit_iid, "val", self._format_value(raw, fd, entry_base=entry_base))
+            self._refresh_helper_field_rows(entry_base)
+            self._cancel_inline_edit()
+            self._sync_field_aux_panels()
+            return
+
+        fd = self._fields[fi]
         if fd.get("type") == "helper":
             self._cancel_inline_edit()
             return
-        foff = self._base_off + entry_idx * self._struct_size + fd["offset"]
-        data = self._hex.get_data()
-        if not data or foff + fd["size"] > len(data):
+        foff = entry_base + int(fd["offset"])
+        if foff + int(fd["size"]) > len(data):
             self._cancel_inline_edit()
             return
 
         skip_tree_refresh = False
-        entry_base = self._base_off + entry_idx * self._struct_size
         if fd.get("type") == "bitfield":
             if bi is None:
                 self._cancel_inline_edit()
@@ -3089,7 +3582,7 @@ class StructEditorFrame(ttk.Frame):
                 )
                 self._cancel_inline_edit()
                 return
-        elif fd["type"] in ("uint", "ptr", "gfx_sprite"):
+        elif fd["type"] in ("uint", "ptr", "gfx_sprite", "gfx_tileset", "gfx_tilemap", "gfx_palette"):
             try:
                 val = int(text, 0)
             except ValueError:
@@ -3097,6 +3590,11 @@ class StructEditorFrame(ttk.Frame):
                 return
             enc = val.to_bytes(fd["size"], "little")
             self._hex.write_bytes_at(foff, enc)
+            if fd.get("type") == "uint" and self._count_field_drives_nested(str(fd["name"])):
+                self._load_entry(entry_idx)
+                self._cancel_inline_edit()
+                self._sync_field_aux_panels()
+                return
         else:
             self._cancel_inline_edit()
             return
@@ -5619,7 +6117,7 @@ Format = "`f|u8`[u8 arg0]"
                 base_off = gba - GBA_ROM_BASE
             except (ValueError, TypeError):
                 continue
-            struct_size = sum(f["size"] for f in fields)
+            struct_size = _struct_row_byte_size(fields)
             if struct_size <= 0:
                 continue
             entry_label_pcs: Optional[Dict[str, Any]] = None

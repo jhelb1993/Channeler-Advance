@@ -5,6 +5,11 @@
 #   ``name""N`` — PCS-encoded string, width N bytes (0xFF terminator; same as PCS string tables).
 #   ``name''N`` — raw Latin-1 / byte string, width N bytes (NUL-padded; read/display up to first 0x00).
 #   ``baseStatTotal|=hp+attack+def`` — helper row (no ROM bytes): sums named **uint** fields; not editable.
+#   **Nested struct array:** ``name<[inner fields]/countField>`` — repeats ``inner`` N times, N from uint ``countField``.
+#     **(A)** ``countField`` before nested, nested **last** — inline blob after count: ``[count:: … blob<…/count>]``.
+#     **(B)** nested before ``countField``, count **last** — row is **implicit 4-byte GBA pointer + ``countField``**
+#     (e.g. ``[options<…/count> count::]`` → 8 bytes if ``count::`` is 4 bytes); inner rows are read at ``*pointer`` @ offset 0.
+#     Optional: append ``*ptrField`` after ``>`` to use a **named** pointer field instead of the implicit word @0.
 #   ``flags.|t|…`` — **bitfield** (``|t|``): storage size before ``|t|`` is the same rule as uints — ``.`` = 1 byte,
 #     each ``:`` = 2 bytes (so ``field:|t|`` = 2-byte container, ``field::|t|`` = 4 bytes). After ``|t|``,
 #     **pipe-separated** subfields ``name`` + bit-width run where ``.`` = 1 bit and ``:`` = 2 bits (LSB-first packing).
