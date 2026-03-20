@@ -1,5 +1,8 @@
 more TOML functionality
-graphics and palette editing
+graphics and palette editing/insertion
+c injection
+find and replace (filling unused bytes with FF)
+jump to pointer if double-clicking inside a struct
 convert structs and functions to toml
 ctrl + t pulls up all 3 editors
 port firered editor code to hex_editor.py
