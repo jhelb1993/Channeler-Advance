@@ -48,3 +48,17 @@ Channeler-Advance/
 
 - Python 3.8+
 - Tkinter (included with most Python installations)
+
+Install Python dependencies (use the same interpreter you use to run `main.py`):
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+**If the app says `tomli-w` is missing but you installed it:** `pip` and `python` often point at different installations on Windows. Install with the interpreter that runs Channeler:
+
+```bash
+python -m pip install -U tomli-w
+```
+
+Or copy the path shown in the error dialog and run `"<that path>" -m pip install -U tomli-w`.

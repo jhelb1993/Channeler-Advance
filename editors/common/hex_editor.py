@@ -8,6 +8,7 @@ Optional Capstone disassembly (ARM7TDMI Thumb/ARM).
 import os
 import re
 import shutil
+import sys
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
@@ -15,24 +16,31 @@ from tkinter import ttk, filedialog, messagebox
 from typing import Optional, Dict, List, Tuple, Set, Any
 
 from editors.common.gba_graphics import (
+    build_sprite_payload_for_rom,
+    compute_graphics_rom_span,
     decode_graphics_anchor_to_png,
     decode_palette_to_png_pal,
-    decode_sprite_at_pointer,
     decode_gba_palette32_to_rgb888,
+    decode_sprite_at_pointer,
     extract_palette_bytes,
     extract_sprite_bytes,
     get_palette_4_slot_bytes,
+    graphics_row_byte_size,
     max_sprite_height_tiles,
+    measure_palette_rom_footprint,
+    measure_sprite_rom_footprint,
     palette_bytes_for_gbagfx,
+    palette_payload_for_rom,
     parse_graphics_anchor_format,
     parse_graphics_table_format,
     parse_sprite_field_spec,
     parse_tilemap_dimension_spec,
-    graphics_row_byte_size,
-    compute_graphics_rom_span,
+    prepare_palette_rom_body_from_import,
     raw_gba_palette_to_rgb888_list,
     resolve_gba_pointer,
+    rewrite_standalone_sprite_format_dimensions,
     sprite_bytes_per_tile,
+    sprite_import_png,
 )
 
 _TOML_AVAILABLE = False
@@ -43,11 +51,38 @@ except ImportError:
     pass
 
 _TOMLI_W_AVAILABLE = False
-try:
-    import tomli_w
-    _TOMLI_W_AVAILABLE = True
-except ImportError:
-    tomli_w = None  # type: ignore
+tomli_w = None  # type: ignore
+
+
+def _try_import_tomli_w() -> bool:
+    """Load ``tomli-w`` (retry after ``pip install`` without restarting the app)."""
+    global _TOMLI_W_AVAILABLE, tomli_w
+    try:
+        import tomli_w as _tw
+
+        tomli_w = _tw
+        _TOMLI_W_AVAILABLE = True
+        return True
+    except ImportError:
+        tomli_w = None  # type: ignore
+        _TOMLI_W_AVAILABLE = False
+        return False
+
+
+_try_import_tomli_w()
+
+
+def _tomli_w_missing_message() -> str:
+    """User-facing hint when ``tomli-w`` is missing (often pip vs. runtime Python mismatch on Windows)."""
+    exe = sys.executable
+    return (
+        "Writing TOML needs the ``tomli-w`` package in the same Python that runs this app.\n\n"
+        f"This process is using:\n  {exe}\n\n"
+        "Install into that interpreter (plain ``pip`` may target a different Python):\n"
+        f'  "{exe}" -m pip install -U tomli-w\n\n'
+        "Or install all deps from the repo root:\n"
+        f'  "{exe}" -m pip install -r requirements.txt'
+    )
 
 _ANGR_AVAILABLE = False
 try:
@@ -80,6 +115,20 @@ GBA_IWRAM_START = 0x03000000
 GBA_IWRAM_END = 0x03007FFF
 BYTES_PER_ROW = 16
 HEX_DIGITS = "0123456789ABCDEFabcdef"
+
+
+def _toml_named_anchor_address_hex_string(file_offset: int) -> str:
+    """Format a ROM **file** offset for ``[[NamedAnchors]].Address`` (``0x…`` hex, no ``0x08`` GBA prefix)."""
+    fo = int(file_offset)
+    if fo < 0:
+        raise ValueError("ROM file offset must be non-negative")
+    return f"0x{fo:X}"
+
+
+def _normalize_loaded_toml_document(data: Dict[str, Any]) -> None:
+    """Drop deprecated top-level sections so they are not written back by tomli-w."""
+    data.pop("OffsetPointer", None)
+
 
 # Pokemon GBA (PCS) character set - byte to display char. Based on HexManiacAdvance PCSString.
 # https://github.com/haven1433/HexManiacAdvance/blob/master/src/HexManiac.Core/Models/PCSString.cs
@@ -277,6 +326,205 @@ def find_disjoint_ff_gap_start(
                 return s
         i = j
     return None
+
+
+def parse_ff_gap_search_window_strings(
+    data: Any, fs: str, ts: str
+) -> Tuple[Optional[int], Optional[int], Optional[str]]:
+    """Parse FF-gap search range from two strings (same rules as StructEditor ``_parse_ff_gap_search_window``)."""
+    if not data:
+        return None, None, "No ROM loaded."
+    n = len(data)
+    fs, ts = fs.strip(), ts.strip()
+    if not fs and not ts:
+        return None, None, None
+    if (fs and not ts) or (not fs and ts):
+        return (
+            None,
+            None,
+            'Enter both “from” and “to”, or leave both empty to search the entire ROM.',
+        )
+    try:
+        lo = int(fs, 0)
+        hi = int(ts, 0)
+    except ValueError:
+        return None, None, "Invalid offset (use decimal or 0x hex)."
+    if GBA_ROM_BASE <= lo <= GBA_ROM_MAX:
+        lo -= GBA_ROM_BASE
+    if GBA_ROM_BASE <= hi <= GBA_ROM_MAX:
+        hi -= GBA_ROM_BASE
+    if lo < 0 or hi >= n:
+        return None, None, f"Offsets must lie within the ROM file (0 … 0x{n - 1:X})."
+    if hi < lo:
+        return None, None, "End offset must be ≥ start offset."
+    return lo, hi + 1, None
+
+
+def _pad_graphic_slot(payload: bytes, cap: int) -> bytes:
+    """Pad with ``0xFF`` so the written region exactly fills ``cap`` bytes (``cap`` ≥ ``len(payload)``)."""
+    if len(payload) > cap:
+        return payload
+    return payload + bytes([0xFF]) * (cap - len(payload))
+
+
+def _apply_word_aligned_pointer_patch(
+    rom: bytearray,
+    old_gba: int,
+    new_gba: int,
+    *,
+    exclude_ranges: Optional[List[Tuple[int, int]]] = None,
+) -> int:
+    """
+    Replace every **word-aligned** (4-byte) little-endian ``u32`` equal to ``old_gba`` with ``new_gba``.
+
+    ``exclude_ranges`` are half-open ``[lo, hi)`` file offsets skipped (e.g. old/new graphics blobs) so embedded
+    bytes are not mistaken for pointers.
+    """
+    if old_gba == new_gba:
+        return 0
+    old_b = int(old_gba).to_bytes(4, "little")
+    new_b = int(new_gba).to_bytes(4, "little")
+    excl = exclude_ranges or []
+
+    def in_excl(pos: int) -> bool:
+        for lo, hi in excl:
+            if lo <= pos < hi:
+                return True
+        return False
+
+    n = 0
+    i = 0
+    while i + 4 <= len(rom):
+        if in_excl(i):
+            i += 4
+            continue
+        if rom[i : i + 4] == old_b:
+            rom[i : i + 4] = new_b
+            n += 1
+        i += 4
+    return n
+
+
+class _GfxRelocateDialog:
+    """Pick a file offset for a blob that no longer fits its original slot; optional FF-gap search."""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        title: str,
+        need_bytes: int,
+        excl_lo: int,
+        excl_hi: int,
+        hex_editor: "HexEditorFrame",
+        old_gba_addr: int,
+    ) -> None:
+        self.result: Optional[int] = None
+        self._need = need_bytes
+        self._excl_lo = excl_lo
+        self._excl_hi = excl_hi
+        self._hex = hex_editor
+        self._old_gba = int(old_gba_addr)
+        self._dlg = tk.Toplevel(parent)
+        self._dlg.title(title)
+        self._dlg.transient(parent)
+        self._dlg.grab_set()
+        f = ttk.Frame(self._dlg, padding=10)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            f,
+            text=(
+                f"Imported data is larger than the current slot (needs {need_bytes} byte(s)).\n"
+                f"Previous start: GBA 0x{self._old_gba:08X} (file 0x{excl_lo:X}).\n\n"
+                "Pick a new **file offset** below (or Search FF gap). After writing, the tool will:\n"
+                f"  • Replace every word-aligned pointer equal to 0x{self._old_gba:08X} in the ROM\n"
+                "    with the new GBA address, and\n"
+                "  • Update the NamedAnchor Address in TOML when possible.\n"
+            ),
+            wraplength=440,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(f, text="Target file offset:", font=("Consolas", 9)).grid(row=1, column=0, sticky="w")
+        self._off_var = tk.StringVar(value="")
+        ttk.Entry(f, textvariable=self._off_var, width=22, font=("Consolas", 9)).grid(
+            row=1, column=1, sticky="ew", pady=2
+        )
+        ttk.Label(f, text="FF gap search from / through:", font=("Consolas", 8), foreground="#666").grid(
+            row=2, column=0, sticky="nw", pady=(8, 0)
+        )
+        gap_f = ttk.Frame(f)
+        gap_f.grid(row=2, column=1, sticky="ew", pady=(8, 0))
+        self._from_var = tk.StringVar(value="")
+        self._to_var = tk.StringVar(value="")
+        ttk.Entry(gap_f, textvariable=self._from_var, width=14, font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Entry(gap_f, textvariable=self._to_var, width=14, font=("Consolas", 8)).pack(side=tk.LEFT)
+        ttk.Button(f, text="Search FF gap", command=self._on_search).grid(row=3, column=1, sticky="e", pady=(6, 0))
+        btnf = ttk.Frame(f)
+        btnf.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
+        f.columnconfigure(1, weight=1)
+        self._dlg.bind("<Return>", lambda e: self._on_ok())
+        self._dlg.bind("<Escape>", lambda e: self._on_cancel())
+        self._dlg.wait_window()
+
+    def _on_search(self) -> None:
+        data = self._hex.get_data()
+        if not data:
+            messagebox.showerror("Relocate", "No ROM loaded.")
+            return
+        w_lo, w_hi_ex, w_err = parse_ff_gap_search_window_strings(
+            data, self._from_var.get(), self._to_var.get()
+        )
+        if w_err:
+            messagebox.showerror("Relocate", w_err)
+            return
+        gap = find_disjoint_ff_gap_start(
+            data,
+            self._need,
+            self._excl_lo,
+            self._excl_hi,
+            window_lo=w_lo,
+            window_hi=w_hi_ex,
+        )
+        if gap is None:
+            messagebox.showerror(
+                "Relocate",
+                f"No qualifying block of {self._need} consecutive 0xFF byte(s) was found "
+                f"(disjoint from the original slot). Adjust the search range or pick an offset manually.",
+            )
+            return
+        self._off_var.set(f"0x{gap:X}")
+
+    def _on_ok(self) -> None:
+        data = self._hex.get_data()
+        if not data:
+            self._dlg.destroy()
+            return
+        s = self._off_var.get().strip()
+        if not s:
+            messagebox.showwarning("Relocate", "Enter a file offset (hex or decimal), or use Search FF gap.")
+            return
+        try:
+            off = int(s, 0)
+        except ValueError:
+            messagebox.showwarning("Relocate", "Invalid offset (use decimal or 0x hex).")
+            return
+        if off < 0:
+            messagebox.showwarning("Relocate", "Offset must be ≥ 0.")
+            return
+        if GBA_ROM_BASE <= off <= GBA_ROM_MAX:
+            off -= GBA_ROM_BASE
+        if off + self._need > len(data):
+            messagebox.showerror(
+                "Relocate",
+                f"Region too small for this graphic: need {self._need} byte(s) from file offset 0x{off:X}, "
+                f"but ROM size is {len(data)} bytes (would end at 0x{off + self._need:X}).",
+            )
+            return
+        self.result = off
+        self._dlg.destroy()
+
+    def _on_cancel(self) -> None:
+        self._dlg.destroy()
 
 
 class _PcsEditDialog:
@@ -614,9 +862,10 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._combo = ttk.Combobox(top, font=("Consolas", 8), state="readonly")
         self._combo.grid(row=0, column=1, sticky="ew", padx=(0, 4))
         self._combo.bind("<<ComboboxSelected>>", lambda e: self._decode_selected())
-        ttk.Button(top, text="Decode", command=self._decode_selected).grid(row=0, column=2, sticky="e")
+        ttk.Button(top, text="Decode", command=self._decode_selected).grid(row=0, column=2, sticky="e", padx=(0, 4))
+        ttk.Button(top, text="Import graphic…", command=self._on_import_graphic).grid(row=0, column=3, sticky="e")
         srow = ttk.Frame(top)
-        srow.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(2, 0))
+        srow.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(2, 0))
         srow.columnconfigure(1, weight=1)
         ttk.Label(srow, text="Search:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w", padx=(0, 4))
         self._combo_search_var = tk.StringVar()
@@ -624,7 +873,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._combo_search_var.trace_add("write", lambda *_: self._schedule_gfx_combo_filter())
 
         self._table_nav = ttk.Frame(top)
-        self._table_nav.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(2, 0))
+        self._table_nav.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(2, 0))
         self._table_nav.grid_remove()
         ttk.Label(self._table_nav, text="Table row:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w")
         self._table_idx_spin = ttk.Spinbox(
@@ -642,7 +891,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._table_row_label.grid(row=0, column=2, sticky="w")
 
         self._sprite_layout_row = ttk.Frame(top)
-        self._sprite_layout_row.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self._sprite_layout_row.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self._sprite_layout_row.grid_remove()
         ttk.Label(self._sprite_layout_row, text="Tile rows (H):", font=("Consolas", 8)).grid(
             row=0, column=0, sticky="w", padx=(0, 4)
@@ -1155,6 +1404,273 @@ class GraphicsPreviewFrame(ttk.Frame):
             self._try_show_image(png_path)
         else:
             self._clear_image("(sprite PNG not produced)")
+
+    def _gfx_import_write_blob(
+        self,
+        label: str,
+        blob_off: int,
+        payload: bytes,
+        cap: int,
+        *,
+        is_table: bool,
+        named_anchor_for_reloc: Optional[str],
+    ) -> Tuple[bool, str]:
+        rom = self._hex.get_data()
+        if not rom:
+            return False, ""
+        if len(payload) <= cap:
+            self._hex.write_bytes_at(blob_off, _pad_graphic_slot(payload, cap))
+            return True, (
+                f"{label}: wrote {len(payload)} byte(s) at file 0x{blob_off:X} "
+                f"(padded to {cap} with 0xFF).\n"
+            )
+        if is_table:
+            return (
+                False,
+                f"{label}: needs {len(payload)} byte(s) but this graphics table row only "
+                f"allocates {cap} byte(s).\n",
+            )
+        old_gba = blob_off + GBA_ROM_BASE
+        dlg = _GfxRelocateDialog(
+            self.winfo_toplevel(),
+            f"Relocate {label}",
+            len(payload),
+            blob_off,
+            blob_off + max(cap, 1),
+            self._hex,
+            old_gba,
+        )
+        new_off = dlg.result
+        if new_off is None:
+            return False, f"{label}: relocate cancelled.\n"
+        self._hex.write_bytes_at(new_off, payload)
+        new_gba = new_off + GBA_ROM_BASE
+        excl_ranges: List[Tuple[int, int]] = [
+            (blob_off, blob_off + max(cap, 1)),
+            (new_off, new_off + len(payload)),
+        ]
+        ptr_n = self._hex.replace_word_aligned_rom_pointers(
+            old_gba, new_gba, exclude_ranges=excl_ranges
+        )
+        log = (
+            f"{label}: wrote {len(payload)} byte(s) at file 0x{new_off:X} "
+            f"(GBA 0x{new_gba:08X}).\n"
+            f"{label}: updated {ptr_n} word-aligned pointer(s) "
+            f"0x{old_gba:08X} → 0x{new_gba:08X} (ROM scan; old/new blob regions excluded).\n"
+        )
+        if named_anchor_for_reloc:
+            ok, err = self._hex.update_named_anchor_gba_address(
+                named_anchor_for_reloc, new_off + GBA_ROM_BASE
+            )
+            if ok:
+                log += (
+                    f"{label}: updated NamedAnchor {named_anchor_for_reloc!r} Address → "
+                    f"0x{new_off + GBA_ROM_BASE:08X}.\n"
+                )
+            else:
+                log += f"{label}: ROM updated but TOML Address not saved ({err}).\n"
+                messagebox.showwarning(
+                    "Import graphic",
+                    f"{label} was written at file 0x{new_off:X}, but the TOML could not be updated:\n{err}",
+                )
+        else:
+            log += (
+                f"{label}: no NamedAnchor to auto-repoint; update ROM pointers or TOML manually if needed.\n"
+            )
+        return True, log
+
+    def _on_import_graphic(self) -> None:
+        name = self._combo.get().strip()
+        if not name:
+            messagebox.showinfo("Import graphic", "Select a graphics NamedAnchor first.")
+            return
+        rom = self._hex.get_data()
+        if not rom:
+            messagebox.showwarning("Import graphic", "No ROM loaded.")
+            return
+        info = next((a for a in self._hex.get_graphics_anchors() if str(a["name"]) == name), None)
+        if not info:
+            messagebox.showerror("Import graphic", "Anchor missing.")
+            return
+        spec = info["spec"]
+        if spec.kind != "sprite":
+            messagebox.showinfo(
+                "Import graphic",
+                "Import is only implemented for sprite anchors (uct/lzt/ucs/lzs…), not palette-only or tilemap.",
+            )
+            return
+        if spec.bpp not in (4, 8):
+            messagebox.showinfo("Import graphic", "6bpp sprite import is not supported yet.")
+            return
+        tbl_idx, _eff, _ = self._effective_table_state(info)
+        blob_off = int(info["base_off"])
+        if info.get("graphics_table"):
+            blob_off = int(info["base_off"]) + tbl_idx * int(info["row_byte_size"])
+        is_table = bool(info.get("graphics_table"))
+        table_row_b = int(info["row_byte_size"]) if is_table else None
+
+        path = filedialog.askopenfilename(
+            title="Import PNG",
+            filetypes=[("PNG images", "*.png"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        tile_bytes, flat_pal, err, tw, th = sprite_import_png(path, spec)
+        if err:
+            messagebox.showerror("Import graphic", err)
+            return
+
+        try:
+            sprite_cap = measure_sprite_rom_footprint(
+                bytes(rom), blob_off, spec, graphics_table_row_bytes=table_row_b
+            )
+        except ValueError as e:
+            messagebox.showerror("Import graphic", str(e))
+            return
+
+        sprite_payload = build_sprite_payload_for_rom(tile_bytes, spec, lz=spec.lz)
+        logs: List[str] = [
+            f"Import: PNG pixel size → {tw}×{th} tiles ({tw * 8}×{th * 8} px canvas); "
+            f"not resized to match the TOML / preview window.\n",
+        ]
+
+        ok_s, log_s = self._gfx_import_write_blob(
+            "Sprite",
+            blob_off,
+            sprite_payload,
+            sprite_cap,
+            is_table=is_table,
+            named_anchor_for_reloc=None if is_table else name,
+        )
+        logs.append(log_s)
+        if not ok_s:
+            self._set_log("".join(logs))
+            messagebox.showerror("Import graphic", "Sprite import failed; see decode log.")
+            return
+
+        def _should_rewrite_sprite_format(sp: Any, w: int, h: int) -> bool:
+            if getattr(sp, "kind", None) != "sprite":
+                return False
+            if sp.width_tiles == 0 and sp.height_tiles == 0:
+                return True
+            return (w, h) != (int(sp.width_tiles), int(sp.height_tiles))
+
+        if _should_rewrite_sprite_format(spec, tw, th):
+            cur_fmt = str(info["anchor"].get("Format", "") or "")
+            new_fmt = rewrite_standalone_sprite_format_dimensions(cur_fmt, tw, th)
+            if new_fmt:
+                info["anchor"]["Format"] = new_fmt
+                ok_toml, err_toml = self._hex.persist_toml_data()
+                if ok_toml:
+                    if self._hex.reload_toml_from_disk():
+                        logs.append(
+                            f"TOML: Format updated for {name!r} to {tw}×{th} tiles; structure file reloaded.\n"
+                        )
+                        info2 = next(
+                            (a for a in self._hex.get_graphics_anchors() if str(a["name"]) == name),
+                            None,
+                        )
+                        if info2:
+                            info = info2
+                            spec = info2["spec"]
+                    else:
+                        logs.append("TOML: Format saved but reload from disk failed.\n")
+                else:
+                    logs.append(f"TOML: could not save updated Format ({err_toml}).\n")
+            else:
+                logs.append(
+                    "TOML: could not auto-rewrite Format for this anchor; set WxH in the TOML manually if needed.\n"
+                )
+
+        pan = getattr(spec, "palette_anchor_name", None)
+        if spec.bpp == 8:
+            if not pan:
+                messagebox.showerror(
+                    "Import graphic",
+                    "8bpp sprites need a linked palette NamedAnchor (|palette… in TOML).",
+                )
+                self._set_log("".join(logs))
+                return
+            ext_ps, ext_pb, _paln = self._hex.resolve_palette_for_graphics_row(pan.strip(), tbl_idx)
+            if ext_ps is None or ext_pb is None:
+                messagebox.showerror("Import graphic", "Could not resolve 8bpp palette data in ROM.")
+                self._set_log("".join(logs))
+                return
+            ga_p = self._hex.find_graphics_anchor_by_name(pan.strip())
+            pal_table_b = int(ga_p["row_byte_size"]) if ga_p and ga_p.get("graphics_table") else None
+            pal_is_table = bool(ga_p and ga_p.get("graphics_table"))
+            try:
+                pal_cap = measure_palette_rom_footprint(
+                    bytes(rom), ext_pb, ext_ps, graphics_table_row_bytes=pal_table_b
+                )
+            except ValueError as e:
+                self._set_log("".join(logs))
+                messagebox.showerror("Import graphic", str(e))
+                return
+            pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
+            pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+            pal_anchor_name = pan.strip() if ga_p and ga_p["spec"].kind == "palette" else None
+            if pal_anchor_name and pal_is_table:
+                pal_anchor_name = None
+            ok_p, log_p = self._gfx_import_write_blob(
+                "Palette",
+                ext_pb,
+                pal_payload,
+                pal_cap,
+                is_table=pal_is_table,
+                named_anchor_for_reloc=pal_anchor_name,
+            )
+            logs.append(log_p)
+            if not ok_p:
+                self._set_log("".join(logs))
+                messagebox.showerror(
+                    "Import graphic",
+                    "Palette import failed; sprite data may already be written. See decode log.",
+                )
+                return
+        elif spec.bpp == 4 and pan:
+            ext_ps, ext_pb, pal_notes = self._hex.resolve_palette_for_graphics_row(pan.strip(), tbl_idx)
+            if ext_ps is None or ext_pb is None:
+                logs.append(pal_notes or "Palette not resolved; skipped palette write.\n")
+            else:
+                ga_p = self._hex.find_graphics_anchor_by_name(pan.strip())
+                pal_table_b = int(ga_p["row_byte_size"]) if ga_p and ga_p.get("graphics_table") else None
+                pal_is_table = bool(ga_p and ga_p.get("graphics_table"))
+                try:
+                    pal_cap = measure_palette_rom_footprint(
+                        bytes(rom), ext_pb, ext_ps, graphics_table_row_bytes=pal_table_b
+                    )
+                except ValueError as e:
+                    self._set_log("".join(logs))
+                    messagebox.showerror("Import graphic", str(e))
+                    return
+                pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
+                pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                pal_anchor_name = pan.strip() if ga_p and ga_p["spec"].kind == "palette" else None
+                if pal_anchor_name and pal_is_table:
+                    pal_anchor_name = None
+                ok_p, log_p = self._gfx_import_write_blob(
+                    "Palette",
+                    ext_pb,
+                    pal_payload,
+                    pal_cap,
+                    is_table=pal_is_table,
+                    named_anchor_for_reloc=pal_anchor_name,
+                )
+                logs.append(log_p)
+                if not ok_p:
+                    self._set_log("".join(logs))
+                    messagebox.showerror(
+                        "Import graphic",
+                        "Palette import failed; sprite data may already be written. See decode log.",
+                    )
+                    return
+        elif spec.bpp == 4:
+            logs.append("No |palette anchor on this sprite: tiles imported; preview uses default grayscale palette.\n")
+
+        self._set_log("".join(logs) + "\nRe-decoding preview…\n")
+        self._decode_selected()
 
 
 def _split_enum_field_ref(enum_ref: Optional[str]) -> Tuple[str, int]:
@@ -5307,12 +5823,14 @@ class HexEditorFrame(ttk.Frame):
             try:
                 with open(toml_path, "rb") as f:
                     self._toml_data = tomli.load(f)
+                _normalize_loaded_toml_document(self._toml_data)
                 loaded = True
             except Exception as e:
                 messagebox.showerror("TOML load failed", f"{toml_path}\n{e}")
                 return False
         if not loaded:
             self._toml_data = self._load_toml_regex_fallback(toml_path)
+            _normalize_loaded_toml_document(self._toml_data)
         return True
 
     def load_toml_manual(self, toml_path: str) -> bool:
@@ -5490,6 +6008,7 @@ class HexEditorFrame(ttk.Frame):
         """Create default TOML file with template structure."""
         default = """# Structure definitions for this ROM
 # Add [[FunctionAnchors]], [[Structs]], [[Constants]] as needed.
+# ``Address`` values are ROM **file** offsets in hex (no 0x08xxxxxx GBA prefix).
 
 [[Constants]]
 Name = "EXAMPLE_CONST"
@@ -5501,7 +6020,7 @@ Format = "`s`{field|u8}"
 
 [[FunctionAnchors]]
 Name = "funcs.example.FuncName"
-Address = 0x8000000
+Address = 0x0
 Format = "`f|u8`[u8 arg0]"
 """
         try:
@@ -5512,6 +6031,7 @@ Format = "`f|u8`[u8 arg0]"
             if _TOML_AVAILABLE:
                 with open(toml_path, "rb") as f:
                     self._toml_data = tomli.load(f)
+                _normalize_loaded_toml_document(self._toml_data)
         except OSError:
             self._toml_path = None
             self._toml_data = {}
@@ -5527,6 +6047,7 @@ Format = "`f|u8`[u8 arg0]"
             if _TOML_AVAILABLE:
                 with open(new_toml, "rb") as f:
                     self._toml_data = tomli.load(f)
+                _normalize_loaded_toml_document(self._toml_data)
         except OSError:
             pass
 
@@ -6210,12 +6731,9 @@ Format = "`f|u8`[u8 arg0]"
 
     def update_toml_list_string_at_index(self, list_name: str, flat_index: int, new_label: str) -> bool:
         """Update one string in ``[[List]]`` and rewrite the TOML file on disk."""
-        if not _TOMLI_W_AVAILABLE:
-            messagebox.showerror(
-                "Struct",
-                "Editing TOML requires the tomli-w package.\n"
-                "Install with: pip install tomli-w",
-            )
+        _try_import_tomli_w()
+        if not _TOMLI_W_AVAILABLE or tomli_w is None:
+            messagebox.showerror("Struct", _tomli_w_missing_message())
             return False
         if not self._toml_path or not os.path.isfile(self._toml_path):
             messagebox.showerror(
@@ -6294,6 +6812,80 @@ Format = "`f|u8`[u8 arg0]"
                 return str(val).strip().strip("'\"")
             return None
         return None
+
+    def update_named_anchor_gba_address(self, anchor_name: str, gba_addr: int) -> Tuple[bool, str]:
+        """Persist ``Address`` for a ``[[NamedAnchors]]`` row: ROM **file offset** as hex (``0x…``), no ``0x08`` prefix.
+
+        ``gba_addr`` may be a full GBA ROM pointer (``0x08xxxxxx``) or a file offset; file offset is what gets stored.
+        """
+        _try_import_tomli_w()
+        if not _TOMLI_W_AVAILABLE or tomli_w is None:
+            return False, _tomli_w_missing_message()
+        if not self._toml_path or not os.path.isfile(self._toml_path):
+            return False, "No TOML file path set (open a ROM with a .toml beside it)."
+        g = int(gba_addr)
+        if GBA_ROM_BASE <= g <= GBA_ROM_MAX:
+            file_off = g - GBA_ROM_BASE
+        elif 0 <= g < GBA_ROM_BASE:
+            file_off = g
+        else:
+            return False, f"Invalid ROM address for TOML: 0x{g:X}"
+        want = anchor_name.strip().strip("'\"")
+        for anchor in self._toml_data.get("NamedAnchors", []):
+            n = str(anchor.get("Name", "")).strip().strip("'\"")
+            if n == want:
+                anchor["Address"] = _toml_named_anchor_address_hex_string(file_off)
+                try:
+                    with open(self._toml_path, "wb") as f:
+                        tomli_w.dump(self._toml_data, f)
+                except OSError as e:
+                    return False, str(e)
+                return True, ""
+        return False, f"NamedAnchor not found: {anchor_name!r}"
+
+    def persist_toml_data(self) -> Tuple[bool, str]:
+        """Write ``self._toml_data`` to ``self._toml_path`` (requires tomli-w)."""
+        _try_import_tomli_w()
+        if not _TOMLI_W_AVAILABLE or tomli_w is None:
+            return False, _tomli_w_missing_message()
+        if not self._toml_path or not os.path.isfile(self._toml_path):
+            return False, "No TOML file path set."
+        try:
+            with open(self._toml_path, "wb") as f:
+                tomli_w.dump(self._toml_data, f)
+        except OSError as e:
+            return False, str(e)
+        return True, ""
+
+    def reload_toml_from_disk(self) -> bool:
+        """Re-read the structure TOML from disk into ``self._toml_data`` (normalizes deprecated keys)."""
+        if not self._toml_path or not os.path.isfile(self._toml_path):
+            return False
+        ok = self._load_toml_bytes_from_path(self._toml_path)
+        if ok:
+            self._ldr_pc_targets_valid = False
+        return ok
+
+    def replace_word_aligned_rom_pointers(
+        self,
+        old_gba: int,
+        new_gba: int,
+        *,
+        exclude_ranges: Optional[List[Tuple[int, int]]] = None,
+    ) -> int:
+        """
+        Scan the ROM at 4-byte alignment; replace little-endian ``u32 == old_gba`` with ``new_gba``.
+        Used after relocating graphics so tables / struct fields that pointed at the old start are updated.
+        """
+        if not self._data:
+            return 0
+        n = _apply_word_aligned_pointer_patch(
+            self._data, old_gba, new_gba, exclude_ranges=exclude_ranges
+        )
+        if n:
+            self._modified = True
+            self._refresh_visible()
+        return n
 
     def write_bytes_at(self, offset: int, data: bytes) -> None:
         if not self._data or offset < 0:

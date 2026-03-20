@@ -3921,67 +3921,6 @@ Length = 1
 Offset = -1
 
 #################################
-[[OffsetPointer]]
-Address = 0x011510
-Offset = 0x000004
-
-[[OffsetPointer]]
-Address = 0x0116C0
-Offset = 0x000004
-
-[[OffsetPointer]]
-Address = 0x03E8F8
-Offset = 0x000004
-
-[[OffsetPointer]]
-Address = 0x03E9A0
-Offset = 0x000004
-
-[[OffsetPointer]]
-Address = 0x040EE0
-Offset = 0x000004
-
-[[OffsetPointer]]
-Address = 0x046204
-Offset = 0x000011
-
-[[OffsetPointer]]
-Address = 0x0462A8
-Offset = 0x000011
-
-[[OffsetPointer]]
-Address = 0x114DD8
-Offset = 0x000004
-
-[[OffsetPointer]]
-Address = 0x115068
-Offset = 0x000004
-
-[[OffsetPointer]]
-Address = 0x12DF5C
-Offset = 0x000004
-
-[[OffsetPointer]]
-Address = 0x0C6D9C
-Offset = 0x000010
-
-[[OffsetPointer]]
-Address = 0x0BFCA4
-Offset = 0xFFFFFFF8
-
-[[OffsetPointer]]
-Address = 0x0BFCC4
-Offset = 0xFFFFFFF8
-
-[[OffsetPointer]]
-Address = 0x0728B8
-Offset = 0xFFFEC780
-
-[[OffsetPointer]]
-Address = 0x0728BC
-Offset = 0xFFFEC780
-
-#################################
 [[List]]
 Name = '''weathertypes'''
 DefaultHash = '''5C45A6FC'''

@@ -132,6 +132,277 @@ def decompress_gba_lz77(data: bytes, max_out: int = 1 << 22) -> bytes:
     return bytes(out)
 
 
+def decompress_gba_lz77_with_consumed(data: bytes, max_out: int = 1 << 22) -> Tuple[bytes, int]:
+    """Like :func:`decompress_gba_lz77` but also returns compressed input byte length (for footprint / replace)."""
+    if len(data) < 4:
+        raise ValueError("LZ77 input too short")
+    if data[0] != 0x10:
+        raise ValueError("Expected LZ77 type 0x10")
+    dest_size = data[1] | (data[2] << 8) | (data[3] << 16)
+    if dest_size <= 0 or dest_size > max_out:
+        raise ValueError("Invalid LZ77 decompressed size")
+    out = bytearray()
+    src_pos = 4
+    while len(out) < dest_size and src_pos < len(data):
+        flags = data[src_pos]
+        src_pos += 1
+        for _ in range(8):
+            if len(out) >= dest_size:
+                break
+            if flags & 0x80:
+                if src_pos + 1 >= len(data):
+                    raise ValueError("LZ77 truncated (ref)")
+                b0, b1 = data[src_pos], data[src_pos + 1]
+                src_pos += 2
+                block_size = (b0 >> 4) + 3
+                block_distance = (((b0 & 0x0F) << 8) | b1) + 1
+                block_pos = len(out) - block_distance
+                if block_pos < 0:
+                    raise ValueError("LZ77 invalid lookback")
+                if len(out) + block_size > dest_size:
+                    block_size = dest_size - len(out)
+                for j in range(block_size):
+                    if len(out) >= dest_size:
+                        break
+                    out.append(out[block_pos + j])
+            else:
+                if src_pos >= len(data):
+                    raise ValueError("LZ77 truncated (literal)")
+                out.append(data[src_pos])
+                src_pos += 1
+            flags <<= 1
+    if len(out) != dest_size:
+        raise ValueError("LZ77 size mismatch")
+    return bytes(out), src_pos
+
+
+def compress_gba_lz77(uncompressed: bytes, *, min_distance: int = 1) -> bytes:
+    """
+    LZ77 type ``0x10`` compression matching pret ``pokeemerald/tools/gbagfx/lz.c`` ``LZCompress``
+    (same layout as :func:`decompress_gba_lz77`).
+    """
+    src = uncompressed
+    src_size = len(src)
+    if src_size <= 0:
+        raise ValueError("LZ77: empty input")
+    if src_size > 0xFFFFFF:
+        raise ValueError("Data too large for GBA LZ77 (max 16 MiB)")
+    worst_case = 4 + src_size + ((src_size + 7) // 8)
+    worst_case = (worst_case + 3) & ~3
+    dest = bytearray(worst_case)
+    dest[0] = 0x10
+    dest[1] = src_size & 0xFF
+    dest[2] = (src_size >> 8) & 0xFF
+    dest[3] = (src_size >> 16) & 0xFF
+    src_pos = 0
+    dest_pos = 4
+    while True:
+        flag_byte_pos = dest_pos
+        dest_pos += 1
+        dest[flag_byte_pos] = 0
+        for i in range(8):
+            best_block_distance = 0
+            best_block_size = 0
+            block_distance = min_distance
+            while block_distance <= src_pos and block_distance <= 0x1000:
+                block_start = src_pos - block_distance
+                block_size = 0
+                while (
+                    block_size < 18
+                    and src_pos + block_size < src_size
+                    and src[block_start + block_size] == src[src_pos + block_size]
+                ):
+                    block_size += 1
+                if block_size > best_block_size:
+                    best_block_distance = block_distance
+                    best_block_size = block_size
+                    if block_size == 18:
+                        break
+                block_distance += 1
+            if best_block_size >= 3:
+                dest[flag_byte_pos] |= 0x80 >> i
+                src_pos += best_block_size
+                best_block_size -= 3
+                best_block_distance -= 1
+                dest[dest_pos] = (best_block_size << 4) | ((best_block_distance >> 8) & 0x0F)
+                dest[dest_pos + 1] = best_block_distance & 0xFF
+                dest_pos += 2
+            else:
+                dest[dest_pos] = src[src_pos]
+                dest_pos += 1
+                src_pos += 1
+            if src_pos == src_size:
+                remainder = dest_pos % 4
+                if remainder != 0:
+                    pad = 4 - remainder
+                    dest[dest_pos : dest_pos + pad] = b"\x00" * pad
+                    dest_pos += pad
+                return bytes(dest[:dest_pos])
+
+
+def rgb888_to_gba_rgb555(r: int, g: int, b: int) -> int:
+    """Pack 8-bit RGB to GBA 15-bit color (little-endian word in ROM)."""
+    r5 = min(31, (r * 31) // 255) if r > 0 else 0
+    g5 = min(31, (g * 31) // 255) if g > 0 else 0
+    b5 = min(31, (b * 31) // 255) if b > 0 else 0
+    return r5 | (g5 << 5) | (b5 << 10)
+
+
+def gba_palette_bytes_from_rgb888_list(colors: List[Tuple[int, int, int]], max_colors: int) -> bytes:
+    """``max_colors`` 16 or 256 → 32 or 512 bytes little-endian RGB555."""
+    out = bytearray()
+    for i in range(max_colors):
+        if i < len(colors):
+            r, g, b = colors[i]
+            w = rgb888_to_gba_rgb555(r, g, b)
+        else:
+            w = 0
+        out.extend(w.to_bytes(2, "little"))
+    return bytes(out)
+
+
+def encode_gba_tile_4bpp_from_indices(indices: List[int]) -> bytes:
+    """64 indices 0–15 → 32 bytes (pret nybble order)."""
+    if len(indices) != 64:
+        raise ValueError("need 64 indices for 4bpp tile")
+    out = bytearray(32)
+    for row in range(8):
+        for cb in range(4):
+            lo = indices[row * 8 + cb * 2] & 0xF
+            hi = indices[row * 8 + cb * 2 + 1] & 0xF
+            out[row * 4 + cb] = lo | (hi << 4)
+    return bytes(out)
+
+
+def encode_gba_tile_8bpp_from_indices(indices: List[int]) -> bytes:
+    if len(indices) != 64:
+        raise ValueError("need 64 indices for 8bpp tile")
+    return bytes(indices)
+
+
+def _pil_rgba_quantized_tiles(
+    rgba_im: Any,
+    *,
+    bpp: int,
+) -> Tuple[bytes, bytes, int, int, str]:
+    """
+    Quantize RGBA to GBA tiles. Tile grid size follows the image's pixel dimensions, each rounded **up**
+    to a multiple of 8 (GBA tile size). The image is **not** scaled: it is pasted at the top-left on a
+    white canvas; only padding is added if the pixel size is not already a multiple of 8.
+    Returns ``(tile_bytes, pal_bytes, width_tiles, height_tiles, err)`` with ``err`` empty on success.
+    """
+    Image = _require_pillow()
+    im = rgba_im
+    if im.mode != "RGBA":
+        im = im.convert("RGBA")
+    iw, ih = im.size
+    if iw < 1 or ih < 1:
+        return b"", b"", 0, 0, "Image has zero width or height."
+    tw = max(1, (iw + 7) // 8)
+    th = max(1, (ih + 7) // 8)
+    wpx, hpx = tw * 8, th * 8
+    bg = Image.new("RGBA", (wpx, hpx), (255, 255, 255, 255))
+    bg.paste(im, (0, 0), im.split()[3])
+    rgb = bg.convert("RGB")
+    ncols = 16 if bpp == 4 else 256
+    try:
+        q = rgb.quantize(colors=ncols, method=Image.Quantize.MEDIANCUT)  # type: ignore[attr-defined]
+    except AttributeError:
+        q = rgb.quantize(colors=ncols, method=2)
+    pal_raw = q.getpalette()
+    if not pal_raw:
+        return b"", b"", 0, 0, "Could not build palette from image."
+    # PIL palette: up to 256 * 3 bytes
+    colors: List[Tuple[int, int, int]] = []
+    for i in range(ncols):
+        if i * 3 + 2 < len(pal_raw):
+            colors.append((pal_raw[i * 3], pal_raw[i * 3 + 1], pal_raw[i * 3 + 2]))
+        else:
+            colors.append((0, 0, 0))
+    pal_bytes = gba_palette_bytes_from_rgb888_list(colors, ncols)
+    idxs = list(q.getdata())
+    tile_data = bytearray()
+    for ty in range(th):
+        for tx in range(tw):
+            tile_idx: List[int] = []
+            for py in range(8):
+                for px in range(8):
+                    ix = tx * 8 + px
+                    iy = ty * 8 + py
+                    tile_idx.append(idxs[iy * wpx + ix])
+            if bpp == 4:
+                tile_data.extend(encode_gba_tile_4bpp_from_indices(tile_idx))
+            else:
+                tile_data.extend(encode_gba_tile_8bpp_from_indices(tile_idx))
+    return bytes(tile_data), pal_bytes, tw, th, ""
+
+
+def build_sprite_payload_for_rom(
+    tile_bytes: bytes,
+    spec: GraphicsAnchorSpec,
+    *,
+    lz: bool,
+) -> bytes:
+    """Wrap tile bytes with optional LZ (must match ``spec`` / anchor storage)."""
+    if lz:
+        return compress_gba_lz77(tile_bytes)
+    return tile_bytes
+
+
+def palette_payload_for_rom(pal_bytes: bytes, spec: GraphicsAnchorSpec, *, lz: bool) -> bytes:
+    if lz:
+        return compress_gba_lz77(pal_bytes)
+    return pal_bytes
+
+
+def sprite_import_png(
+    png_path: str,
+    spec: GraphicsAnchorSpec,
+) -> Tuple[bytes, bytes, str, int, int]:
+    """
+    Read PNG, return ``(tile_rom_bytes, palette_rom_bytes, error_message, width_tiles, height_tiles)``.
+
+    Tile dimensions follow the **PNG pixel size** (each side rounded up to a multiple of 8px); the image
+    is not scaled down or up to match the TOML sprite window.
+
+    Only **4bpp** and **8bpp** sprites; **6bpp** not supported here.
+    """
+    if spec.kind != "sprite":
+        return b"", b"", "Not a sprite graphics format.", 0, 0
+    if spec.bpp not in (4, 8):
+        return b"", b"", f"Import not implemented for {spec.bpp}bpp sprites (use 4bpp or 8bpp).", 0, 0
+    Image = _require_pillow()
+    try:
+        im = Image.open(png_path)
+    except OSError as e:
+        return b"", b"", str(e), 0, 0
+    rgba = im.convert("RGBA")
+    tb, pb, tw, th, err = _pil_rgba_quantized_tiles(rgba, bpp=spec.bpp)
+    if err:
+        return b"", b"", err, 0, 0
+    need = tile_data_bytes(spec.bpp, tw, th)
+    if len(tb) < need:
+        tb = tb.ljust(need, b"\x00")
+    elif len(tb) > need:
+        tb = tb[:need]
+    # palette: 4bpp → 32 bytes, 8bpp → 512 for ROM
+    if spec.bpp == 4:
+        pb = pb[:32].ljust(32, b"\x00")
+    else:
+        pb = pb[:512].ljust(512, b"\x00")
+    return tb, pb, "", tw, th
+
+
+def palette_byte_count_for_spec(spec: GraphicsAnchorSpec) -> int:
+    """Bytes written for a palette anchor (uncompressed body)."""
+    if spec.kind != "palette" or spec.bpp != 4:
+        if spec.kind == "palette" and spec.bpp == 8:
+            assert spec.palette_hex_digit is not None
+            return palette_byte_count_8_variant(spec.palette_hex_digit)
+        return 32
+    return 32 * palette_4_chunk_count(spec)
+
+
 def palette_byte_count_8_variant(hex_digits: str) -> int:
     """ucp8:/lzp8: ROM byte length for one palette blob.
 
@@ -212,6 +483,82 @@ def palette_4_chunk_count(spec: GraphicsAnchorSpec) -> int:
     if spec.palette_4_indices is None:
         return 1
     return len(spec.palette_4_indices)
+
+
+def prepare_palette_rom_body_from_import(spec: GraphicsAnchorSpec, flat: bytes) -> bytes:
+    """
+    Build uncompressed palette bytes for ROM (before optional LZ), padded with ``0xFF`` to the spec size.
+
+    ``flat`` is the quantized palette from import: 32 bytes (4bpp) or 512 bytes (8bpp master).
+    Multi-chunk 4bpp anchors repeat the first 32-byte subpalette across each chunk.
+    """
+    if spec.kind != "palette":
+        raise ValueError("palette spec required")
+    need = palette_byte_count_for_spec(spec)
+    if spec.bpp == 4:
+        chunk = flat[:32].ljust(32, b"\x00")
+        nchunks = max(1, need // 32)
+        body = (chunk * nchunks)[:need]
+        return body.ljust(need, b"\xFF")
+    # 8bpp
+    base = flat[:512].ljust(512, b"\x00")
+    if need <= 512:
+        return base[:need].ljust(need, b"\xFF")
+    reps = (need + 511) // 512
+    body = (base * reps)[:need]
+    return body.ljust(need, b"\xFF")
+
+
+def measure_sprite_rom_footprint(
+    rom: bytes,
+    blob_off: int,
+    spec: GraphicsAnchorSpec,
+    *,
+    graphics_table_row_bytes: Optional[int] = None,
+) -> int:
+    """Byte length of the existing sprite blob on disk (LZ compressed length, or raw fixed size)."""
+    if spec.kind != "sprite":
+        raise ValueError("sprite spec required")
+    if graphics_table_row_bytes is not None:
+        return int(graphics_table_row_bytes)
+    if blob_off < 0 or blob_off >= len(rom):
+        return 0
+    raw = bytes(rom[blob_off:])
+    if spec.lz:
+        if len(raw) < 4 or raw[0] != 0x10:
+            raise ValueError("Sprite data is not valid GBA LZ77 (expected type byte 0x10).")
+        _dec, consumed = decompress_gba_lz77_with_consumed(raw)
+        # pret ``LZCompress`` pads the compressed stream to a multiple of 4 bytes (not read by decompress).
+        return (consumed + 3) & ~3
+    if spec.width_tiles > 0 and spec.height_tiles > 0:
+        return tile_data_bytes(spec.bpp, spec.width_tiles, spec.height_tiles)
+    raise ValueError(
+        "Cannot size this raw sprite slot for import (variable-length strip without WxH). "
+        "Use a fixed uct/ucs WxH format or LZ (lzt/lzs) in TOML."
+    )
+
+
+def measure_palette_rom_footprint(
+    rom: bytes,
+    blob_off: int,
+    spec: GraphicsAnchorSpec,
+    *,
+    graphics_table_row_bytes: Optional[int] = None,
+) -> int:
+    """Byte length of the existing palette blob (LZ compressed length, or raw palette size)."""
+    if spec.kind != "palette":
+        raise ValueError("palette spec required")
+    if graphics_table_row_bytes is not None:
+        return int(graphics_table_row_bytes)
+    if blob_off < 0 or blob_off >= len(rom):
+        return 0
+    raw = bytes(rom[blob_off:])
+    if spec.lz:
+        if len(raw) < 4 or raw[0] != 0x10:
+            raise ValueError("Palette data is not valid GBA LZ77 (expected type byte 0x10).")
+        _dec, consumed = decompress_gba_lz77_with_consumed(raw)
+        return (consumed + 3) & ~3
+    return palette_byte_count_for_spec(spec)
 
 
 # 4bpp: 16 hardware indices × 16 colors × 2 bytes (master layout for multi-slot palettes / PNG decode)
@@ -844,6 +1191,89 @@ def parse_sprite_field_spec(inner: str) -> Tuple[Optional[GraphicsAnchorSpec], O
         ),
         pal_name,
     )
+
+
+def rewrite_standalone_sprite_format_dimensions(
+    original_format: str,
+    width_tiles: int,
+    height_tiles: int,
+) -> Optional[str]:
+    """
+    Rewrite WxH in a standalone graphics NamedAnchor ``Format`` (optional leading ``^``, outer backticks,
+    optional ``|palette…`` tail, or ``[rowSpec]countRef`` graphics table).
+
+    Recognizes ``ucs``/``lzs``/``uct``/``lzt`` sprite specs. Bare ``uct4`` / ``lzt8`` becomes ``uct4xWxH`` / …
+    Returns ``None`` if the format is not a rewriteable sprite sheet token.
+    """
+    tw, th = int(width_tiles), int(height_tiles)
+    if tw < 1 or th < 1:
+        return None
+
+    def rewrite_spec_token(spec_part: str) -> Optional[str]:
+        sp = spec_part.strip()
+        m = re.fullmatch(r"(?i)(uc|lz)s([468])x(\d+)(?:x(\d+))?", sp)
+        if m:
+            return f"{m.group(1).lower()}s{m.group(2)}x{tw}x{th}"
+        m = re.fullmatch(r"(?i)(uc|lz)t([48])x(\d+)(?:x(\d+))?", sp)
+        if m:
+            return f"{m.group(1).lower()}t{m.group(2)}x{tw}x{th}"
+        m = re.fullmatch(r"(?i)(uc|lz)t([48])", sp)
+        if m:
+            return f"{m.group(1).lower()}t{m.group(2)}x{tw}x{th}"
+        return None
+
+    def rewrite_inner_content(inner: str) -> Optional[str]:
+        inner_st = _strip_outer_backticks(inner.strip())
+        if "|" in inner_st:
+            spec_part, rest = inner_st.split("|", 1)
+            new_sp = rewrite_spec_token(spec_part)
+            if new_sp is None:
+                return None
+            return f"{new_sp}|{rest}"
+        new_sp = rewrite_spec_token(inner_st)
+        if new_sp is None:
+            return None
+        return new_sp
+
+    ori = original_format.strip()
+    hat = ori.startswith("^")
+    s = ori[1:].strip() if hat else ori
+
+    layers = 0
+    t = s
+    while len(t) >= 2 and t[0] == "`" and t[-1] == "`":
+        layers += 1
+        t = t[1:-1].strip()
+    core = t
+
+    if core.startswith("["):
+        depth = 0
+        close = -1
+        for i, ch in enumerate(core):
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    close = i
+                    break
+        if close < 0:
+            return None
+        inner = core[1:close].strip()
+        suffix = core[close + 1 :].strip()
+        new_inner = rewrite_inner_content(inner)
+        if new_inner is None:
+            return None
+        new_core = f"[{new_inner}]{suffix}"
+    else:
+        new_core = rewrite_inner_content(core)
+        if new_core is None:
+            return None
+
+    out = new_core
+    for _ in range(layers):
+        out = f"`{out}`"
+    return ("^" if hat else "") + out
 
 
 def extract_palette_bytes(spec: GraphicsAnchorSpec, raw: bytes) -> bytes:

@@ -1,3 +1,6 @@
+# ``[[NamedAnchors]]`` / ``[[FunctionAnchors]]`` ``Address``: ROM **file** offset in hex (e.g. ``0x147148``), not a
+# GBA bus address with the ``0x08`` prefix. Deprecated ``[[OffsetPointer]]`` sections are ignored and not written back.
+#
 # Struct uint fields: ``name:listname`` or ``name:listname+3`` / ``name:pcs.table-1`` — optional trailing signed
 # integer shifts the index used for [[List]] / PCS labels (ROM stores idx; label row is idx + offset).
 #
