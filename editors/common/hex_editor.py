@@ -20,7 +20,9 @@ from editors.common.gba_graphics import (
     decode_sprite_at_pointer,
     decode_gba_palette32_to_rgb888,
     extract_palette_bytes,
+    extract_sprite_bytes,
     get_palette_4_slot_bytes,
+    max_sprite_height_tiles,
     palette_bytes_for_gbagfx,
     parse_graphics_anchor_format,
     parse_graphics_table_format,
@@ -29,6 +31,7 @@ from editors.common.gba_graphics import (
     compute_graphics_rom_span,
     raw_gba_palette_to_rgb888_list,
     resolve_gba_pointer,
+    sprite_bytes_per_tile,
 )
 
 _TOML_AVAILABLE = False
@@ -304,11 +307,12 @@ class PcsStringTableFrame(ttk.Frame):
         self._anchors: List[Dict[str, Any]] = []
         self._edit_entry: Optional[tk.Entry] = None
         self._edit_iid: Optional[str] = None
+        self._pcs_filter_job: Optional[str] = None
         self._build()
 
     def _build(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(2, weight=1)
         f = ttk.Frame(self)
         f.grid(row=0, column=0, sticky="ew", pady=(0, 2))
         f.columnconfigure(1, weight=1)
@@ -316,8 +320,16 @@ class PcsStringTableFrame(ttk.Frame):
         self._combo = ttk.Combobox(f, font=("Consolas", 8), state="readonly")
         self._combo.grid(row=0, column=1, sticky="ew")
         self._combo.bind("<<ComboboxSelected>>", self._on_combo_select)
+        sf = ttk.Frame(self)
+        sf.grid(row=1, column=0, sticky="ew", pady=(0, 2))
+        sf.columnconfigure(1, weight=1)
+        ttk.Label(sf, text="Search:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self._combo_search_var = tk.StringVar()
+        self._combo_search_entry = ttk.Entry(sf, textvariable=self._combo_search_var, font=("Consolas", 8))
+        self._combo_search_entry.grid(row=0, column=1, sticky="ew")
+        self._combo_search_var.trace_add("write", lambda *_: self._schedule_pcs_combo_filter())
         tree_f = ttk.Frame(self)
-        tree_f.grid(row=1, column=0, sticky="nsew")
+        tree_f.grid(row=2, column=0, sticky="nsew")
         tree_f.columnconfigure(0, weight=1)
         tree_f.rowconfigure(0, weight=1)
         self._tree = ttk.Treeview(tree_f, columns=("idx", "val"), show="headings", height=5, selectmode="browse")
@@ -337,6 +349,42 @@ class PcsStringTableFrame(ttk.Frame):
         self._tree.bind("<F2>", self._start_inline_edit)
         self._tree.bind("<ButtonRelease-1>", self._on_tree_click)
 
+    def _schedule_pcs_combo_filter(self, event: Optional[tk.Event] = None) -> None:
+        if self._pcs_filter_job is not None:
+            try:
+                self.after_cancel(self._pcs_filter_job)
+            except (ValueError, tk.TclError):
+                pass
+        self._pcs_filter_job = self.after(100, self._apply_pcs_combo_filter)
+
+    def _apply_pcs_combo_filter(self) -> None:
+        self._pcs_filter_job = None
+        if not self._anchors:
+            self._combo.configure(values=[])
+            self._combo.set("")
+            self._tree.delete(*self._tree.get_children())
+            return
+        names = [str(a["name"]) for a in self._anchors]
+        q = self._combo_search_var.get().strip().lower()
+        filt = [n for n in names if q in n.lower()] if q else list(names)
+        cur = self._combo.get().strip()
+        self._combo.configure(values=filt)
+        if filt:
+            if cur in filt:
+                self._combo.current(filt.index(cur))
+            else:
+                self._combo.current(0)
+                self._load_table()
+        else:
+            self._combo.set("")
+            self._tree.delete(*self._tree.get_children())
+
+    def _selected_pcs_anchor(self) -> Optional[Dict[str, Any]]:
+        name = self._combo.get().strip()
+        if not name:
+            return None
+        return next((a for a in self._anchors if str(a["name"]) == name), None)
+
     def _on_tree_click(self, event: tk.Event) -> None:
         reg = self._tree.identify_region(event.x, event.y)
         if reg == "cell":
@@ -355,10 +403,9 @@ class PcsStringTableFrame(ttk.Frame):
             return
         if not self._anchors or not self._hex.get_data():
             return
-        idx = self._combo.current()
-        if idx < 0 or idx >= len(self._anchors):
+        info = self._selected_pcs_anchor()
+        if not info:
             return
-        info = self._anchors[idx]
         vals = self._tree.item(iid, "values")
         if len(vals) < 2:
             return
@@ -387,9 +434,8 @@ class PcsStringTableFrame(ttk.Frame):
             return
         text = self._edit_entry.get()
         row_idx = int(self._edit_iid.split("_")[1])
-        idx = self._combo.current()
-        if idx >= 0 and idx < len(self._anchors):
-            info = self._anchors[idx]
+        info = self._selected_pcs_anchor()
+        if info:
             try:
                 gba = int(info["anchor"]["Address"]) if isinstance(info["anchor"]["Address"], (int, float)) else int(str(info["anchor"]["Address"]), 0)
                 if gba < GBA_ROM_BASE:
@@ -410,9 +456,8 @@ class PcsStringTableFrame(ttk.Frame):
             return None
         text = self._edit_entry.get()
         row_idx = int(self._edit_iid.split("_")[1])
-        idx = self._combo.current()
-        if idx >= 0 and idx < len(self._anchors):
-            info = self._anchors[idx]
+        info = self._selected_pcs_anchor()
+        if info:
             try:
                 gba = int(info["anchor"]["Address"]) if isinstance(info["anchor"]["Address"], (int, float)) else int(str(info["anchor"]["Address"]), 0)
                 if gba < GBA_ROM_BASE:
@@ -452,26 +497,28 @@ class PcsStringTableFrame(ttk.Frame):
     def refresh_anchors(self) -> None:
         self._anchors = self._hex.get_pcs_table_anchors()
         self._combo.set("")
-        self._combo.configure(values=[a["name"] for a in self._anchors] if self._anchors else [])
-        self._tree.delete(*self._tree.get_children())
+        self._combo_search_var.set("")
+        self._apply_pcs_combo_filter()
 
     def show_table(self, anchor_name: str) -> None:
         if not self._anchors:
             self.refresh_anchors()
-        for i, a in enumerate(self._anchors):
-            if a["name"] == anchor_name:
-                self._combo.current(i)
-                self._load_table()
-                return
+        self._combo_search_var.set("")
+        self._apply_pcs_combo_filter()
+        want = anchor_name.strip()
+        vals = list(self._combo["values"])
+        if want in vals:
+            self._combo.set(want)
+            self._combo.current(vals.index(want))
+            self._load_table()
 
     def _load_table(self) -> None:
         self._tree.delete(*self._tree.get_children())
         if not self._anchors or not self._hex.get_data():
             return
-        idx = self._combo.current()
-        if idx < 0 or idx >= len(self._anchors):
+        info = self._selected_pcs_anchor()
+        if not info:
             return
-        info = self._anchors[idx]
         anchor, width, count = info["anchor"], info["width"], info["count"]
         addr = anchor.get("Address")
         if addr is None:
@@ -509,6 +556,8 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._photo: Optional[Any] = None
         self._pal4_state: Optional[Tuple[Any, bytes]] = None  # (GraphicsAnchorSpec, extracted pal bytes)
         self._pal8_colors: Optional[List[Tuple[int, int, int]]] = None
+        self._gfx_filter_job: Optional[str] = None
+        self._gfx_sprite_anchor_name: Optional[str] = None
         self._build()
 
     def _build(self) -> None:
@@ -522,9 +571,16 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._combo.grid(row=0, column=1, sticky="ew", padx=(0, 4))
         self._combo.bind("<<ComboboxSelected>>", lambda e: self._decode_selected())
         ttk.Button(top, text="Decode", command=self._decode_selected).grid(row=0, column=2, sticky="e")
+        srow = ttk.Frame(top)
+        srow.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(2, 0))
+        srow.columnconfigure(1, weight=1)
+        ttk.Label(srow, text="Search:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self._combo_search_var = tk.StringVar()
+        ttk.Entry(srow, textvariable=self._combo_search_var, font=("Consolas", 8)).grid(row=0, column=1, sticky="ew")
+        self._combo_search_var.trace_add("write", lambda *_: self._schedule_gfx_combo_filter())
 
         self._table_nav = ttk.Frame(top)
-        self._table_nav.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(2, 0))
+        self._table_nav.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(2, 0))
         self._table_nav.grid_remove()
         ttk.Label(self._table_nav, text="Table row:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w")
         self._table_idx_spin = ttk.Spinbox(
@@ -540,6 +596,27 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._table_idx_spin.bind("<Return>", lambda _e: self._decode_selected())
         self._table_row_label = ttk.Label(self._table_nav, text="", font=("Consolas", 8), foreground="#666")
         self._table_row_label.grid(row=0, column=2, sticky="w")
+
+        self._sprite_layout_row = ttk.Frame(top)
+        self._sprite_layout_row.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self._sprite_layout_row.grid_remove()
+        ttk.Label(self._sprite_layout_row, text="Tile rows (H):", font=("Consolas", 8)).grid(
+            row=0, column=0, sticky="w", padx=(0, 4)
+        )
+        self._sprite_rows_var = tk.IntVar(value=1)
+        self._sprite_rows_spin = ttk.Spinbox(
+            self._sprite_layout_row,
+            from_=1,
+            to=9999,
+            width=5,
+            textvariable=self._sprite_rows_var,
+            font=("Consolas", 8),
+        )
+        self._sprite_rows_spin.grid(row=0, column=1, sticky="w", padx=(0, 8))
+        self._sprite_rows_spin.bind("<Return>", lambda _e: self._decode_selected())
+        ttk.Button(self._sprite_layout_row, text="Apply layout", command=self._decode_selected).grid(
+            row=0, column=2, sticky="w"
+        )
 
         self._pal4_row = ttk.Frame(self)
         self._pal4_row.grid(row=1, column=0, sticky="w", pady=(0, 2))
@@ -668,25 +745,27 @@ class GraphicsPreviewFrame(ttk.Frame):
             self._clear_image(f"Could not load image:\n{e}\n{path}")
 
     def refresh_anchors(self) -> None:
-        names = [a["name"] for a in self._hex.get_graphics_anchors()]
-        self._combo.configure(values=names)
-        if not names:
+        self._combo_search_var.set("")
+        self._apply_gfx_combo_filter()
+        if not self._combo["values"]:
             self._combo.set("")
             self._hide_palette_4_ui()
             self._hide_palette_8_ui()
             self._table_nav.grid_remove()
+            self._sprite_layout_row.grid_remove()
+            self._gfx_sprite_anchor_name = None
             self._set_log("Graphics: built-in decode (pret gfx.c palette/tiles + Pillow).\n(no graphics NamedAnchors in TOML)")
             self._clear_image()
 
     def show_anchor(self, anchor_name: str) -> None:
         self.refresh_anchors()
+        want = anchor_name.strip()
         vals = list(self._combo["values"])
-        try:
-            i = vals.index(anchor_name)
-        except ValueError:
+        if want not in vals:
             self._set_log(f"Graphics anchor not found: {anchor_name!r}")
             return
-        self._combo.current(i)
+        self._combo.set(want)
+        self._combo.current(vals.index(want))
         self._decode_selected()
 
     def _update_table_nav_for_info(self, info: Dict[str, Any]) -> None:
@@ -808,16 +887,43 @@ class GraphicsPreviewFrame(ttk.Frame):
                 return str(ga.get("table_count_ref") or "")
         return ""
 
+    def _schedule_gfx_combo_filter(self, event: Optional[tk.Event] = None) -> None:
+        if self._gfx_filter_job is not None:
+            try:
+                self.after_cancel(self._gfx_filter_job)
+            except (ValueError, tk.TclError):
+                pass
+        self._gfx_filter_job = self.after(100, self._apply_gfx_combo_filter)
+
+    def _apply_gfx_combo_filter(self) -> None:
+        self._gfx_filter_job = None
+        anchors = self._hex.get_graphics_anchors()
+        names = [str(a["name"]) for a in anchors]
+        q = self._combo_search_var.get().strip().lower()
+        filt = [n for n in names if q in n.lower()] if q else list(names)
+        cur = self._combo.get().strip()
+        self._combo.configure(values=filt)
+        if filt:
+            if cur in filt:
+                self._combo.current(filt.index(cur))
+            elif cur:
+                self._combo.set(filt[0])
+                self._combo.current(0)
+                self._decode_selected()
+            else:
+                self._combo.set("")
+        else:
+            self._combo.set("")
+            self._clear_image()
+
     def _decode_selected(self, event: Optional[tk.Event] = None) -> None:
-        idx = self._combo.current()
-        vals = list(self._combo["values"])
-        if idx < 0 or idx >= len(vals):
+        name = self._combo.get().strip()
+        if not name:
             return
-        name = vals[idx]
         rom = self._hex.get_data()
         if not rom:
             return
-        info = next((a for a in self._hex.get_graphics_anchors() if a["name"] == name), None)
+        info = next((a for a in self._hex.get_graphics_anchors() if str(a["name"]) == name), None)
         if not info:
             self._set_log("Anchor missing.")
             return
@@ -832,9 +938,33 @@ class GraphicsPreviewFrame(ttk.Frame):
         else:
             self._table_row_label.configure(text="")
 
-        pal_data_off = info["base_off"]
+        blob_off = info["base_off"]
         if info.get("graphics_table"):
-            pal_data_off = info["base_off"] + tbl_idx * int(info["row_byte_size"])
+            blob_off = info["base_off"] + tbl_idx * int(info["row_byte_size"])
+
+        if spec.kind == "sprite":
+            self._sprite_layout_row.grid()
+            if self._gfx_sprite_anchor_name != name:
+                self._gfx_sprite_anchor_name = name
+                if spec.width_tiles == 0 and spec.height_tiles == 0:
+                    self._sprite_rows_var.set(1)
+                else:
+                    self._sprite_rows_var.set(max(1, spec.height_tiles))
+            try:
+                raw_sz = bytes(rom[blob_off : blob_off + min(len(rom) - blob_off, 4 << 20)])
+                tb = extract_sprite_bytes(spec, raw_sz)
+                per = sprite_bytes_per_tile(spec.bpp)
+                t_n = len(tb) // per
+                mh = max_sprite_height_tiles(t_n)
+                self._sprite_rows_spin.configure(from_=1, to=max(1, mh))
+                hv = int(self._sprite_rows_var.get())
+                if hv > mh:
+                    self._sprite_rows_var.set(mh)
+            except Exception:
+                self._sprite_rows_spin.configure(from_=1, to=9999)
+        else:
+            self._sprite_layout_row.grid_remove()
+            self._gfx_sprite_anchor_name = None
 
         logs: List[str] = []
         if tbl_warn:
@@ -845,8 +975,8 @@ class GraphicsPreviewFrame(ttk.Frame):
             if spec.bpp == 4:
                 raw = bytes(
                     rom[
-                        pal_data_off : pal_data_off
-                        + min(len(rom) - pal_data_off, 1 << 20)
+                        blob_off : blob_off
+                        + min(len(rom) - blob_off, 1 << 20)
                     ]
                 )
                 try:
@@ -871,8 +1001,8 @@ class GraphicsPreviewFrame(ttk.Frame):
             elif spec.bpp == 8:
                 raw = bytes(
                     rom[
-                        pal_data_off : pal_data_off
-                        + min(len(rom) - pal_data_off, 1 << 20)
+                        blob_off : blob_off
+                        + min(len(rom) - blob_off, 1 << 20)
                     ]
                 )
                 try:
@@ -888,7 +1018,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                 self._pal8_row.grid()
                 self._pal8_canvas.grid()
                 self._refresh_palette_8_swatches()
-            pal_path, log = decode_palette_to_png_pal(bytes(rom), pal_data_off, spec)
+            pal_path, log = decode_palette_to_png_pal(bytes(rom), blob_off, spec)
             logs.append(log)
             self._set_log("\n".join(logs))
             if pal_path:
@@ -903,9 +1033,6 @@ class GraphicsPreviewFrame(ttk.Frame):
         ext_ts_spec: Optional[Any] = None
         ext_ts_off: Optional[int] = None
         log_pre = ""
-        blob_off = info["base_off"]
-        if info.get("graphics_table"):
-            blob_off = info["base_off"] + tbl_idx * int(info["row_byte_size"])
 
         if spec.kind == "tilemap":
             tsn = getattr(spec, "tileset_anchor_name", None) or ""
@@ -971,12 +1098,14 @@ class GraphicsPreviewFrame(ttk.Frame):
                 ext_pb = ga["base_off"]
                 if ga.get("graphics_table"):
                     ext_pb = ga["base_off"] + tbl_idx * int(ga["row_byte_size"])
+        layout_h = max(1, int(self._sprite_rows_var.get()))
         png_path, log = decode_graphics_anchor_to_png(
             bytes(rom),
             blob_off,
             spec,
             external_palette_spec=ext_ps,
             external_palette_base_off=ext_pb,
+            sprite_layout_height=layout_h,
         )
         logs.append(log_pre + log)
         self._set_log("\n".join(logs))
@@ -1231,6 +1360,7 @@ class StructEditorFrame(ttk.Frame):
         self._edit_entry: Optional[tk.Entry] = None
         self._edit_iid: Optional[str] = None
         self._entry_index_context_pcs: Optional[Dict[str, Any]] = None
+        self._struct_filter_job: Optional[str] = None
         self._build()
 
     def _build(self) -> None:
@@ -1243,6 +1373,13 @@ class StructEditorFrame(ttk.Frame):
         self._combo = ttk.Combobox(top, font=("Consolas", 8), state="readonly")
         self._combo.grid(row=0, column=1, sticky="ew")
         self._combo.bind("<<ComboboxSelected>>", self._on_combo_select)
+        srow = ttk.Frame(top)
+        srow.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
+        srow.columnconfigure(1, weight=1)
+        ttk.Label(srow, text="Search:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self._struct_search_var = tk.StringVar()
+        ttk.Entry(srow, textvariable=self._struct_search_var, font=("Consolas", 8)).grid(row=0, column=1, sticky="ew")
+        self._struct_search_var.trace_add("write", lambda *_: self._schedule_struct_combo_filter())
 
         nav = ttk.Frame(self)
         nav.grid(row=1, column=0, sticky="ew", pady=(0, 2))
@@ -1335,20 +1472,34 @@ class StructEditorFrame(ttk.Frame):
         self._gfx_sprite_frame = ttk.Frame(self)
         self._gfx_sprite_frame.columnconfigure(0, weight=1)
         ttk.Label(self._gfx_sprite_frame, text="sprite (graphics)", font=("Consolas", 8, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w"
+            row=0, column=0, columnspan=3, sticky="w"
         )
-        ttk.Button(
-            self._gfx_sprite_frame, text="Decode preview", command=self._on_decode_gfx_sprite
-        ).grid(row=1, column=0, sticky="w", pady=(0, 4))
+        gfx_nav = ttk.Frame(self._gfx_sprite_frame)
+        gfx_nav.grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        ttk.Button(gfx_nav, text="Decode preview", command=self._on_decode_gfx_sprite).pack(side=tk.LEFT)
+        ttk.Label(gfx_nav, text="Tile rows (H):", font=("Consolas", 8)).pack(side=tk.LEFT, padx=(12, 4))
+        self._gfx_struct_sprite_rows_var = tk.IntVar(value=1)
+        self._gfx_struct_sprite_rows_spin = ttk.Spinbox(
+            gfx_nav,
+            from_=1,
+            to=9999,
+            width=5,
+            textvariable=self._gfx_struct_sprite_rows_var,
+            font=("Consolas", 8),
+        )
+        self._gfx_struct_sprite_rows_spin.pack(side=tk.LEFT, padx=(0, 4))
+        self._gfx_struct_sprite_rows_spin.bind("<Return>", lambda _e: self._on_decode_gfx_sprite())
+        ttk.Button(gfx_nav, text="Apply layout", command=self._on_decode_gfx_sprite).pack(side=tk.LEFT)
         self._gfx_log = tk.Text(
             self._gfx_sprite_frame, height=4, font=("Consolas", 7), wrap=tk.WORD, state=tk.DISABLED
         )
-        self._gfx_log.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self._gfx_log.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 4))
         self._gfx_img_label = ttk.Label(self._gfx_sprite_frame, text="")
         self._gfx_img_label.grid(row=3, column=0, sticky="nw")
         self._gfx_sprite_frame.grid(row=5, column=0, sticky="ew", pady=(0, 2))
         self._gfx_sprite_frame.grid_remove()
         self._gfx_fi: Optional[int] = None
+        self._gfx_sprite_last_fi: Optional[int] = None
         self._gfx_photo: Optional[Any] = None
 
         # [[List]] enum: ROM dropdown + TOML label. PCS NamedAnchor table enum: ROM dropdown + PCS string in ROM.
@@ -1464,19 +1615,29 @@ class StructEditorFrame(ttk.Frame):
         if not sel or not sel[0].startswith("sf_"):
             self._gfx_sprite_frame.grid_remove()
             self._gfx_fi = None
+            self._gfx_sprite_last_fi = None
             return
         fi = int(sel[0].split("_")[1])
         if fi >= len(self._fields):
             self._gfx_sprite_frame.grid_remove()
             self._gfx_fi = None
+            self._gfx_sprite_last_fi = None
             return
         fd = self._fields[fi]
         if fd.get("type") != "gfx_sprite":
             self._gfx_sprite_frame.grid_remove()
             self._gfx_fi = None
+            self._gfx_sprite_last_fi = None
             return
         self._gfx_fi = fi
         self._gfx_sprite_frame.grid(row=5, column=0, sticky="ew", pady=(0, 2))
+        spec = fd.get("gfx_spec")
+        if self._gfx_sprite_last_fi != fi and spec is not None and getattr(spec, "kind", None) == "sprite":
+            self._gfx_sprite_last_fi = fi
+            if spec.width_tiles == 0 and spec.height_tiles == 0:
+                self._gfx_struct_sprite_rows_var.set(1)
+            else:
+                self._gfx_struct_sprite_rows_var.set(max(1, spec.height_tiles))
 
     def _on_decode_gfx_sprite(self) -> None:
         fi = self._gfx_fi
@@ -1528,7 +1689,22 @@ class StructEditorFrame(ttk.Frame):
                     pal_base = ga["base_off"] + row_i * int(ga["row_byte_size"])
                 else:
                     pal_base = ga["base_off"]
-        png_path, log = decode_sprite_at_pointer(bytes(data), tgt, spec, pal_spec, pal_base)
+        raw_pre = bytes(data[tgt : tgt + min(len(data) - tgt, 4 << 20)])
+        try:
+            tb = extract_sprite_bytes(spec, raw_pre)
+            per = sprite_bytes_per_tile(spec.bpp)
+            t_n = len(tb) // per
+            mh = max_sprite_height_tiles(t_n)
+            self._gfx_struct_sprite_rows_spin.configure(from_=1, to=max(1, mh))
+            hv = int(self._gfx_struct_sprite_rows_var.get())
+            if hv > mh:
+                self._gfx_struct_sprite_rows_var.set(mh)
+        except Exception:
+            self._gfx_struct_sprite_rows_spin.configure(from_=1, to=9999)
+        layout_h = max(1, int(self._gfx_struct_sprite_rows_var.get()))
+        png_path, log = decode_sprite_at_pointer(
+            bytes(data), tgt, spec, pal_spec, pal_base, sprite_layout_height=layout_h
+        )
         self._set_gfx_log(log_extra + log)
         self._gfx_photo = None
         if png_path:
@@ -2055,11 +2231,49 @@ class StructEditorFrame(ttk.Frame):
         self._update_entry_index_name_label()
         self._load_entry(idx)
 
-    def _on_combo_select(self, event: Optional[tk.Event] = None) -> None:
-        idx = self._combo.current()
-        if idx < 0 or idx >= len(self._anchors):
+    def _schedule_struct_combo_filter(self, event: Optional[tk.Event] = None) -> None:
+        if self._struct_filter_job is not None:
+            try:
+                self.after_cancel(self._struct_filter_job)
+            except (ValueError, tk.TclError):
+                pass
+        self._struct_filter_job = self.after(100, self._apply_struct_combo_filter)
+
+    def _apply_struct_combo_filter(self) -> None:
+        self._struct_filter_job = None
+        if not self._anchors:
+            self._combo.configure(values=[])
+            self._combo.set("")
+            self._tree.delete(*self._tree.get_children())
             return
-        info = self._anchors[idx]
+        names = [str(a["name"]) for a in self._anchors]
+        q = self._struct_search_var.get().strip().lower()
+        filt = [n for n in names if q in n.lower()] if q else list(names)
+        cur = self._combo.get().strip()
+        self._combo.configure(values=filt)
+        if filt:
+            if cur in filt:
+                self._combo.current(filt.index(cur))
+            elif cur:
+                self._combo.set(filt[0])
+                self._combo.current(0)
+                self._on_combo_select()
+            else:
+                self._combo.set("")
+        else:
+            self._combo.set("")
+            self._tree.delete(*self._tree.get_children())
+
+    def _selected_struct_anchor(self) -> Optional[Dict[str, Any]]:
+        name = self._combo.get().strip()
+        if not name:
+            return None
+        return next((a for a in self._anchors if str(a["name"]) == name), None)
+
+    def _on_combo_select(self, event: Optional[tk.Event] = None) -> None:
+        info = self._selected_struct_anchor()
+        if not info:
+            return
         self._fields = info["fields"]
         self._entry_count = info["count"]
         self._struct_size = info["struct_size"]
@@ -2151,17 +2365,22 @@ class StructEditorFrame(ttk.Frame):
         self._gfx_sprite_frame.grid_remove()
         self._gfx_fi = None
         self._combo.set("")
-        self._combo.configure(values=[a["name"] for a in self._anchors] if self._anchors else [])
+        self._struct_search_var.set("")
+        self._apply_struct_combo_filter()
         self._tree.delete(*self._tree.get_children())
 
     def show_struct(self, anchor_name: str) -> None:
         if not self._anchors:
             self.refresh_anchors()
-        for i, a in enumerate(self._anchors):
-            if a["name"] == anchor_name:
-                self._combo.current(i)
-                self._on_combo_select()
-                return
+        want = anchor_name.strip()
+        self._struct_search_var.set("")
+        self._apply_struct_combo_filter()
+        vals = list(self._combo["values"])
+        if want not in vals:
+            return
+        self._combo.set(want)
+        self._combo.current(vals.index(want))
+        self._on_combo_select()
 
     def _load_entry(self, entry_idx: int) -> None:
         self._cancel_inline_edit()
@@ -3260,6 +3479,7 @@ class HexEditorFrame(ttk.Frame):
                         "anchor": anchor, "name": str(anchor.get("Name", "")).strip(),
                         "field": field, "width": width, "count": count,
                     })
+        result.sort(key=lambda x: str(x["name"]).lower())
         return result
 
     def set_on_pointer_to_named_anchor(self, cb: Optional[Any]) -> None:
@@ -4615,6 +4835,7 @@ Format = "`f|u8`[u8 arg0]"
                 "table_num_entries": n_entries,
             }
             result.append(entry)
+        result.sort(key=lambda x: str(x["name"]).lower())
         return result
 
     def find_graphics_anchor_by_name(self, anchor_name: str) -> Optional[Dict[str, Any]]:
@@ -4665,6 +4886,7 @@ Format = "`f|u8`[u8 arg0]"
                 "count": count, "struct_size": struct_size, "base_off": base_off,
                 "entry_label_pcs": entry_label_pcs,
             })
+        result.sort(key=lambda x: str(x["name"]).lower())
         return result
 
     def _resolve_struct_count(self, ref: str) -> Optional[int]:

@@ -1,5 +1,3 @@
-sort and search in editor dropdown
-resize default heights of 1
 more TOML functionality
 graphics and palette editing
 convert structs and functions to toml

@@ -876,6 +876,43 @@ def palette_bytes_for_gbagfx(
     return pal_bytes
 
 
+def sprite_bytes_per_tile(bpp: int) -> int:
+    if bpp == 4:
+        return 32
+    if bpp == 6:
+        return 48
+    return 64
+
+
+def max_sprite_height_tiles(num_tiles: int) -> int:
+    """Largest ``H`` with ``H ≤ ceil(num_tiles / H)`` (row count does not exceed column count)."""
+    if num_tiles < 1:
+        return 1
+    best = 1
+    for h in range(1, num_tiles + 1):
+        w = (num_tiles + h - 1) // h
+        if h <= w:
+            best = h
+    return best
+
+
+def compute_sprite_grid_layout(num_tiles: int, height_tiles: int) -> Tuple[int, int]:
+    """
+    Lay out ``num_tiles`` tiles in a grid with ``height_tiles`` rows.
+    ``width_tiles = ceil(num_tiles / height_tiles)``; require ``height_tiles ≤ width_tiles``.
+    """
+    if height_tiles < 1:
+        raise ValueError("Tile row count (height) must be at least 1")
+    if num_tiles < 1:
+        raise ValueError("No tiles in data")
+    w = (num_tiles + height_tiles - 1) // height_tiles
+    if height_tiles > w:
+        raise ValueError(
+            f"Tile rows ({height_tiles}) exceed tile columns ({w}); require rows ≤ columns."
+        )
+    return w, height_tiles
+
+
 def extract_sprite_bytes(spec: GraphicsAnchorSpec, raw: bytes) -> bytes:
     if spec.kind != "sprite":
         raise ValueError("not a sprite spec")
@@ -1004,6 +1041,7 @@ def decode_graphics_anchor_to_png(
     external_palette_base_off: Optional[int] = None,
     external_tileset_spec: Optional[GraphicsAnchorSpec] = None,
     external_tileset_base_off: Optional[int] = None,
+    sprite_layout_height: Optional[int] = None,
 ) -> Tuple[Optional[str], str]:
     """
     Decode a standalone graphics NamedAnchor (palette-only returns None PNG; sprite/tilemap return PNG path).
@@ -1013,6 +1051,9 @@ def decode_graphics_anchor_to_png(
 
     For **tilemap** (``ucm`` / ``lzm``), pass ``external_tileset_spec`` + ``external_tileset_base_off`` for the
     tile sheet anchor (``uct`` / ``lzt`` / ``ucs`` / ``lzs``), and optional external palette like sprites.
+
+    For **sprites**, ``sprite_layout_height`` sets the number of **tile rows** (``H``); width is
+    ``ceil(tile_count / H)``. If omitted, variable strips use one row; fixed formats use TOML ``WxH``.
     """
     logs: List[str] = []
     if spec.kind == "palette":
@@ -1115,15 +1156,23 @@ def decode_graphics_anchor_to_png(
         else:
             pal_bytes = bytes(128) if spec.bpp == 6 else bytes(32)
 
+        per = sprite_bytes_per_tile(spec.bpp)
+        nt = len(tiles) // per
         eff_spec = spec
-        if spec.width_tiles == 0 and spec.height_tiles == 0:
-            per = 32 if spec.bpp == 4 else 64
-            nt = len(tiles) // per
+        if sprite_layout_height is not None:
+            try:
+                w_t, h_t = compute_sprite_grid_layout(nt, int(sprite_layout_height))
+            except ValueError as e:
+                return None, f"Sprite layout: {e}\n"
+            eff_spec = replace(spec, width_tiles=w_t, height_tiles=h_t)
+        elif spec.width_tiles == 0 and spec.height_tiles == 0:
             eff_spec = replace(spec, width_tiles=nt, height_tiles=1)
 
         png_path, slog = _sprite_tiles_to_png_path(tiles, eff_spec, pal_bytes, td, stem)
-        if spec.width_tiles == 0 and spec.height_tiles == 0:
+        if spec.width_tiles == 0 and spec.height_tiles == 0 and sprite_layout_height is None:
             slog = slog.rstrip() + f" (variable strip: {eff_spec.width_tiles} tiles × 1 row).\n"
+        elif sprite_layout_height is not None:
+            slog = slog.rstrip() + f" (layout {eff_spec.width_tiles}×{eff_spec.height_tiles} tiles).\n"
         logs.append(slog)
         return png_path, "".join(logs)
     except ImportError as e:
@@ -1138,6 +1187,8 @@ def decode_sprite_at_pointer(
     spec: GraphicsAnchorSpec,
     palette_spec: Optional[GraphicsAnchorSpec],
     palette_base_off: Optional[int],
+    *,
+    sprite_layout_height: Optional[int] = None,
 ) -> Tuple[Optional[str], str]:
     """
     Decode sprite from ROM at sprite_file_off using optional external palette anchor.
@@ -1163,15 +1214,23 @@ def decode_sprite_at_pointer(
         else:
             pal_bytes = bytes(128) if spec.bpp == 6 else bytes(32)
 
+        per = sprite_bytes_per_tile(spec.bpp)
+        nt = len(tiles) // per
         eff_spec = spec
-        if spec.width_tiles == 0 and spec.height_tiles == 0:
-            per = 32 if spec.bpp == 4 else 64
-            nt = len(tiles) // per
+        if sprite_layout_height is not None:
+            try:
+                w_t, h_t = compute_sprite_grid_layout(nt, int(sprite_layout_height))
+            except ValueError as e:
+                return None, f"Sprite layout: {e}\n"
+            eff_spec = replace(spec, width_tiles=w_t, height_tiles=h_t)
+        elif spec.width_tiles == 0 and spec.height_tiles == 0:
             eff_spec = replace(spec, width_tiles=nt, height_tiles=1)
 
         png_path, slog = _sprite_tiles_to_png_path(tiles, eff_spec, pal_bytes, td, "sprite")
-        if spec.width_tiles == 0 and spec.height_tiles == 0:
+        if spec.width_tiles == 0 and spec.height_tiles == 0 and sprite_layout_height is None:
             slog = slog.rstrip() + f" (variable strip: {eff_spec.width_tiles} tiles × 1 row).\n"
+        elif sprite_layout_height is not None:
+            slog = slog.rstrip() + f" (layout {eff_spec.width_tiles}×{eff_spec.height_tiles} tiles).\n"
         logs.append(slog)
         return png_path, "".join(logs)
     except ImportError as e:
