@@ -296,6 +296,7 @@ Name = '''pocketid'''
 #   lzs6xWxH      — LZ77-compressed 6bpp sprite (same tile layout after decompress)
 #   lzs4xWxH      — LZ77-compressed 4bpp sprite (ucs8xWxH / lzs8xWxH for 8bpp tiles)
 #   ucm4xMWxMH|tileset|palette — non-affine tilemap: MW×MH cells × 2 bytes (pret NonAffineTile / Tilemap Studio GBA_4BPP); tileset = uct/lzt/ucs/lzs anchor.
+#   ucm4xMWxMH / lzm4xMWxMH — dimensions only (no ``|`` tail): for **struct** layouts, pair with separate pointer fields — see below.
 #                                 Palette: optional third ``|``; if omitted, the tileset anchor’s linked palette (e.g. ``lzt4|graphics…palette``) is used — same idea as
 #                                 ``gbagfx item.bin.lz tiles.4bpp.lz … -tilemap item.bin`` plus ``-palette`` from the tileset’s companion palette.
 #   lzm4 / lzm8   — same as ucm but LZ77-compressed map (gbagfx .bin.lz); 4 vs 8 selects tile bpp / tileset interpretation.
@@ -305,3 +306,7 @@ Name = '''pocketid'''
 #                    rows in tables are not supported (uc* only).
 #   ucp8:HEX+     — one hex digit: digit×32 bytes (unchanged). Multiple digits (e.g. ucp8:0123): len×32 bytes contiguous.
 # Struct field: sprite<`lzs4x2x6|graphics.items.ball.palettes`> — pointer + tile spec + optional palette anchor name.
+# Struct composite tilemap: ``tileset<`lzt4`> tilemap<`lzm4x30x24|table`> palette<`ucp4`>`` — three pointers (4 bytes each) + specs.
+#   ``tileset`` / ``tilemap`` / ``palette`` field names are preferred; otherwise exactly one ``tileset<`…`>`` and one ``tilemap<`…`>`` in the struct.
+#   ``tilemap<`ucm4xWxH`>`` or ``lzm…`` may include an ignored ``|suffix`` (e.g. ``|table``); only ``ucm4xWxH`` / ``lzm4xWxH`` dimensions are used.
+#   Tools → Structure: select any of those fields → **Decode preview** on **tilemap (tileset + map + optional palette)**.

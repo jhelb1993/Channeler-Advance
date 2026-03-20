@@ -27,6 +27,7 @@ from editors.common.gba_graphics import (
     parse_graphics_anchor_format,
     parse_graphics_table_format,
     parse_sprite_field_spec,
+    parse_tilemap_dimension_spec,
     graphics_row_byte_size,
     compute_graphics_rom_span,
     raw_gba_palette_to_rgb888_list,
@@ -1217,10 +1218,58 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
 
     sm = re.match(r"^(\w+)<`([^`]*)`>\s*$", token)
     if sm:
+        fname = sm.group(1)
         inner = sm.group(2).strip()
+        if fname == "tileset":
+            gspec, _pal = parse_sprite_field_spec(inner)
+            if gspec is not None and getattr(gspec, "kind", None) == "sprite":
+                return {
+                    "name": fname,
+                    "size": 4,
+                    "type": "gfx_tileset",
+                    "enum": None,
+                    "hex": True,
+                    "gfx_spec": gspec,
+                }
+            return None
+        if fname == "tilemap":
+            tm_spec = parse_tilemap_dimension_spec(inner)
+            if tm_spec is not None:
+                return {
+                    "name": fname,
+                    "size": 4,
+                    "type": "gfx_tilemap",
+                    "enum": None,
+                    "hex": True,
+                    "gfx_spec": tm_spec,
+                }
+            # Legacy: full ``ucm…|anchor|pal`` in one backtick blob
+            legacy = parse_graphics_anchor_format(inner)
+            if legacy is not None and getattr(legacy, "kind", None) == "tilemap":
+                return {
+                    "name": fname,
+                    "size": 4,
+                    "type": "gfx_tilemap",
+                    "enum": None,
+                    "hex": True,
+                    "gfx_spec": legacy,
+                }
+            return None
+        if fname == "palette":
+            pal_spec = parse_graphics_anchor_format(inner)
+            if pal_spec is not None and getattr(pal_spec, "kind", None) == "palette":
+                return {
+                    "name": fname,
+                    "size": 4,
+                    "type": "gfx_palette",
+                    "enum": None,
+                    "hex": True,
+                    "gfx_spec": pal_spec,
+                }
+            return None
         gspec, pal_name = parse_sprite_field_spec(inner)
         return {
-            "name": sm.group(1),
+            "name": fname,
             "size": 4,
             "type": "gfx_sprite",
             "enum": None,
@@ -1502,6 +1551,25 @@ class StructEditorFrame(ttk.Frame):
         self._gfx_sprite_last_fi: Optional[int] = None
         self._gfx_photo: Optional[Any] = None
 
+        # tileset<`lzt4`> tilemap<`lzm4xWxH|…`> palette<`ucp4`>: composite tilemap decode
+        self._gfx_tilemap_frame = ttk.Frame(self)
+        self._gfx_tilemap_frame.columnconfigure(0, weight=1)
+        ttk.Label(self._gfx_tilemap_frame, text="tilemap (tileset + map + optional palette)", font=("Consolas", 8, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w"
+        )
+        tm_nav = ttk.Frame(self._gfx_tilemap_frame)
+        tm_nav.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Button(tm_nav, text="Decode preview", command=self._on_decode_gfx_tilemap).pack(side=tk.LEFT)
+        self._gfx_tm_log = tk.Text(
+            self._gfx_tilemap_frame, height=4, font=("Consolas", 7), wrap=tk.WORD, state=tk.DISABLED
+        )
+        self._gfx_tm_log.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self._gfx_tm_img_label = ttk.Label(self._gfx_tilemap_frame, text="")
+        self._gfx_tm_img_label.grid(row=3, column=0, sticky="nw")
+        self._gfx_tilemap_frame.grid(row=5, column=0, sticky="ew", pady=(0, 2))
+        self._gfx_tilemap_frame.grid_remove()
+        self._gfx_tm_photo: Optional[Any] = None
+
         # [[List]] enum: ROM dropdown + TOML label. PCS NamedAnchor table enum: ROM dropdown + PCS string in ROM.
         self._list_enum_frame = ttk.Frame(self)
         self._list_enum_frame.columnconfigure(0, weight=1)
@@ -1603,6 +1671,7 @@ class StructEditorFrame(ttk.Frame):
         self._update_ptr_text_panel()
         self._update_list_enum_panel()
         self._update_gfx_sprite_panel()
+        self._update_gfx_tilemap_panel()
 
     def _set_gfx_log(self, text: str) -> None:
         self._gfx_log.configure(state=tk.NORMAL)
@@ -1610,7 +1679,150 @@ class StructEditorFrame(ttk.Frame):
         self._gfx_log.insert("1.0", text)
         self._gfx_log.configure(state=tk.DISABLED)
 
+    def _set_gfx_tm_log(self, text: str) -> None:
+        self._gfx_tm_log.configure(state=tk.NORMAL)
+        self._gfx_tm_log.delete("1.0", tk.END)
+        self._gfx_tm_log.insert("1.0", text)
+        self._gfx_tm_log.configure(state=tk.DISABLED)
+
+    def _explicit_tilemap_field_indices(self) -> Optional[Tuple[int, int, Optional[int]]]:
+        """If struct has ``tileset<`…`>`` + ``tilemap<`…`>`` (+ optional ``palette<`…`>``), return (ts_i, tm_i, pl_i)."""
+        by_name: Dict[str, Tuple[int, Dict[str, Any]]] = {}
+        for i, f in enumerate(self._fields):
+            n = f.get("name")
+            if not n:
+                continue
+            t = f.get("type")
+            if t in ("gfx_tileset", "gfx_tilemap", "gfx_palette"):
+                by_name[str(n)] = (i, f)
+        if "tilemap" in by_name and by_name["tilemap"][1].get("type") == "gfx_tilemap":
+            tm_i, _ = by_name["tilemap"]
+            ts_i: Optional[int] = None
+            pl_i: Optional[int] = None
+            if "tileset" in by_name and by_name["tileset"][1].get("type") == "gfx_tileset":
+                ts_i = by_name["tileset"][0]
+            if "palette" in by_name and by_name["palette"][1].get("type") == "gfx_palette":
+                pl_i = by_name["palette"][0]
+            if ts_i is not None:
+                return (ts_i, tm_i, pl_i)
+        ts_list = [i for i, f in enumerate(self._fields) if f.get("type") == "gfx_tileset"]
+        tm_list = [i for i, f in enumerate(self._fields) if f.get("type") == "gfx_tilemap"]
+        pl_list = [i for i, f in enumerate(self._fields) if f.get("type") == "gfx_palette"]
+        if len(tm_list) == 1 and len(ts_list) == 1:
+            pl_opt = pl_list[0] if len(pl_list) == 1 else None
+            return (ts_list[0], tm_list[0], pl_opt)
+        return None
+
+    def _update_gfx_tilemap_panel(self) -> None:
+        self._gfx_tilemap_frame.grid_remove()
+        tri = self._explicit_tilemap_field_indices()
+        if not tri:
+            return
+        ts_i, tm_i, pl_i = tri
+        sel = self._tree.selection()
+        if not sel or not sel[0].startswith("sf_"):
+            return
+        fi = int(sel[0].split("_")[1])
+        allowed = {ts_i, tm_i}
+        if pl_i is not None:
+            allowed.add(pl_i)
+        if fi not in allowed:
+            return
+        self._gfx_sprite_frame.grid_remove()
+        self._gfx_tilemap_frame.grid(row=5, column=0, sticky="ew", pady=(0, 2))
+
+    def _on_decode_gfx_tilemap(self) -> None:
+        tri = self._explicit_tilemap_field_indices()
+        if not tri:
+            self._set_gfx_tm_log(
+                "Struct has no tileset + tilemap fields (name them tileset/tilemap or use one of each type)."
+            )
+            return
+        ts_i, tm_i, pl_i = tri
+        data = self._hex.get_data()
+        if not data:
+            return
+        try:
+            entry_idx = int(self._idx_var.get())
+        except ValueError:
+            return
+        ts_fd = self._fields[ts_i]
+        tm_fd = self._fields[tm_i]
+        ts_spec = ts_fd.get("gfx_spec")
+        tm_spec = tm_fd.get("gfx_spec")
+        if (
+            ts_spec is None
+            or getattr(ts_spec, "kind", None) != "sprite"
+            or tm_spec is None
+            or getattr(tm_spec, "kind", None) != "tilemap"
+        ):
+            self._set_gfx_tm_log("Invalid gfx specs on tileset/tilemap fields.")
+            return
+        off_base = self._base_off + entry_idx * self._struct_size
+        ts_off_f = off_base + ts_fd["offset"]
+        tm_off_f = off_base + tm_fd["offset"]
+        if ts_off_f + 4 > len(data) or tm_off_f + 4 > len(data):
+            return
+        ts_tgt = resolve_gba_pointer(data, ts_off_f)
+        tm_tgt = resolve_gba_pointer(data, tm_off_f)
+        if ts_tgt is None or tm_tgt is None:
+            self._set_gfx_tm_log("Tileset or tilemap pointer does not reference ROM (need 0x08…/0x09…).")
+            self._gfx_tm_img_label.configure(image="", text="(bad pointer)")
+            return
+        pal_spec = None
+        pal_base = None
+        log_pre = ""
+        if pl_i is not None:
+            pl_fd = self._fields[pl_i]
+            psp = pl_fd.get("gfx_spec")
+            if psp is None or getattr(psp, "kind", None) != "palette":
+                log_pre = "Warning: palette field spec invalid; using default colors.\n\n"
+            else:
+                pal_spec = psp
+                pl_off = off_base + pl_fd["offset"]
+                if pl_off + 4 > len(data):
+                    self._set_gfx_tm_log("Palette field out of range.")
+                    return
+                ptgt = resolve_gba_pointer(data, pl_off)
+                if ptgt is None:
+                    log_pre = "Warning: palette pointer invalid; using default colors.\n\n"
+                else:
+                    pal_base = ptgt
+        png_path, log = decode_graphics_anchor_to_png(
+            bytes(data),
+            tm_tgt,
+            tm_spec,
+            external_palette_spec=pal_spec,
+            external_palette_base_off=pal_base,
+            external_tileset_spec=ts_spec,
+            external_tileset_base_off=ts_tgt,
+        )
+        self._set_gfx_tm_log(log_pre + log)
+        self._gfx_tm_photo = None
+        if png_path:
+            try:
+                from PIL import Image, ImageTk  # type: ignore
+                im = Image.open(png_path)
+                im = im.convert("RGBA")
+                try:
+                    resample = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+                except AttributeError:
+                    resample = Image.LANCZOS
+                im.thumbnail((280, 280), resample)
+                self._gfx_tm_photo = ImageTk.PhotoImage(im)
+                self._gfx_tm_img_label.configure(image=self._gfx_tm_photo, text="")
+            except ImportError:
+                self._gfx_tm_img_label.configure(
+                    image="",
+                    text=f"Install Pillow to preview PNG.\n{png_path}",
+                )
+            except OSError as e:
+                self._gfx_tm_img_label.configure(image="", text=f"Image error: {e}")
+        else:
+            self._gfx_tm_img_label.configure(image="", text="(decode failed)")
+
     def _update_gfx_sprite_panel(self) -> None:
+        self._gfx_tilemap_frame.grid_remove()
         sel = self._tree.selection()
         if not sel or not sel[0].startswith("sf_"):
             self._gfx_sprite_frame.grid_remove()
@@ -2363,6 +2575,7 @@ class StructEditorFrame(ttk.Frame):
         self._list_enum_frame.grid_remove()
         self._list_enum_fi = None
         self._gfx_sprite_frame.grid_remove()
+        self._gfx_tilemap_frame.grid_remove()
         self._gfx_fi = None
         self._combo.set("")
         self._struct_search_var.set("")
@@ -2389,6 +2602,7 @@ class StructEditorFrame(ttk.Frame):
         self._list_enum_frame.grid_remove()
         self._list_enum_fi = None
         self._gfx_sprite_frame.grid_remove()
+        self._gfx_tilemap_frame.grid_remove()
         self._gfx_fi = None
         self._tree.delete(*self._tree.get_children())
         try:

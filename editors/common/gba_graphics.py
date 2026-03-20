@@ -622,7 +622,8 @@ def parse_graphics_anchor_format(fmt: str) -> Optional[GraphicsAnchorSpec]:
             palette_4_indices=idxs,
         )
 
-    # Tilemap (non-affine ``bin`` / ``bin.lz``): ucm4xWxH|tileset.anchor|palette.anchor (palette optional)
+    # Tilemap (non-affine ``bin`` / ``bin.lz``): ucm4xWxH[|tileset.anchor[|palette.anchor]].
+    # Dimensions-only (no ``|`` tail): tileset/palette come from struct fields or external decode args.
     m = re.fullmatch(r"(uc|lz)m([48])x(\d+)x(\d+)(?:\|(.+))?", s, re.IGNORECASE)
     if m:
         lz = m.group(1).lower() == "lz"
@@ -632,7 +633,15 @@ def parse_graphics_anchor_format(fmt: str) -> Optional[GraphicsAnchorSpec]:
             return None
         rest = (m.group(5) or "").strip()
         if not rest:
-            return None
+            return GraphicsAnchorSpec(
+                kind="tilemap",
+                bpp=bpp,
+                lz=lz,
+                map_w_tiles=mw,
+                map_h_tiles=mh,
+                tileset_anchor_name=None,
+                palette_anchor_name=None,
+            )
         parts = [p.strip() for p in rest.split("|") if p.strip()]
         if not parts:
             return None
@@ -671,6 +680,32 @@ def parse_graphics_anchor_format(fmt: str) -> Optional[GraphicsAnchorSpec]:
             return replace(spec, palette_anchor_name=pal)
         return spec
     return None
+
+
+def parse_tilemap_dimension_spec(inner: str) -> Optional[GraphicsAnchorSpec]:
+    """
+    Struct field inner for ``tilemap<`…`>``: ``ucm4xWxH`` / ``lzm4xWxH`` with optional ignored ``|tail``
+    (e.g. ``|table``). Does not embed tileset/palette NamedAnchors; use ``tileset<`…`>`` / ``palette<`…`>`` fields.
+    """
+    s = _strip_outer_backticks(inner.strip())
+    dim_part = s.split("|", 1)[0].strip()
+    m = re.fullmatch(r"(uc|lz)m([48])x(\d+)x(\d+)", dim_part, re.IGNORECASE)
+    if not m:
+        return None
+    lz = m.group(1).lower() == "lz"
+    bpp = int(m.group(2))
+    mw, mh = int(m.group(3)), int(m.group(4))
+    if mw <= 0 or mh <= 0:
+        return None
+    return GraphicsAnchorSpec(
+        kind="tilemap",
+        bpp=bpp,
+        lz=lz,
+        map_w_tiles=mw,
+        map_h_tiles=mh,
+        tileset_anchor_name=None,
+        palette_anchor_name=None,
+    )
 
 
 _GRAPHICS_TABLE_COUNT_REF_RE = re.compile(r"^[A-Za-z_][\w.+-]*$")
