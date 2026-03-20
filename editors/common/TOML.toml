@@ -1,5 +1,24 @@
 # Struct uint fields: ``name:listname`` or ``name:listname+3`` / ``name:pcs.table-1`` — optional trailing signed
 # integer shifts the index used for [[List]] / PCS labels (ROM stores idx; label row is idx + offset).
+#
+# Struct fixed-width text (inside ``[…]`` Format):
+#   ``name""N`` — PCS-encoded string, width N bytes (0xFF terminator; same as PCS string tables).
+#   ``name''N`` — raw Latin-1 / byte string, width N bytes (NUL-padded; read/display up to first 0x00).
+#   ``baseStatTotal|=hp+attack+def`` — helper row (no ROM bytes): sums named **uint** fields; not editable.
+#   ``flags.|t|…`` — **bitfield** (``|t|``): storage size before ``|t|`` is the same rule as uints — ``.`` = 1 byte,
+#     each ``:`` = 2 bytes (so ``field:|t|`` = 2-byte container, ``field::|t|`` = 4 bytes). After ``|t|``,
+#     **pipe-separated** subfields ``name`` + bit-width run where ``.`` = 1 bit and ``:`` = 2 bits (LSB-first packing).
+#     Named subfields need not fill the whole storage word; the high bits are padding (preserved on edit).
+#     Example: ``field.|t|x::.|y:.`` → 5+3 bits in one byte; ``evs:|t|hp:|atk:|…`` → 6×2 bits in 16 bits leaves 4 padding bits.
+#
+# Standalone NamedAnchor string tables (not ``[struct…]``):
+#   ``[field""N]count`` — PCS table (existing).
+#   ``[field''N]count`` — same layout, ASCII/Latin-1 slots.
+#   ``''N`` — single ASCII blob of N bytes at ``Address`` (Tools → PCS list shows one row).
+#
+# **Quoting in TOML:** Tools no longer strip ``'``/``"`` from ``Format`` (that broke ``''N``).
+# Prefer ``Format = "''12"`` or ``Format = '[field''8]100'``. In ``'''…'''`` literals, each ``''`` is one ``'``,
+# so you need extra quotes to get ``''`` in the value — or use the lenient forms ``'12`` / ``['12]1`` (collapsed).
 
 # ── Graphics NamedAnchors (FireRed Tools → Graphics slot; decode = Python + Pillow, pret gfx.c–compatible) ──
 # Whole-anchor Format (no `[`…`]` struct wrapper). You may wrap the value in backticks in TOML, e.g.

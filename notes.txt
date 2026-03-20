@@ -1,13 +1,6 @@
-ctrl + t pulls up all 3 editors
-jump to pointer if double-clicking inside a struct
-find and replace (filling unused bytes with FF)
+using a field inside of a struct as the table that struct indexes into (using / in the TOML)
 graphics and palette editing/insertion
 c injection
-ASCII text strings (using double single quotes [''] in the TOML)
-bitfields (|t| in the TOML)
-using a field inside of a struct as the table that struct indexes into (using / in the TOML)
-helper fields (|= in the TOML; for example baseStatTotal|=hp+attack+def+speed+spatk+spdef)
-convert structs and functions to toml
 undo (ctrl + z)
 port firered editor code to hex_editor.py
 generate toml (other option)

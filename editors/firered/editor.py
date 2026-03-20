@@ -190,6 +190,7 @@ class FireRedEditor:
         if self._tools_visible:
             self._slot_active[0] = True
             self._slot_active[1] = True
+            self._slot_active[2] = True
             self._main_paned.add(self._tools_frame)
             self._pcs_table.refresh_anchors()
             self._struct_editor.refresh_anchors()

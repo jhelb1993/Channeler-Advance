@@ -38,25 +38,25 @@ Format = '''`f|b8`[struct Task* task]'''
 [[NamedAnchors]]
 Name = '''data.header.title'''
 Address = 0x0000A0
-Format = '''`asc`12'''
+Format = '''''12'''
 DefaultHash = '''662A937D'''
 
 [[NamedAnchors]]
 Name = '''data.header.gamecode'''
 Address = 0x0000AC
-Format = '''`asc`4'''
+Format = '''''4'''
 DefaultHash = '''51418EA3'''
 
 [[NamedAnchors]]
 Name = '''data.header.makercode'''
 Address = 0x0000B0
-Format = '''`asc`2'''
+Format = '''''2'''
 DefaultHash = '''B214E3C3'''
 
 [[NamedAnchors]]
 Name = '''data.header.romname'''
 Address = 0x000108
-Format = '''`asc`32'''
+Format = '''''32'''
 DefaultHash = '''0DF0CDE2'''
 
 [[NamedAnchors]]

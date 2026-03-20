@@ -180,6 +180,30 @@ def encode_pcs_string(text: str, width: int) -> bytearray:
     return out[:width]
 
 
+def encode_ascii_slot(text: str, width: int) -> bytearray:
+    """Fixed-width Latin-1 / raw-byte slot: encode text, pad with 0x00 (NUL). Same width role as PCS ``name""N``."""
+    raw = text.encode("latin-1", errors="replace")
+    if len(raw) > width:
+        raw = raw[:width]
+    out = bytearray(raw)
+    while len(out) < width:
+        out.append(0x00)
+    return out[:width]
+
+
+def normalize_named_anchor_format(raw: Any) -> str:
+    """Whitespace-strip only. Do not strip quotes — ``Format`` may start with ``''`` for ASCII tables."""
+    return str(raw or "").strip()
+
+
+def decode_ascii_slot(raw: bytes) -> str:
+    """Display bytes for an ASCII slot: C-string style up to first 0x00, else full width."""
+    end = raw.find(b"\x00")
+    if end < 0:
+        end = len(raw)
+    return raw[:end].decode("latin-1", errors="replace")
+
+
 def pcs_encoded_payload_length(text: str) -> int:
     """Byte length of PCS encoding: mapped code units + 0xFF terminator (matches :func:`encode_pcs_string`)."""
     n = 0
@@ -373,9 +397,14 @@ class PcsStringTableFrame(ttk.Frame):
         if filt:
             if cur in filt:
                 self._combo.current(filt.index(cur))
-            else:
+                self._load_table()
+            elif cur:
+                self._combo.set(filt[0])
                 self._combo.current(0)
                 self._load_table()
+            else:
+                self._combo.set("")
+                self._tree.delete(*self._tree.get_children())
         else:
             self._combo.set("")
             self._tree.delete(*self._tree.get_children())
@@ -442,10 +471,14 @@ class PcsStringTableFrame(ttk.Frame):
                 if gba < GBA_ROM_BASE:
                     gba += GBA_ROM_BASE
                 off = gba - GBA_ROM_BASE + row_idx * info["width"]
-                enc = encode_pcs_string(text, info["width"])
+                if info.get("encoding") == "ascii":
+                    enc = encode_ascii_slot(text, info["width"])
+                    disp = decode_ascii_slot(bytes(enc))
+                else:
+                    enc = encode_pcs_string(text, info["width"])
+                    parts = enc[: enc.index(0xFF)] if 0xFF in enc else enc
+                    disp = "".join(_PCS_BYTE_TO_CHAR.get(b, "·") for b in parts)
                 self._hex.write_bytes_at(off, enc)
-                parts = enc[:enc.index(0xFF)] if 0xFF in enc else enc
-                disp = "".join(_PCS_BYTE_TO_CHAR.get(b, "·") for b in parts)
                 self._tree.set(self._edit_iid, "val", disp)
             except (ValueError, TypeError, KeyError):
                 pass
@@ -464,10 +497,15 @@ class PcsStringTableFrame(ttk.Frame):
                 if gba < GBA_ROM_BASE:
                     gba += GBA_ROM_BASE
                 off = gba - GBA_ROM_BASE + row_idx * info["width"]
-                enc = encode_pcs_string(text, info["width"])
+                if info.get("encoding") == "ascii":
+                    enc = encode_ascii_slot(text, info["width"])
+                    disp = decode_ascii_slot(bytes(enc))
+                else:
+                    enc = encode_pcs_string(text, info["width"])
+                    parts = enc[: enc.index(0xFF)] if 0xFF in enc else enc
+                    disp = "".join(_PCS_BYTE_TO_CHAR.get(b, "·") for b in parts)
                 self._hex.write_bytes_at(off, enc)
-                parts = enc[:enc.index(0xFF)] if 0xFF in enc else enc
-                self._tree.set(self._edit_iid, "val", "".join(_PCS_BYTE_TO_CHAR.get(b, "·") for b in parts))
+                self._tree.set(self._edit_iid, "val", disp)
             except (ValueError, TypeError, KeyError):
                 pass
         direction = -1 if event.keysym == "Up" else 1
@@ -535,17 +573,22 @@ class PcsStringTableFrame(ttk.Frame):
         data = self._hex.get_data()
         if not data:
             return
+        enc = info.get("encoding", "pcs")
         for i in range(count):
             off = base_off + i * width
             if off + width > len(data):
                 break
             chunk = bytes(data[off : off + width])
-            chars = []
-            for b in chunk:
-                if b == 0xFF:
-                    break
-                chars.append(_PCS_BYTE_TO_CHAR.get(b, "·"))
-            self._tree.insert("", tk.END, values=(str(i), "".join(chars)), iid=f"pcs_{i}")
+            if enc == "ascii":
+                disp = decode_ascii_slot(chunk)
+            else:
+                chars = []
+                for b in chunk:
+                    if b == 0xFF:
+                        break
+                    chars.append(_PCS_BYTE_TO_CHAR.get(b, "·"))
+                disp = "".join(chars)
+            self._tree.insert("", tk.END, values=(str(i), disp), iid=f"pcs_{i}")
 
 
 class GraphicsPreviewFrame(ttk.Frame):
@@ -1129,6 +1172,87 @@ def _split_enum_field_ref(enum_ref: Optional[str]) -> Tuple[str, int]:
     return s, 0
 
 
+def parse_struct_tree_iid(iid: str) -> Tuple[int, Optional[int]]:
+    """Parse tree row id: ``sf_3`` → field index 3; ``sf_3_b0`` → field 3, bitfield part 0."""
+    if not iid.startswith("sf_"):
+        return -1, None
+    rest = iid[3:]
+    if "_b" in rest:
+        a, b = rest.split("_b", 1)
+        try:
+            return int(a), int(b)
+        except ValueError:
+            return -1, None
+    try:
+        return int(rest), None
+    except ValueError:
+        return -1, None
+
+
+def _parse_bitfield_token(token: str) -> Optional[Dict[str, Any]]:
+    """Parse bitfield tokens. Storage width before ``|t|`` matches uints: ``.`` = 1 byte, ``:`` = 2 bytes per colon
+    (e.g. ``field.|t|`` = 1 byte, ``field:|t|`` = 2 bytes, ``field::|t|`` = 4 bytes). After ``|t|``, subfields are
+    ``|``-separated; in each subfield, ``.`` = 1 bit and ``:`` = 2 bits per run.
+    Subfields may sum to fewer bits than the storage size; the rest is implicit padding (kept on write)."""
+    if "|t|" not in token:
+        return None
+    head, tail = token.split("|t|", 1)
+    head, tail = head.strip(), tail.strip()
+    if not head or not tail:
+        return None
+    hm = re.match(r"^(\w+)([.:]+)$", head)
+    if not hm:
+        return None
+    base_name = hm.group(1)
+    size_chars = hm.group(2)
+    byte_width = sum(1 if c == "." else 2 for c in size_chars)
+    if byte_width <= 0:
+        return None
+    total_bits = byte_width * 8
+    parts: List[Dict[str, Any]] = []
+    shift = 0
+    segments = [x.strip() for x in tail.split("|") if x.strip()]
+    for seg in segments:
+        sm = re.match(r"^(\w+)([.:]+)$", seg)
+        if not sm:
+            return None
+        sub_name = sm.group(1)
+        sch = sm.group(2)
+        nbits = sum(1 if c == "." else 2 for c in sch)
+        if nbits <= 0 or shift + nbits > total_bits:
+            return None
+        parts.append({"name": sub_name, "bits": nbits, "shift": shift})
+        shift += nbits
+    if shift > total_bits or not parts:
+        return None
+    # Subfields may not use every bit (e.g. 12 bits of named 2-bit slots in a 16-bit word); remainder is padding.
+    padding_bits = total_bits - shift
+    return {
+        "name": base_name,
+        "size": byte_width,
+        "type": "bitfield",
+        "enum": None,
+        "hex": False,
+        "parts": parts,
+        "padding_bits": padding_bits,
+    }
+
+
+def _parse_helper_field_token(token: str) -> Optional[Dict[str, Any]]:
+    """Parse ``name|=a+b+…`` — computed sum of uint fields; no ROM bytes (size 0)."""
+    m = re.match(r"^(\w+)\|=(.+)$", token.strip())
+    if not m:
+        return None
+    name = m.group(1)
+    expr = m.group(2).strip()
+    if not expr:
+        return None
+    refs = [p.strip() for p in expr.split("+") if p.strip()]
+    if not refs:
+        return None
+    return {"name": name, "size": 0, "type": "helper", "enum": None, "helper_refs": refs}
+
+
 def _parse_struct_fields(fmt: str) -> Optional[List[Dict[str, Any]]]:
     """Parse the fields inside a Format like '[field1. field2: ...]count'.
     Returns list of field descriptors with byte offsets, or None if not a struct format."""
@@ -1176,23 +1300,46 @@ def _parse_struct_fields(fmt: str) -> Optional[List[Dict[str, Any]]]:
     if buf:
         tokens.append(buf)
 
+    # Merge tokens so an incomplete ``…|t|`` + continuation (split on spaces) becomes one bitfield token.
+    merged: List[str] = []
+    ti = 0
+    while ti < len(tokens):
+        t = tokens[ti]
+        if "|t|" in t:
+            buf = t
+            j = ti + 1
+            parsed = _parse_bitfield_token(buf)
+            while parsed is None and j < len(tokens):
+                buf = f"{buf} {tokens[j]}"
+                j += 1
+                parsed = _parse_bitfield_token(buf)
+            if parsed is not None:
+                merged.append(buf)
+                ti = j
+                continue
+        merged.append(t)
+        ti += 1
+    tokens = merged
+
     fields: List[Dict[str, Any]] = []
     offset = 0
     for tok in tokens:
-        fd = _parse_single_field(tok)
+        fd = _parse_helper_field_token(tok)
+        if fd is None:
+            fd = _parse_single_field(tok)
         if fd:
             fd["offset"] = offset
-            offset += fd["size"]
+            if fd.get("type") != "helper":
+                offset += fd["size"]
             fields.append(fd)
     return fields if fields else None
 
 
 def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
     """Parse a single field token like 'hp.', 'type1.enumname', 'unknown:cardgraphicsindexes+1', etc."""
-    if "|=" in token:
-        return None
-    if "|t|" in token:
-        token = token.split("|t|")[0]
+    bf = _parse_bitfield_token(token)
+    if bf is not None:
+        return bf
     if "|s=" in token:
         token = token.split("|s=")[0]
     hex_hint = False
@@ -1205,6 +1352,10 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
     m = re.match(r'^(\w+)""(\d+)', token)
     if m:
         return {"name": m.group(1), "size": int(m.group(2)), "type": "pcs", "enum": None}
+
+    m = re.match(r"^(\w+)''(\d+)", token)
+    if m:
+        return {"name": m.group(1), "size": int(m.group(2)), "type": "ascii", "enum": None}
 
     if token.endswith('<"">'):
         nm = re.match(r'^(\w+)', token)
@@ -1720,7 +1871,7 @@ class StructEditorFrame(ttk.Frame):
         sel = self._tree.selection()
         if not sel or not sel[0].startswith("sf_"):
             return
-        fi = int(sel[0].split("_")[1])
+        fi, _ = parse_struct_tree_iid(sel[0])
         allowed = {ts_i, tm_i}
         if pl_i is not None:
             allowed.add(pl_i)
@@ -1827,7 +1978,7 @@ class StructEditorFrame(ttk.Frame):
             self._gfx_fi = None
             self._gfx_sprite_last_fi = None
             return
-        fi = int(sel[0].split("_")[1])
+        fi, _ = parse_struct_tree_iid(sel[0])
         if fi >= len(self._fields):
             self._gfx_sprite_frame.grid_remove()
             self._gfx_fi = None
@@ -1943,7 +2094,7 @@ class StructEditorFrame(ttk.Frame):
             self._ptr_text_frame.grid_remove()
             self._ptr_text_fi = None
             return
-        fi = int(sel[0].split("_")[1])
+        fi, _ = parse_struct_tree_iid(sel[0])
         if fi >= len(self._fields):
             self._ptr_text_frame.grid_remove()
             self._ptr_text_fi = None
@@ -1999,7 +2150,13 @@ class StructEditorFrame(ttk.Frame):
         data2 = self._hex.get_data()
         if data2 and self._tree.exists(iid):
             raw = bytes(data2[foff:foff + fd["size"]])
-            self._tree.set(iid, "val", self._format_value(raw, fd))
+            try:
+                ei = int(self._idx_var.get())
+                eb = self._base_off + ei * self._struct_size
+            except (ValueError, TypeError):
+                eb = self._base_off
+            self._tree.set(iid, "val", self._format_value(raw, fd, entry_base=eb))
+            self._refresh_helper_field_rows(eb)
 
     def _parse_ff_gap_search_window(self) -> Tuple[Optional[int], Optional[int], Optional[str]]:
         """Parse FF-gap search range. Returns ``(window_lo, window_hi_exclusive, error)``.
@@ -2189,7 +2346,7 @@ class StructEditorFrame(ttk.Frame):
             self._list_enum_fi = None
             self._list_enum_active_pcs = None
             return
-        fi = int(sel[0].split("_")[1])
+        fi, _ = parse_struct_tree_iid(sel[0])
         if fi >= len(self._fields):
             self._list_enum_frame.grid_remove()
             self._list_enum_fi = None
@@ -2304,7 +2461,9 @@ class StructEditorFrame(ttk.Frame):
         data2 = self._hex.get_data()
         if data2 and self._tree.exists(iid):
             raw = bytes(data2[foff:foff + fd["size"]])
-            self._tree.set(iid, "val", self._format_value(raw, fd))
+            entry_base = self._base_off + entry_idx * self._struct_size
+            self._tree.set(iid, "val", self._format_value(raw, fd, entry_base=entry_base))
+            self._refresh_helper_field_rows(entry_base)
         if self._is_toml_list_enum_field(fd):
             list_base, _ = _split_enum_field_ref(fd["enum"])
             self._list_enum_toml_var.set(self._lists.get(list_base, {}).get(new_idx, ""))
@@ -2340,7 +2499,9 @@ class StructEditorFrame(ttk.Frame):
         data2 = self._hex.get_data()
         if data2 and self._tree.exists(iid):
             raw = bytes(data2[foff:foff + fd["size"]])
-            self._tree.set(iid, "val", self._format_value(raw, fd))
+            entry_base = self._base_off + entry_idx * self._struct_size
+            self._tree.set(iid, "val", self._format_value(raw, fd, entry_base=entry_base))
+            self._refresh_helper_field_rows(entry_base)
 
     def _on_list_enum_pcs_apply(self) -> None:
         fi = self._list_enum_fi
@@ -2379,7 +2540,9 @@ class StructEditorFrame(ttk.Frame):
         data2 = self._hex.get_data()
         if data2 and self._tree.exists(iid):
             raw = bytes(data2[foff:foff + fd["size"]])
-            self._tree.set(iid, "val", self._format_value(raw, fd))
+            entry_base = self._base_off + entry_idx * self._struct_size
+            self._tree.set(iid, "val", self._format_value(raw, fd, entry_base=entry_base))
+            self._refresh_helper_field_rows(entry_base)
 
     def _pcs_table_row_file_offset(self, pcs_info: Dict[str, Any], row_idx: int) -> Optional[int]:
         """File offset of one row in a PCS table anchor, or None."""
@@ -2410,7 +2573,10 @@ class StructEditorFrame(ttk.Frame):
         if off is None:
             return False
         width = pcs_info["width"]
-        enc = encode_pcs_string(text, width)
+        if pcs_info.get("encoding") == "ascii":
+            enc = encode_ascii_slot(text, width)
+        else:
+            enc = encode_pcs_string(text, width)
         self._hex.write_bytes_at(off, bytes(enc))
         return True
 
@@ -2518,6 +2684,9 @@ class StructEditorFrame(ttk.Frame):
         off = base + row_idx * width
         if off + width > len(data):
             return ""
+        chunk = bytes(data[off : off + width])
+        if pcs_info.get("encoding") == "ascii":
+            return decode_ascii_slot(chunk)
         chars = []
         for i in range(width):
             b = data[off + i]
@@ -2604,19 +2773,84 @@ class StructEditorFrame(ttk.Frame):
             if off + self._struct_size > len(data):
                 return
             for fi, fd in enumerate(self._fields):
+                if fd.get("type") == "helper":
+                    val_str = self._format_value(b"", fd, entry_base=off)
+                    self._tree.insert("", tk.END, values=(fd["name"], val_str), iid=f"sf_{fi}")
+                    continue
+                if fd.get("type") == "bitfield":
+                    foff = off + fd["offset"]
+                    sz = int(fd["size"])
+                    if foff + sz > len(data):
+                        break
+                    raw = bytes(data[foff : foff + sz])
+                    val = int.from_bytes(raw, "little")
+                    for j, p in enumerate(fd["parts"]):
+                        subv = (val >> p["shift"]) & ((1 << p["bits"]) - 1)
+                        self._tree.insert(
+                            "",
+                            tk.END,
+                            values=(p["name"], str(subv)),
+                            iid=f"sf_{fi}_b{j}",
+                        )
+                    continue
                 foff = off + fd["offset"]
                 sz = fd["size"]
                 if foff + sz > len(data):
                     break
                 raw = bytes(data[foff:foff + sz])
-                val_str = self._format_value(raw, fd)
+                val_str = self._format_value(raw, fd, entry_base=off)
                 self._tree.insert("", tk.END, values=(fd["name"], val_str), iid=f"sf_{fi}")
         finally:
             self._update_entry_index_name_label()
             self._sync_field_aux_panels()
 
-    def _format_value(self, raw: bytes, fd: Dict[str, Any]) -> str:
+    def _format_helper_value(self, fd: Dict[str, Any], data: Any, entry_base: int) -> str:
+        """Sum ROM uint values for fields named in ``helper_refs`` (same struct row)."""
+        refs: List[str] = list(fd.get("helper_refs") or [])
+        by_name = {str(f["name"]): f for f in self._fields if f.get("type") != "helper"}
+        total = 0
+        missing: List[str] = []
+        for ref in refs:
+            rf = by_name.get(ref)
+            if rf is None or rf.get("type") != "uint":
+                missing.append(ref)
+                continue
+            roff = entry_base + int(rf["offset"])
+            rsz = int(rf["size"])
+            if roff + rsz > len(data):
+                missing.append(ref)
+                continue
+            total += int.from_bytes(data[roff : roff + rsz], "little")
+        if missing:
+            return f"{total}  (missing: {', '.join(missing)})"
+        return str(total)
+
+    def _refresh_helper_field_rows(self, entry_base: int) -> None:
+        data = self._hex.get_data()
+        if not data or not self._tree:
+            return
+        for fi, fd in enumerate(self._fields):
+            if fd.get("type") != "helper":
+                continue
+            iid = f"sf_{fi}"
+            if self._tree.exists(iid):
+                self._tree.set(iid, "val", self._format_helper_value(fd, data, entry_base))
+
+    def _format_value(self, raw: bytes, fd: Dict[str, Any], entry_base: Optional[int] = None) -> str:
         ftype = fd["type"]
+        if ftype == "bitfield":
+            return ""
+        if ftype == "helper":
+            if entry_base is None:
+                try:
+                    ei = int(self._idx_var.get())
+                    entry_base = self._base_off + ei * self._struct_size
+                except (ValueError, TypeError):
+                    return "(—)"
+            data = self._hex.get_data()
+            if not data:
+                return "(—)"
+            return self._format_helper_value(fd, data, entry_base)
         if ftype == "pcs":
             chars = []
             for b in raw:
@@ -2624,6 +2858,8 @@ class StructEditorFrame(ttk.Frame):
                     break
                 chars.append(_PCS_BYTE_TO_CHAR.get(b, "·"))
             return "".join(chars)
+        if ftype == "ascii":
+            return decode_ascii_slot(raw)
         if ftype == "pcs_ptr":
             if len(raw) >= 4:
                 ptr = int.from_bytes(raw[:4], "little")
@@ -2697,13 +2933,18 @@ class StructEditorFrame(ttk.Frame):
                 entry_off = rom_base + idx * info["width"]
                 if entry_off + info["width"] > len(data):
                     continue
-                chars = []
-                for i in range(info["width"]):
-                    b = data[entry_off + i]
-                    if b == 0xFF:
-                        break
-                    chars.append(_PCS_BYTE_TO_CHAR.get(b, "·"))
-                return f"{value} ({''.join(chars)})"
+                chunk = bytes(data[entry_off : entry_off + info["width"]])
+                if info.get("encoding") == "ascii":
+                    preview = decode_ascii_slot(chunk)
+                else:
+                    chars = []
+                    for i in range(info["width"]):
+                        b = data[entry_off + i]
+                        if b == 0xFF:
+                            break
+                        chars.append(_PCS_BYTE_TO_CHAR.get(b, "·"))
+                    preview = "".join(chars)
+                return f"{value} ({preview})"
         return None
 
     def _start_inline_edit(self, event: Optional[tk.Event] = None) -> None:
@@ -2715,13 +2956,15 @@ class StructEditorFrame(ttk.Frame):
         iid = sel[0]
         if not iid.startswith("sf_"):
             return
-        fi = int(iid.split("_")[1])
-        if fi >= len(self._fields):
+        fi, _bi = parse_struct_tree_iid(iid)
+        if fi < 0 or fi >= len(self._fields):
             return
         fd = self._fields[fi]
         if self._is_enum_panel_field(fd):
             self._sync_field_aux_panels()
             self._list_enum_rom_combo.focus_set()
+            return
+        if fd.get("type") == "helper":
             return
         vals = self._tree.item(iid, "values")
         if len(vals) < 2:
@@ -2771,14 +3014,17 @@ class StructEditorFrame(ttk.Frame):
             return
         raw_edit = self._edit_entry.get()
         text = raw_edit.strip()
-        fi = int(self._edit_iid.split("_")[1])
-        if fi >= len(self._fields):
+        fi, bi = parse_struct_tree_iid(self._edit_iid)
+        if fi < 0 or fi >= len(self._fields):
             self._cancel_inline_edit()
             return
         fd = self._fields[fi]
         try:
             entry_idx = int(self._idx_var.get())
         except ValueError:
+            self._cancel_inline_edit()
+            return
+        if fd.get("type") == "helper":
             self._cancel_inline_edit()
             return
         foff = self._base_off + entry_idx * self._struct_size + fd["offset"]
@@ -2788,8 +3034,38 @@ class StructEditorFrame(ttk.Frame):
             return
 
         skip_tree_refresh = False
+        entry_base = self._base_off + entry_idx * self._struct_size
+        if fd.get("type") == "bitfield":
+            if bi is None:
+                self._cancel_inline_edit()
+                return
+            try:
+                new_val = int(text, 0)
+            except ValueError:
+                self._cancel_inline_edit()
+                return
+            part = fd["parts"][bi]
+            mx = (1 << part["bits"]) - 1
+            if new_val < 0 or new_val > mx:
+                messagebox.showwarning("Struct", f"Value must be in 0 … {mx} for this bitfield.")
+                self._cancel_inline_edit()
+                return
+            cur = int.from_bytes(data[foff : foff + fd["size"]], "little")
+            m = ((1 << part["bits"]) - 1) << part["shift"]
+            cur = (cur & ~m) | ((new_val & ((1 << part["bits"]) - 1)) << part["shift"])
+            self._hex.write_bytes_at(foff, cur.to_bytes(fd["size"], "little"))
+            for j, pp in enumerate(fd["parts"]):
+                subv = (cur >> pp["shift"]) & ((1 << pp["bits"]) - 1)
+                self._tree.set(f"sf_{fi}_b{j}", "val", str(subv))
+            self._refresh_helper_field_rows(entry_base)
+            self._cancel_inline_edit()
+            self._sync_field_aux_panels()
+            return
         if fd["type"] == "pcs":
             enc = encode_pcs_string(text, fd["size"])
+            self._hex.write_bytes_at(foff, enc)
+        elif fd["type"] == "ascii":
+            enc = encode_ascii_slot(text, fd["size"])
             self._hex.write_bytes_at(foff, enc)
         elif fd["type"] == "pcs_ptr":
             ptr = int.from_bytes(data[foff:foff + 4], "little")
@@ -2827,7 +3103,8 @@ class StructEditorFrame(ttk.Frame):
 
         if not skip_tree_refresh:
             raw = bytes(self._hex.get_data()[foff:foff + fd["size"]])
-            self._tree.set(self._edit_iid, "val", self._format_value(raw, fd))
+            self._tree.set(self._edit_iid, "val", self._format_value(raw, fd, entry_base=entry_base))
+            self._refresh_helper_field_rows(entry_base)
         else:
             self._refresh_pcs_ptr_tree_row(fi)
         self._cancel_inline_edit()
@@ -2839,11 +3116,15 @@ class StructEditorFrame(ttk.Frame):
         cur_iid = self._edit_iid
         self._edit_entry.unbind("<FocusOut>")
         self._commit_inline_edit()
-        fi = int(cur_iid.split("_")[1])
         direction = -1 if event.keysym == "Up" else 1
-        next_fi = fi + direction
-        next_iid = f"sf_{next_fi}"
-        if self._tree.exists(next_iid):
+        kids = self._tree.get_children("")
+        try:
+            pos = kids.index(cur_iid)
+        except ValueError:
+            return "break"
+        next_pos = pos + direction
+        if 0 <= next_pos < len(kids):
+            next_iid = kids[next_pos]
             self._tree.selection_set(next_iid)
             self._tree.see(next_iid)
             self._tree.focus_set()
@@ -3083,6 +3364,7 @@ class HexEditorFrame(ttk.Frame):
         self._text.tag_configure("cursor_byte", background="#e0e0e0")
         self._text_ascii.tag_configure("pointer", foreground="red")
         self._text_ascii.tag_configure("sel_ascii", background="#add8e6", foreground="black")
+        self._text_ascii.tag_configure("cursor_byte", background="#e0e0e0")
 
         self._init_syntax_highlight_tags()
 
@@ -3637,17 +3919,43 @@ class HexEditorFrame(ttk.Frame):
         if anchor_info:
             self.after(10, lambda ai=anchor_info: cb(ai))
 
-    def _parse_pcs_format(self, fmt: str) -> Optional[Tuple[str, int, Any]]:
+    def _parse_pcs_format(self, fmt: str) -> Optional[Tuple[str, int, Any, str]]:
+        """Parse PCS/ASCII string table formats. Returns ``(field, width, count_or_ref, encoding)``."""
         if not fmt:
             return None
-        m = re.search(r'\^?\[(\w+)""(\d+)\](.+)', fmt)
-        if not m:
-            return None
-        field, width_str, length_part = m.group(1), m.group(2), m.group(3).strip()
-        width = int(width_str)
-        if length_part.isdigit():
-            return (field, width, int(length_part))
-        return (field, width, length_part)
+        s = str(fmt).strip()
+        m = re.search(r'\^?\[(\w+)""(\d+)\](.+)', s)
+        if m:
+            field, width_str, length_part = m.group(1), m.group(2), m.group(3).strip()
+            width = int(width_str)
+            if length_part.isdigit():
+                return (field, width, int(length_part), "pcs")
+            return (field, width, length_part, "pcs")
+        m = re.search(r"\^?\[(\w*)''(\d+)\](.+)", s)
+        if m:
+            field = (m.group(1) or "").strip() or "text"
+            width_str, length_part = m.group(2), m.group(3).strip()
+            width = int(width_str)
+            if length_part.isdigit():
+                return (field, width, int(length_part), "ascii")
+            return (field, width, length_part, "ascii")
+        m = re.match(r"^\^?''(\d+)\s*$", s)
+        if m:
+            width = int(m.group(1))
+            return ("text", width, 1, "ascii")
+        # TOML multiline literals use '' for one '; ``''2`` in a file often parses as ``'2`` (one quote lost).
+        m = re.match(r"^'(\d+)$", s)
+        if m:
+            return ("text", int(m.group(1)), 1, "ascii")
+        # Collapsed bracket form: ``['2]1`` instead of ``[''2]1``
+        m = re.match(r"^\[\'(\d+)\](.+)$", s)
+        if m:
+            width = int(m.group(1))
+            length_part = m.group(2).strip()
+            if length_part.isdigit():
+                return ("text", width, int(length_part), "ascii")
+            return ("text", width, length_part, "ascii")
+        return None
 
     def _resolve_table_length(self, length_ref: Any) -> Optional[int]:
         if isinstance(length_ref, int):
@@ -3674,15 +3982,16 @@ class HexEditorFrame(ttk.Frame):
     def _get_pcs_table_anchors(self) -> List[Dict[str, Any]]:
         result: List[Dict[str, Any]] = []
         for anchor in self._toml_data.get("NamedAnchors", []):
-            fmt = str(anchor.get("Format", "")).strip().strip("'\"")
+            fmt = normalize_named_anchor_format(anchor.get("Format", ""))
             parsed = self._parse_pcs_format(fmt)
             if parsed:
-                field, width, length = parsed
+                field, width, length, enc = parsed
                 count = length if isinstance(length, int) else self._resolve_table_length(length)
                 if count is not None and count > 0:
                     result.append({
                         "anchor": anchor, "name": str(anchor.get("Name", "")).strip(),
                         "field": field, "width": width, "count": count,
+                        "encoding": enc,
                     })
         result.sort(key=lambda x: str(x["name"]).lower())
         return result
@@ -3866,6 +4175,27 @@ class HexEditorFrame(ttk.Frame):
             return "break"
         if not self._data:
             return None
+        # Mirror hex pane: arrow/home/etc. move the shared cursor so both panels stay in sync.
+        if event.keysym in ("Left", "Right", "Up", "Down"):
+            return self._move_cursor(
+                {"Left": -1, "Right": 1, "Up": -BYTES_PER_ROW, "Down": BYTES_PER_ROW}[event.keysym]
+            )
+        if (event.state & 0x4) and event.keysym == "Home":
+            return self._on_ctrl_home(event)
+        if (event.state & 0x4) and event.keysym == "End":
+            return self._on_ctrl_end(event)
+        if event.keysym == "Home":
+            return self._on_home(event)
+        if event.keysym == "End":
+            return self._on_end(event)
+        if event.keysym == "Prior":
+            if self._data:
+                self._on_scrollbar_command("scroll", -self._visible_row_count, "units")
+            return "break"
+        if event.keysym == "Next":
+            if self._data:
+                self._on_scrollbar_command("scroll", self._visible_row_count, "units")
+            return "break"
         idx = self._text_ascii.index("insert")
         off = self._ascii_index_to_offset(idx)
         if off is None:
@@ -4138,7 +4468,7 @@ class HexEditorFrame(ttk.Frame):
         d.title("Find & Replace")
         d.transient(self.winfo_toplevel())
         d.grab_set()
-        d.geometry("420x180")
+        d.geometry("440x280")
         d.resizable(True, False)
         focus = self.winfo_toplevel().focus_get()
         default_hex = focus == self._text
@@ -4160,6 +4490,21 @@ class HexEditorFrame(ttk.Frame):
         ttk.Radiobutton(frm, text="ASCII", variable=mode_var, value="ascii").grid(
             row=3, column=1, sticky="w", pady=2
         )
+        fill_pad_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            frm,
+            text="Pad shorter replacement to match length (tile fill pattern)",
+            variable=fill_pad_var,
+        ).grid(row=4, column=1, sticky="w", pady=(4, 0))
+        ttk.Label(frm, text="Fill pattern:").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=2)
+        fill_pattern_var = tk.StringVar(value="FF")
+        fill_entry = ttk.Entry(frm, textvariable=fill_pattern_var, width=36)
+        fill_entry.grid(row=5, column=1, sticky="ew", pady=2)
+        ttk.Label(
+            frm,
+            text="(Hex e.g. FF or 00; ASCII text; repeats as needed; default 0xFF if empty)",
+            font=("Consolas", 7),
+        ).grid(row=6, column=1, sticky="w")
         status_var = tk.StringVar(value="")
 
         def get_needle() -> Optional[bytearray]:
@@ -4169,6 +4514,25 @@ class HexEditorFrame(ttk.Frame):
         def get_replacement() -> Optional[bytearray]:
             raw = repl_var.get()
             return self._parse_find_hex(raw) if mode_var.get() == "hex" else self._parse_find_ascii(raw)
+
+        def effective_replacement(repl: Optional[bytearray], needle_len: int) -> bytearray:
+            """Expand replacement to ``needle_len`` when padding is enabled; else return as-is (may be shorter)."""
+            if repl is None:
+                repl = bytearray()
+            if len(repl) >= needle_len:
+                return repl[:needle_len]
+            if not fill_pad_var.get():
+                return repl
+            raw = fill_pattern_var.get().strip()
+            pad = self._parse_find_hex(raw) if mode_var.get() == "hex" else self._parse_find_ascii(raw)
+            if pad is None or len(pad) == 0:
+                pad = bytearray([0xFF])
+            out = bytearray(repl)
+            i = 0
+            while len(out) < needle_len:
+                out.append(pad[i % len(pad)])
+                i += 1
+            return out
 
         def selection_matches(needle: bytes) -> bool:
             s = min(self._selection_start or 0, self._selection_end or 0)
@@ -4193,17 +4557,18 @@ class HexEditorFrame(ttk.Frame):
                 self._select_at_offset(idx, len(needle))
             s = min(self._selection_start or 0, self._selection_end or 0)
             e = max(self._selection_start or 0, self._selection_end or 0) + 1
-            if len(repl) == len(needle):
-                self._data[s:e] = repl
-            elif len(repl) < len(needle):
-                del self._data[s + len(repl):e]
-                self._data[s:s + len(repl)] = repl
+            eff_repl = effective_replacement(repl, len(needle))
+            if len(eff_repl) == len(needle):
+                self._data[s:e] = eff_repl
+            elif len(eff_repl) < len(needle):
+                del self._data[s + len(eff_repl):e]
+                self._data[s : s + len(eff_repl)] = eff_repl
             else:
-                self._data[s:e] = repl[:len(needle)]
-                self._data[s + len(needle):s + len(needle)] = repl[len(needle):]
+                self._data[s:e] = eff_repl[: len(needle)]
+                self._data[s + len(needle) : s + len(needle)] = eff_repl[len(needle) :]
             self._modified = True
             self._ldr_pc_targets_valid = False
-            self._cursor_byte_offset = min(s + len(repl), len(self._data) - 1) if self._data else 0
+            self._cursor_byte_offset = min(s + len(eff_repl), len(self._data) - 1) if self._data else 0
             self._selection_start = self._cursor_byte_offset
             self._selection_end = self._cursor_byte_offset
             self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
@@ -4230,16 +4595,19 @@ class HexEditorFrame(ttk.Frame):
                 idx = self._data.find(needle, pos)
                 if idx < 0:
                     break
-                if len(repl) == len(needle):
-                    self._data[idx:idx + len(needle)] = repl
-                elif len(repl) < len(needle):
-                    del self._data[idx + len(repl):idx + len(needle)]
-                    self._data[idx:idx + len(repl)] = repl
+                eff = effective_replacement(repl, len(needle))
+                if len(eff) == len(needle):
+                    self._data[idx : idx + len(needle)] = eff
+                    pos = idx + len(needle)
+                elif len(eff) < len(needle):
+                    del self._data[idx + len(eff) : idx + len(needle)]
+                    self._data[idx : idx + len(eff)] = eff
+                    pos = idx + len(eff)
                 else:
-                    self._data[idx:idx + len(needle)] = repl[:len(needle)]
-                    self._data[idx + len(needle):idx + len(needle)] = repl[len(needle):]
+                    self._data[idx : idx + len(needle)] = eff[: len(needle)]
+                    self._data[idx + len(needle) : idx + len(needle)] = eff[len(needle) :]
+                    pos = idx + len(eff)
                 count += 1
-                pos = idx + len(repl)
             if count > 0:
                 self._modified = True
                 self._ldr_pc_targets_valid = False
@@ -4261,13 +4629,13 @@ class HexEditorFrame(ttk.Frame):
                 messagebox.showinfo("Replace", "No matches found.", parent=d)
 
         btn_frm = ttk.Frame(frm)
-        btn_frm.grid(row=4, column=1, sticky="w", pady=8)
+        btn_frm.grid(row=7, column=1, sticky="w", pady=8)
         ttk.Button(btn_frm, text="Find Next", command=do_find_next).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(btn_frm, text="Replace", command=do_replace_one).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(btn_frm, text="Replace All", command=do_replace_all).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(btn_frm, text="Close", command=d.destroy).pack(side=tk.LEFT, padx=(0, 4))
         lbl = ttk.Label(frm, textvariable=status_var)
-        lbl.grid(row=5, column=1, sticky="w", pady=2)
+        lbl.grid(row=8, column=1, sticky="w", pady=2)
         find_entry.focus_set()
         d.bind("<Return>", lambda e: do_replace_one())
         d.bind("<Escape>", lambda e: d.destroy())
@@ -5033,7 +5401,7 @@ Format = "`f|u8`[u8 arg0]"
             name = str(anchor.get("Name", "")).strip().strip("'\"")
             if not name or name in pcs_names:
                 continue
-            fmt = str(anchor.get("Format", "")).strip().strip("'\"")
+            fmt = normalize_named_anchor_format(anchor.get("Format", ""))
             spec = parse_graphics_anchor_format(fmt)
             table_count_ref: Optional[str] = None
             if spec is None:
@@ -5231,7 +5599,7 @@ Format = "`f|u8`[u8 arg0]"
             name = str(anchor.get("Name", "")).strip().strip("'\"")
             if name in pcs_names:
                 continue
-            fmt = str(anchor.get("Format", "")).strip().strip("'\"")
+            fmt = normalize_named_anchor_format(anchor.get("Format", ""))
             fields = _parse_struct_fields(fmt)
             if not fields:
                 continue
@@ -5287,7 +5655,7 @@ Format = "`f|u8`[u8 arg0]"
         for anchor in self._toml_data.get("NamedAnchors", []):
             a_name = str(anchor.get("Name", "")).strip().strip("'\"")
             if a_name == ref:
-                a_fmt = str(anchor.get("Format", "")).strip().strip("'\"")
+                a_fmt = normalize_named_anchor_format(anchor.get("Format", ""))
                 a_count = _parse_struct_count(a_fmt)
                 if isinstance(a_count, int):
                     return a_count + offset
@@ -6278,6 +6646,7 @@ Format = "`f|u8`[u8 arg0]"
     def _update_cursor_display(self) -> None:
         self._text.tag_remove("cursor_byte", "1.0", tk.END)
         self._text.tag_remove("sel_hex", "1.0", tk.END)
+        self._text_ascii.tag_remove("cursor_byte", "1.0", tk.END)
         self._text_ascii.tag_remove("sel_ascii", "1.0", tk.END)
         if not self._data:
             return
@@ -6293,6 +6662,7 @@ Format = "`f|u8`[u8 arg0]"
             self._text.tag_add("cursor_byte", idx, f"{idx}+2c")
             self._text.mark_set("insert", idx)
         if idx_asc:
+            self._text_ascii.tag_add("cursor_byte", idx_asc, f"{idx_asc}+1c")
             self._text_ascii.mark_set("insert", idx_asc)
 
         if self._selection_start is not None and self._selection_end is not None:
@@ -6325,6 +6695,8 @@ Format = "`f|u8`[u8 arg0]"
             self._text_ascii.tag_raise("sel_ascii")
         else:
             self._selection_label.config(text="")
+        self._text.tag_raise("cursor_byte")
+        self._text_ascii.tag_raise("cursor_byte")
 
         self._refresh_asm_selection()
 
@@ -6481,15 +6853,10 @@ Format = "`f|u8`[u8 arg0]"
         except (ValueError, TypeError):
             on_addr_col = False
         if not on_addr_col:
-            # Hex data click: check 4-byte word for pointer to a PCS table start
+            # Hex data: double-click a GBA pointer word → jump to target (overrides table/struct highlight)
             ptr_start = (off // 4) * 4
-            target_fo = self._get_pointer_at_offset(ptr_start)
-            if target_fo is not None:
-                anchor_info = self._find_named_anchor_at_offset(target_fo, exact=True)
-                if anchor_info:
-                    self._select_named_anchor_extent(anchor_info)
-                    if self._on_pointer_to_named_anchor_cb:
-                        self.after(10, lambda ai=anchor_info: self._on_pointer_to_named_anchor_cb(ai))
+            if self._get_pointer_at_offset(ptr_start) is not None:
+                if self._follow_pointer_at(ptr_start):
                     return "break"
 
         # Check if current offset falls within a NamedAnchor PCS table
@@ -6499,11 +6866,6 @@ Format = "`f|u8`[u8 arg0]"
             if self._on_pointer_to_named_anchor_cb:
                 self.after(10, lambda ai=anchor_info: self._on_pointer_to_named_anchor_cb(ai))
             return "break"
-
-        if not on_addr_col:
-            ptr_start = (off // 4) * 4
-            if self._follow_pointer_at(ptr_start):
-                return "break"
 
         extent = self._find_function_extent(off)
         if extent is not None:
