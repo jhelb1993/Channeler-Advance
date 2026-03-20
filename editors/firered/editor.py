@@ -179,6 +179,11 @@ class FireRedEditor:
     # ── Keyboard handling ─────────────────────────────────────────────
 
     def _on_ctrl_t(self, event=None) -> Optional[str]:
+        # Always allow hiding the tools pane (focus is often in a combobox / search / spinbox).
+        if self._tools_visible:
+            self._tools_visible = False
+            self._main_paned.forget(self._tools_frame)
+            return "break"
         if self._focus_in_text_entry():
             return None
         self._tools_visible = not self._tools_visible
@@ -190,12 +195,13 @@ class FireRedEditor:
             self._struct_editor.refresh_anchors()
             self._graphics_preview.refresh_anchors()
             self._layout_tool_slots()
-        else:
-            self._main_paned.forget(self._tools_frame)
         return "break"
 
     def _hotkey_slot(self, index: int) -> Optional[str]:
-        if self._focus_in_text_entry():
+        # Still run when turning off the last active tool slot (closes pane) while focus is in search/combo.
+        others_on = any(self._slot_active[j] for j in range(3) if j != index)
+        hiding_last_slot = self._tools_visible and self._slot_active[index] and not others_on
+        if self._focus_in_text_entry() and not hiding_last_slot:
             return None
         self._slot_active[index] = not self._slot_active[index]
 

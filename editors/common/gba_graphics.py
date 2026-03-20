@@ -931,19 +931,33 @@ def max_sprite_height_tiles(num_tiles: int) -> int:
     return best
 
 
-def compute_sprite_grid_layout(num_tiles: int, height_tiles: int) -> Tuple[int, int]:
+def compute_sprite_grid_layout(
+    num_tiles: int,
+    height_tiles: int,
+    *,
+    enforce_rows_le_cols: bool = True,
+) -> Tuple[int, int]:
     """
-    Lay out ``num_tiles`` tiles in a grid with ``height_tiles`` rows.
-    ``width_tiles = ceil(num_tiles / height_tiles)``; require ``height_tiles ≤ width_tiles``.
+    Lay out ``num_tiles`` tiles in a grid with ``height_tiles`` rows;
+    ``width_tiles = ceil(num_tiles / height_tiles)``.
+
+    If ``enforce_rows_le_cols`` is True (default), require ``height_tiles ≤ width_tiles``
+    (good for variable tile strips so the grid is not “taller than wide”).
+
+    For **fixed** ``ucs4xWxH`` / ``lzs4xWxH`` assets from TOML (e.g. 4×8 party icons), pass
+    ``enforce_rows_le_cols=False`` so tall layouts (rows > columns) are allowed.
     """
     if height_tiles < 1:
         raise ValueError("Tile row count (height) must be at least 1")
     if num_tiles < 1:
         raise ValueError("No tiles in data")
+    if height_tiles > num_tiles:
+        raise ValueError(f"Tile rows ({height_tiles}) cannot exceed tile count ({num_tiles}).")
     w = (num_tiles + height_tiles - 1) // height_tiles
-    if height_tiles > w:
+    if enforce_rows_le_cols and height_tiles > w:
         raise ValueError(
-            f"Tile rows ({height_tiles}) exceed tile columns ({w}); require rows ≤ columns."
+            f"Tile rows ({height_tiles}) exceed tile columns ({w}); require rows ≤ columns "
+            f"(or use fixed-dimension decode with enforce_rows_le_cols=False)."
         )
     return w, height_tiles
 
@@ -1194,9 +1208,14 @@ def decode_graphics_anchor_to_png(
         per = sprite_bytes_per_tile(spec.bpp)
         nt = len(tiles) // per
         eff_spec = spec
+        fixed_wh = spec.width_tiles > 0 and spec.height_tiles > 0
         if sprite_layout_height is not None:
             try:
-                w_t, h_t = compute_sprite_grid_layout(nt, int(sprite_layout_height))
+                w_t, h_t = compute_sprite_grid_layout(
+                    nt,
+                    int(sprite_layout_height),
+                    enforce_rows_le_cols=not fixed_wh,
+                )
             except ValueError as e:
                 return None, f"Sprite layout: {e}\n"
             eff_spec = replace(spec, width_tiles=w_t, height_tiles=h_t)
@@ -1252,9 +1271,14 @@ def decode_sprite_at_pointer(
         per = sprite_bytes_per_tile(spec.bpp)
         nt = len(tiles) // per
         eff_spec = spec
+        fixed_wh = spec.width_tiles > 0 and spec.height_tiles > 0
         if sprite_layout_height is not None:
             try:
-                w_t, h_t = compute_sprite_grid_layout(nt, int(sprite_layout_height))
+                w_t, h_t = compute_sprite_grid_layout(
+                    nt,
+                    int(sprite_layout_height),
+                    enforce_rows_le_cols=not fixed_wh,
+                )
             except ValueError as e:
                 return None, f"Sprite layout: {e}\n"
             eff_spec = replace(spec, width_tiles=w_t, height_tiles=h_t)

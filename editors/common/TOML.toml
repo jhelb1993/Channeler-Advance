@@ -288,7 +288,9 @@ Name = '''pocketid'''
 #   lzp8:N        — LZ77 palette, same length rule after decompress
 #                   (when used as the palette for a 4bpp sprite, only the first 32 bytes are used for decode)
 #   ucs4xWxH      — uncompressed 4bpp sprite, W×H in 8×8 tiles (omit ``xH`` → one row: ``ucs4xW`` = W×1)
-#   ucs4xWxH|name — same, using palette from another graphics NamedAnchor (palette format)
+#   ucs4xWxH|name — palette from another NamedAnchor: if ``name`` is a **palette** anchor (or palette table), that
+#                   blob is used; if it is a **struct table** (e.g. ``[index.foo.palettes]count``), the same table row
+#                   as the sprite row is read and the uint ``index`` selects a row in ``foo.palettes`` (or a ``gfx_palette`` pointer).
 #   uct4xWxH / uct8xWxH — uncompressed tile sheet (same layout as ucs4/ucs8; gbagfx .4bpp / .8bpp without .lz); ``uct4xW`` = W×1 row
 #   uct4 / uct8 / lzt4 / lzt8 — variable-length strip: entire blob is tiles only (no dimensions); after LZ77 (if lzt*), N = bytes÷32 or ÷64, shown as N×1 (like gbagfx ``-width N`` on a .4bpp/.8bpp strip). Use ``lzt4|graphics…palette`` etc.
 #   lzt4xWxH / lzt8xWxH — LZ77 tile sheet (gbagfx .4bpp.lz / .8bpp.lz after decompress)

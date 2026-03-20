@@ -956,11 +956,15 @@ class GraphicsPreviewFrame(ttk.Frame):
                 tb = extract_sprite_bytes(spec, raw_sz)
                 per = sprite_bytes_per_tile(spec.bpp)
                 t_n = len(tb) // per
-                mh = max_sprite_height_tiles(t_n)
-                self._sprite_rows_spin.configure(from_=1, to=max(1, mh))
+                # Fixed ``ucs4xWxH`` etc.: allow tall grids (e.g. 4×8 icons); variable strips keep rows ≤ cols cap.
+                if spec.width_tiles > 0 and spec.height_tiles > 0:
+                    row_max = max(1, t_n)
+                else:
+                    row_max = max(1, max_sprite_height_tiles(t_n))
+                self._sprite_rows_spin.configure(from_=1, to=row_max)
                 hv = int(self._sprite_rows_var.get())
-                if hv > mh:
-                    self._sprite_rows_var.set(mh)
+                if hv > row_max:
+                    self._sprite_rows_var.set(row_max)
             except Exception:
                 self._sprite_rows_spin.configure(from_=1, to=9999)
         else:
@@ -1056,18 +1060,15 @@ class GraphicsPreviewFrame(ttk.Frame):
             if not pan:
                 pan = getattr(ga_ts["spec"], "palette_anchor_name", None)
             if pan:
-                ga = self._hex.find_graphics_anchor_by_name(pan.strip())
-                if ga is None or ga["spec"].kind != "palette":
+                ext_ps, ext_pb, pal_notes = self._hex.resolve_palette_for_graphics_row(pan.strip(), tbl_idx)
+                if ext_ps is None or ext_pb is None:
                     dpal = "16-color" if spec.bpp == 4 else "256-color"
                     log_pre = (
-                        f"Warning: palette NamedAnchor not found or not a palette format: {pan!r}\n"
-                        f"Using default {dpal} palette.\n\n"
+                        (pal_notes or f"Warning: could not resolve palette {pan!r}.\n")
+                        + f"Using default {dpal} palette.\n\n"
                     )
                 else:
-                    ext_ps = ga["spec"]
-                    ext_pb = ga["base_off"]
-                    if ga.get("graphics_table"):
-                        ext_pb = ga["base_off"] + tbl_idx * int(ga["row_byte_size"])
+                    log_pre = pal_notes or ""
             png_path, log = decode_graphics_anchor_to_png(
                 bytes(rom),
                 blob_off,
@@ -1087,18 +1088,15 @@ class GraphicsPreviewFrame(ttk.Frame):
 
         if spec.kind == "sprite" and getattr(spec, "palette_anchor_name", None):
             pan = spec.palette_anchor_name
-            ga = self._hex.find_graphics_anchor_by_name(pan)
-            if ga is None or ga["spec"].kind != "palette":
+            ext_ps, ext_pb, pal_notes = self._hex.resolve_palette_for_graphics_row(pan, tbl_idx)
+            if ext_ps is None or ext_pb is None:
                 dpal = "64-color (empty)" if spec.bpp == 6 else "16-color"
                 log_pre = (
-                    f"Warning: palette NamedAnchor not found or not a palette format: {pan!r}\n"
-                    f"Using default {dpal} palette.\n\n"
+                    (pal_notes or f"Warning: could not resolve palette {pan!r}.\n")
+                    + f"Using default {dpal} palette.\n\n"
                 )
             else:
-                ext_ps = ga["spec"]
-                ext_pb = ga["base_off"]
-                if ga.get("graphics_table"):
-                    ext_pb = ga["base_off"] + tbl_idx * int(ga["row_byte_size"])
+                log_pre = pal_notes or ""
         layout_h = max(1, int(self._sprite_rows_var.get()))
         png_path, log = decode_graphics_anchor_to_png(
             bytes(rom),
@@ -1882,35 +1880,28 @@ class StructEditorFrame(ttk.Frame):
         pal_base = None
         log_extra = ""
         if pal_name:
-            ga = self._hex.find_graphics_anchor_by_name(pal_name)
-            if ga is None or ga["spec"].kind != "palette":
+            pal_spec, pal_base, pal_notes = self._hex.resolve_palette_for_graphics_row(pal_name, entry_idx)
+            if pal_spec is None or pal_base is None:
                 dpal = "64-color (empty)" if spec.bpp == 6 else "16-color"
                 log_extra = (
-                    f"\nWarning: palette anchor missing or not palette format: {pal_name!r}\n"
-                    f"Using default {dpal} palette.\n"
+                    (pal_notes or f"\nWarning: could not resolve palette {pal_name!r}.\n")
+                    + f"Using default {dpal} palette.\n"
                 )
             else:
-                pal_spec = ga["spec"]
-                if ga.get("graphics_table"):
-                    nrow = int(ga.get("table_num_entries") or 0)
-                    if nrow <= 0:
-                        cref = ga.get("table_count_ref") or ""
-                        c = self._hex._resolve_struct_count(cref)
-                        nrow = c if isinstance(c, int) and c > 0 else 1
-                    row_i = max(0, min(entry_idx, nrow - 1))
-                    pal_base = ga["base_off"] + row_i * int(ga["row_byte_size"])
-                else:
-                    pal_base = ga["base_off"]
+                log_extra = ("\n" + pal_notes) if pal_notes else ""
         raw_pre = bytes(data[tgt : tgt + min(len(data) - tgt, 4 << 20)])
         try:
             tb = extract_sprite_bytes(spec, raw_pre)
             per = sprite_bytes_per_tile(spec.bpp)
             t_n = len(tb) // per
-            mh = max_sprite_height_tiles(t_n)
-            self._gfx_struct_sprite_rows_spin.configure(from_=1, to=max(1, mh))
+            if spec.width_tiles > 0 and spec.height_tiles > 0:
+                row_max = max(1, t_n)
+            else:
+                row_max = max(1, max_sprite_height_tiles(t_n))
+            self._gfx_struct_sprite_rows_spin.configure(from_=1, to=row_max)
             hv = int(self._gfx_struct_sprite_rows_var.get())
-            if hv > mh:
-                self._gfx_struct_sprite_rows_var.set(mh)
+            if hv > row_max:
+                self._gfx_struct_sprite_rows_var.set(row_max)
         except Exception:
             self._gfx_struct_sprite_rows_spin.configure(from_=1, to=9999)
         layout_h = max(1, int(self._gfx_struct_sprite_rows_var.get()))
@@ -5103,6 +5094,134 @@ Format = "`f|u8`[u8 arg0]"
             if a["name"] == want:
                 return a
         return None
+
+    def find_struct_anchor_by_name(self, anchor_name: str) -> Optional[Dict[str, Any]]:
+        want = anchor_name.strip()
+        for a in self.get_struct_anchors():
+            if str(a["name"]) == want:
+                return a
+        return None
+
+    def resolve_palette_table_row(self, table_name: str, row_idx: int) -> Tuple[Optional[Any], Optional[int], str]:
+        """Return ``(palette_spec, rom_file_offset, notes)`` for one row of a palette table."""
+        notes = ""
+        ga = self.find_graphics_anchor_by_name(table_name)
+        if ga is not None and ga["spec"].kind == "palette":
+            if ga.get("graphics_table"):
+                rsz = int(ga["row_byte_size"])
+                nent = int(ga.get("table_num_entries") or 0)
+                if nent and (row_idx < 0 or row_idx >= nent):
+                    notes += f"Warning: palette row {row_idx} may be out of range (0..{nent - 1}) for {table_name!r}.\n"
+                ext_pb = int(ga["base_off"]) + row_idx * rsz
+                return ga["spec"], ext_pb, notes
+            return ga["spec"], int(ga["base_off"]), notes
+
+        si = self.find_struct_anchor_by_name(table_name)
+        if si is None:
+            return None, None, f"Palette table {table_name!r} not found.\n"
+        data = self.get_data()
+        if not data:
+            return None, None, notes
+        cnt = int(si["count"])
+        if row_idx < 0 or row_idx >= cnt:
+            return None, None, notes + f"Palette row {row_idx} out of range (0..{cnt - 1}) for {table_name!r}.\n"
+        row_off = int(si["base_off"]) + row_idx * int(si["struct_size"])
+        rsz = int(si["struct_size"])
+        if row_off + rsz > len(data):
+            return None, None, notes + f"Palette table row out of ROM ({table_name!r}).\n"
+        for f in si["fields"]:
+            if f.get("type") != "gfx_palette":
+                continue
+            gsp = f.get("gfx_spec")
+            if gsp is None or getattr(gsp, "kind", None) != "palette":
+                continue
+            fo = int(f["offset"])
+            tgt = resolve_gba_pointer(bytes(data), row_off + fo)
+            if tgt is not None:
+                return (
+                    gsp,
+                    tgt,
+                    notes + f"Palette via struct table {table_name!r} row {row_idx} (field {f.get('name')!r}).\n",
+                )
+        return None, None, notes + f"Struct {table_name!r} has no gfx_palette field.\n"
+
+    def resolve_palette_for_graphics_row(self, palette_ref: str, table_row_idx: int) -> Tuple[Optional[Any], Optional[int], str]:
+        """
+        Resolve palette spec + ROM offset for graphics ``|paletteRef`` when the main anchor is a graphics **table**
+        (same row index for sprite and palette).
+
+        If ``paletteRef`` is a palette NamedAnchor → use it (or its table row).
+
+        If it is a **lookup** struct (e.g. ``[index.foo.palettes]count``) → read row ``table_row_idx``, then either
+        follow a ``gfx_palette`` pointer or a uint ``index`` into another NamedAnchor's palette table.
+        """
+        notes = ""
+        ref = palette_ref.strip()
+        if not ref:
+            return None, None, ""
+
+        ga = self.find_graphics_anchor_by_name(ref)
+        if ga is not None:
+            if ga["spec"].kind == "palette":
+                if ga.get("graphics_table"):
+                    ext_pb = int(ga["base_off"]) + table_row_idx * int(ga["row_byte_size"])
+                    return ga["spec"], ext_pb, notes
+                return ga["spec"], int(ga["base_off"]), notes
+            return (
+                None,
+                None,
+                f"Graphics anchor {ref!r} is {ga['spec'].kind!r}, not a palette; expected a palette or lookup struct.\n",
+            )
+
+        si = self.find_struct_anchor_by_name(ref)
+        if si is None:
+            return None, None, notes + f"NamedAnchor {ref!r} not found (palette or lookup struct).\n"
+
+        data = self.get_data()
+        if not data:
+            return None, None, notes
+        cnt = int(si["count"])
+        if table_row_idx < 0 or table_row_idx >= cnt:
+            return None, None, notes + f"Lookup row {table_row_idx} out of range (0..{cnt - 1}) for {ref!r}.\n"
+        row_off = int(si["base_off"]) + table_row_idx * int(si["struct_size"])
+        rsz = int(si["struct_size"])
+        if row_off + rsz > len(data):
+            return None, None, notes + f"Lookup row out of ROM for {ref!r}.\n"
+        row = bytes(data[row_off : row_off + rsz])
+
+        for f in si["fields"]:
+            if f.get("type") != "gfx_palette":
+                continue
+            gsp = f.get("gfx_spec")
+            if gsp is None or getattr(gsp, "kind", None) != "palette":
+                continue
+            fo = int(f["offset"])
+            tgt = resolve_gba_pointer(bytes(data), row_off + fo)
+            if tgt is not None:
+                return (
+                    gsp,
+                    tgt,
+                    notes + f"Palette pointer from lookup struct {ref!r} (field {f.get('name')!r}).\n",
+                )
+
+        for f in si["fields"]:
+            if f.get("type") != "uint":
+                continue
+            enum_ref = f.get("enum")
+            if not enum_ref or not isinstance(enum_ref, str):
+                continue
+            target_tbl = enum_ref.strip()
+            if not target_tbl:
+                continue
+            fo = int(f["offset"])
+            fsz = int(f["size"])
+            if fo + fsz > len(row):
+                continue
+            pal_idx = int.from_bytes(row[fo : fo + fsz], "little")
+            ps, pb, n2 = self.resolve_palette_table_row(target_tbl, pal_idx)
+            return ps, pb, notes + n2 + f"Index {pal_idx} ({ref!r}.{f.get('name')}) → {target_tbl!r}.\n"
+
+        return None, None, notes + f"Lookup struct {ref!r} has no uint index or gfx_palette field.\n"
 
     def get_struct_anchors(self) -> List[Dict[str, Any]]:
         """Return NamedAnchors whose Format is a parseable struct (not pure PCS tables)."""
