@@ -1,5 +1,3 @@
-option to null out old graphics when importing to free space
-tilemap/tileset replacement/insertion
 fix tilemap/tileset logic
 load palette from offset option
 palette editing/insertion
