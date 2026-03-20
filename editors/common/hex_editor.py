@@ -8,6 +8,7 @@ Optional Capstone disassembly (ARM7TDMI Thumb/ARM).
 import os
 import re
 import shutil
+import string
 import sys
 import threading
 import tkinter as tk
@@ -47,11 +48,16 @@ from editors.common.gba_graphics import (
     read_sprite_preview_palette_at_rom_offset,
     resolve_gba_pointer,
     rewrite_standalone_sprite_format_dimensions,
+    rewrite_standalone_tilemap_format_dimensions,
     suggest_sprite_grid_for_tile_count,
     sprite_bytes_per_tile,
     sprite_import_png,
+    sprite_import_png_manual,
     synthetic_palette_spec_for_sprite_import_write,
     tilemap_png_to_tileset_map_palette,
+    toml_format_ucp8_from_8bpp_rom_colors,
+    UCP8_PALETTE_4_CHUNK_HEX_DIGITS,
+    validate_manual_palette_color_count,
 )
 
 _TOML_AVAILABLE = False
@@ -133,6 +139,42 @@ HEX_DISP_CARET_START = 10
 HEX_DISP_CARET_END = 26  # exclusive
 HEX_DISP_HEX_START = 28  # column index of first hex digit for byte 0
 HEX_DIGITS = "0123456789ABCDEFabcdef"
+# Goto box: letters/digits/dot/underscore (hex offsets + NamedAnchor names like data.header.title)
+_GOTO_ALLOWED_CHARS = set(string.ascii_letters + string.digits + "._")
+
+
+def _toml_sprite_format_token(lz: bool, bpp: int, w: int, h: int) -> str:
+    p = "lz" if lz else "uc"
+    return f"`{p}t{bpp}x{w}x{h}`"
+
+
+def _toml_sprite_format_token_with_palette(
+    lz: bool, bpp: int, w: int, h: int, palette_anchor: str
+) -> str:
+    """Sprite Format with optional ``|paletteNamedAnchor`` tail (same as Tools / vanilla TOML)."""
+    p = "lz" if lz else "uc"
+    inner = f"{p}t{bpp}x{w}x{h}"
+    pa = normalize_named_anchor_lookup_key(palette_anchor) if (palette_anchor or "").strip() else ""
+    if pa:
+        return f"`{inner}|{pa}`"
+    return f"`{inner}`"
+
+
+def _toml_tilemap_format_token(lz: bool, bpp: int, mw: int, mh: int, tileset_name: str) -> str:
+    p = "lz" if lz else "uc"
+    ts = tileset_name.strip()
+    if ts:
+        return f"`{p}m{bpp}x{mw}x{mh}|{ts}`"
+    return f"`{p}m{bpp}x{mw}x{mh}`"
+
+
+def _toml_palette_format_for_tilemap_bpp(bpp: int, rom_colors_8bpp: Optional[int] = None) -> str:
+    if bpp == 4:
+        return "`ucp4`"
+    if bpp == 6:
+        return f"`ucp8:{UCP8_PALETTE_4_CHUNK_HEX_DIGITS}`"
+    nc = rom_colors_8bpp if rom_colors_8bpp is not None else 256
+    return toml_format_ucp8_from_8bpp_rom_colors(nc)
 
 
 def _sign_extend_uint(v: int, bits: int) -> int:
@@ -176,6 +218,35 @@ def _toml_named_anchor_address_hex_string(file_offset: int) -> str:
     if fo < 0:
         raise ValueError("ROM file offset must be non-negative")
     return f"0x{fo:X}"
+
+
+def _strip_outer_backticks(s: str) -> str:
+    t = s.strip()
+    while len(t) >= 2 and t[0] == "`" and t[-1] == "`":
+        t = t[1:-1].strip()
+    return t
+
+
+def normalize_named_anchor_lookup_key(s: str) -> str:
+    """
+    Normalize a NamedAnchor ``Name`` from TOML or from user input so comparisons succeed.
+
+    Strips whitespace, straight/curly quotes, and balanced outer backticks (users often paste
+    `` `graphics.foo` `` or typographic quotes from docs).
+    """
+    t = str(s or "").strip()
+    t = t.replace("\u2018", "'").replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"')
+    t = t.strip("'\"").strip()
+    t = _strip_outer_backticks(t)
+    return t.strip()
+
+
+def _named_anchor_row_name_field(anchor: Dict[str, Any]) -> str:
+    """Return the anchor's logical name; supports ``Name`` or lowercase ``name``."""
+    v = anchor.get("Name")
+    if v is None:
+        v = anchor.get("name")
+    return normalize_named_anchor_lookup_key(str(v or ""))
 
 
 def _normalize_loaded_toml_document(data: Dict[str, Any]) -> None:
@@ -710,12 +781,13 @@ class _StaticRomOffsetDialog:
 
 
 class _SpriteImportOptionsDialog:
-    """4bpp/8bpp + optional LZ for static sprite import."""
+    """Manual static sprite/tileset import: bpp, palette size, tile grid, LZ, TOML update."""
 
-    def __init__(self, parent: tk.Misc, png_path: str) -> None:
-        self.result: Optional[Tuple[int, bool]] = None
+    def __init__(self, parent: tk.Misc, png_path: str, *, title: str = "Import sprite — options") -> None:
+        # bpp, lz, w, h, pal_colors, toml_sprite, toml_palette, write_palette_rom, update_toml, rom_colors_8bpp_clip
+        self.result: Optional[Tuple[int, bool, int, int, int, str, str, bool, bool, Optional[int]]] = None
         self._dlg = tk.Toplevel(parent)
-        self._dlg.title("Import sprite — options")
+        self._dlg.title(title)
         self._dlg.transient(parent)
         self._dlg.grab_set()
         f = ttk.Frame(self._dlg, padding=10)
@@ -724,24 +796,155 @@ class _SpriteImportOptionsDialog:
         self._bpp = tk.IntVar(value=4)
         bf = ttk.Frame(f)
         bf.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        ttk.Label(bf, text="Tile format:").pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Radiobutton(bf, text="4bpp", variable=self._bpp, value=4).pack(side=tk.LEFT, padx=4)
-        ttk.Radiobutton(bf, text="8bpp", variable=self._bpp, value=8).pack(side=tk.LEFT, padx=4)
+        ttk.Label(bf, text="Tile BPP:").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Radiobutton(bf, text="4bpp", variable=self._bpp, value=4, command=self._sync_bpp).pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Radiobutton(bf, text="6bpp", variable=self._bpp, value=6, command=self._sync_bpp).pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Radiobutton(bf, text="8bpp", variable=self._bpp, value=8, command=self._sync_bpp).pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Label(f, text="Palette color slots (multiple of 16; index 0 = transparent #00FF00):", wraplength=400).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(8, 0)
+        )
+        self._pal_n = tk.StringVar(value="16")
+        self._pal_entry = ttk.Entry(f, textvariable=self._pal_n, width=8)
+        self._pal_entry.grid(row=3, column=0, sticky="w", pady=(2, 0))
+        self._pal_hint = ttk.Label(f, text="", font=("Consolas", 8), foreground="#666")
+        self._pal_hint.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(2, 0))
+        self._rom_clip_row = ttk.Frame(f)
+        self._rom_clip_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(
+            self._rom_clip_row,
+            text="ROM palette size (8bpp colors; ≤ quantize; step 16):",
+            wraplength=400,
+        ).grid(row=0, column=0, sticky="nw")
+        self._pal_rom_clip = tk.StringVar(value="")
+        ttk.Entry(self._rom_clip_row, textvariable=self._pal_rom_clip, width=8).grid(
+            row=0, column=1, sticky="w", padx=(8, 0)
+        )
+        ttk.Label(
+            self._rom_clip_row,
+            text="(blank = match quantize)",
+            font=("Consolas", 8),
+            foreground="#666",
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Label(f, text="Sprite sheet size (tiles, 8×8 px each):").grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=(8, 0)
+        )
+        whf = ttk.Frame(f)
+        whf.grid(row=6, column=0, columnspan=2, sticky="w")
+        ttk.Label(whf, text="Width:").pack(side=tk.LEFT)
+        self._wt = tk.StringVar(value="1")
+        ttk.Entry(whf, textvariable=self._wt, width=6).pack(side=tk.LEFT, padx=(4, 12))
+        ttk.Label(whf, text="Height:").pack(side=tk.LEFT)
+        self._ht = tk.StringVar(value="1")
+        ttk.Entry(whf, textvariable=self._ht, width=6).pack(side=tk.LEFT, padx=(4, 0))
         self._lz = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             f,
-            text="Compress with LZ77 (0x10)",
+            text="Compress tiles (and palette) with LZ77 (0x10)",
             variable=self._lz,
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self._write_pal = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            f,
+            text="Write quantized GBA palette to ROM (separate offset after tiles)",
+            variable=self._write_pal,
+        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(
+            f,
+            text="Sprite NamedAnchor (TOML) — may be new; row is added if missing:",
+            wraplength=420,
+        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self._toml_name = tk.StringVar(value="")
+        ttk.Entry(f, textvariable=self._toml_name, width=48).grid(row=10, column=0, columnspan=2, sticky="ew")
+        ttk.Label(
+            f,
+            text="Palette NamedAnchor (optional — sprite Format gets |palette; row added if missing):",
+            wraplength=420,
+        ).grid(row=11, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self._toml_pal_name = tk.StringVar(value="")
+        ttk.Entry(f, textvariable=self._toml_pal_name, width=48).grid(row=12, column=0, columnspan=2, sticky="ew")
+        self._upd_toml = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            f,
+            text="Update Address + Format in TOML (needs tomli-w)",
+            variable=self._upd_toml,
+        ).grid(row=13, column=0, columnspan=2, sticky="w", pady=(6, 0))
         btnf = ttk.Frame(f)
-        btnf.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btnf.grid(row=14, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
         ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
         self._dlg.bind("<Escape>", lambda e: self._on_cancel())
+        self._bpp.trace_add("write", lambda *_: self._sync_bpp())
+        self._sync_bpp()
         self._dlg.wait_window()
 
+    def _sync_bpp(self, *_a: Any) -> None:
+        b = int(self._bpp.get())
+        if b == 4:
+            self._pal_n.set("16")
+            self._pal_hint.configure(text="(fixed 16 for 4bpp)")
+            self._pal_entry.configure(state="disabled")
+            self._rom_clip_row.grid_remove()
+        elif b == 6:
+            self._pal_n.set("64")
+            self._pal_hint.configure(text="(fixed 64 for 6bpp)")
+            self._pal_entry.configure(state="disabled")
+            self._rom_clip_row.grid_remove()
+        else:
+            if self._pal_entry.cget("state") == "disabled":
+                self._pal_n.set("256")
+            self._pal_entry.configure(state="normal")
+            self._pal_hint.configure(text="16–256, step 16")
+            self._rom_clip_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
     def _on_ok(self) -> None:
-        self.result = (int(self._bpp.get()), bool(self._lz.get()))
+        bpp = int(self._bpp.get())
+        lz = bool(self._lz.get())
+        try:
+            wt = int(self._wt.get().strip(), 0)
+            ht = int(self._ht.get().strip(), 0)
+        except ValueError:
+            messagebox.showwarning("Import", "Width and height (tiles) must be integers.")
+            return
+        if wt < 1 or ht < 1:
+            messagebox.showwarning("Import", "Width and height must be ≥ 1 tile.")
+            return
+        try:
+            pn = int(self._pal_n.get().strip(), 0)
+            ncolors = validate_manual_palette_color_count(bpp, pn)
+        except ValueError as e:
+            messagebox.showwarning("Import", str(e))
+            return
+        rom_clip_8: Optional[int] = None
+        if bpp == 8:
+            clip_s = self._pal_rom_clip.get().strip()
+            if not clip_s:
+                rom_clip_8 = ncolors
+            else:
+                try:
+                    rom_clip_8 = parse_8bpp_palette_color_count(int(clip_s.strip(), 0))
+                except ValueError as e:
+                    messagebox.showwarning("Import", str(e))
+                    return
+            if rom_clip_8 > ncolors:
+                messagebox.showwarning(
+                    "Import",
+                    "ROM palette size cannot exceed the quantize color count "
+                    f"({rom_clip_8} > {ncolors}). Lower quantize or increase clip.",
+                )
+                return
+        name = self._toml_name.get().strip()
+        pal_nm = self._toml_pal_name.get().strip()
+        write_pal = bool(self._write_pal.get())
+        if bool(self._upd_toml.get()) and not name:
+            messagebox.showwarning("Import", "Enter a sprite NamedAnchor Name, or disable TOML update.")
+            return
+        self.result = (bpp, lz, wt, ht, ncolors, name, pal_nm, write_pal, bool(self._upd_toml.get()), rom_clip_8)
         self._dlg.destroy()
 
     def _on_cancel(self) -> None:
@@ -912,21 +1115,23 @@ class _TilemapImportModeDialog:
 
 
 class _TilemapPngDimsDialog:
-    """Map size in tiles + bpp for static PNG tilemap import."""
+    """Map size in tiles, bpp, palette size, burner quantize, optional TOML updates (map / tileset / palette)."""
 
     def __init__(self, parent: tk.Misc) -> None:
-        self.result: Optional[Tuple[int, int, int]] = None
+        # mw, mh, bpp, pal_ncolors, skip_pal, map_name, ts_name, pal_name, update_toml, rom_colors_8bpp_clip
+        self.result: Optional[Tuple[int, int, int, int, bool, str, str, str, bool, Optional[int]]] = None
         self.skip_palette = False
         self._dlg = tk.Toplevel(parent)
-        self._dlg.title("PNG tilemap — size")
+        self._dlg.title("PNG tilemap — options")
         self._dlg.transient(parent)
         self._dlg.grab_set()
         f = ttk.Frame(self._dlg, padding=10)
         f.pack(fill=tk.BOTH, expand=True)
         ttk.Label(
             f,
-            text="PNG must match map width×height in tiles (8 px per tile).",
-            wraplength=400,
+            text="Map image is resized to width×height tiles (8 px/tile). "
+            "Index 0 = transparent #00FF00; Pillow quantizes to (palette slots − 1) solid colors.",
+            wraplength=440,
         ).grid(row=0, column=0, columnspan=4, sticky="w")
         ttk.Label(f, text="Width (tiles):").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self._mw = tk.StringVar(value="32")
@@ -938,20 +1143,93 @@ class _TilemapPngDimsDialog:
         bf = ttk.Frame(f)
         bf.grid(row=2, column=0, columnspan=4, sticky="w", pady=(8, 0))
         ttk.Label(bf, text="BPP:").pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Radiobutton(bf, text="4", variable=self._bpp, value=4).pack(side=tk.LEFT, padx=4)
-        ttk.Radiobutton(bf, text="8", variable=self._bpp, value=8).pack(side=tk.LEFT, padx=4)
+        ttk.Radiobutton(bf, text="4", variable=self._bpp, value=4, command=self._sync_bpp).pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Radiobutton(bf, text="6", variable=self._bpp, value=6, command=self._sync_bpp).pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Radiobutton(bf, text="8", variable=self._bpp, value=8, command=self._sync_bpp).pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Label(f, text="Palette color slots (multiple of 16):", wraplength=400).grid(
+            row=3, column=0, columnspan=4, sticky="w", pady=(8, 0)
+        )
+        self._pal_n = tk.StringVar(value="16")
+        self._pal_entry = ttk.Entry(f, textvariable=self._pal_n, width=8)
+        self._pal_entry.grid(row=4, column=0, sticky="w", pady=(2, 0))
+        self._pal_hint = ttk.Label(f, text="", font=("Consolas", 8), foreground="#666")
+        self._pal_hint.grid(row=4, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(2, 0))
+        self._rom_clip_row_tm = ttk.Frame(f)
+        self._rom_clip_row_tm.grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        ttk.Label(
+            self._rom_clip_row_tm,
+            text="ROM palette size (8bpp colors; ≤ quantize; step 16):",
+            wraplength=400,
+        ).grid(row=0, column=0, sticky="nw")
+        self._pal_rom_clip_tm = tk.StringVar(value="")
+        ttk.Entry(self._rom_clip_row_tm, textvariable=self._pal_rom_clip_tm, width=8).grid(
+            row=0, column=1, sticky="w", padx=(8, 0)
+        )
+        ttk.Label(
+            self._rom_clip_row_tm,
+            text="(blank = match quantize)",
+            font=("Consolas", 8),
+            foreground="#666",
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
         self._skip_pal = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             f,
             text="Skip writing palette (tileset + map only)",
             variable=self._skip_pal,
-        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Label(
+            f,
+            text="TOML names (optional) — new names get a new [[NamedAnchors]] row:",
+            wraplength=440,
+        ).grid(row=7, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Label(f, text="Tilemap:").grid(row=8, column=0, sticky="w")
+        self._nm_map = tk.StringVar(value="")
+        ttk.Entry(f, textvariable=self._nm_map, width=52).grid(row=8, column=1, columnspan=3, sticky="ew")
+        ttk.Label(f, text="Tileset:").grid(row=9, column=0, sticky="w", pady=(4, 0))
+        self._nm_ts = tk.StringVar(value="")
+        ttk.Entry(f, textvariable=self._nm_ts, width=52).grid(row=9, column=1, columnspan=3, sticky="ew", pady=(4, 0))
+        ttk.Label(f, text="Palette:").grid(row=10, column=0, sticky="w", pady=(4, 0))
+        self._nm_pal = tk.StringVar(value="")
+        ttk.Entry(f, textvariable=self._nm_pal, width=52).grid(row=10, column=1, columnspan=3, sticky="ew", pady=(4, 0))
+        self._upd_toml = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            f,
+            text="Update Address + Format in TOML when a name is given (needs tomli-w)",
+            variable=self._upd_toml,
+        ).grid(row=11, column=0, columnspan=4, sticky="w", pady=(8, 0))
         btnf = ttk.Frame(f)
-        btnf.grid(row=4, column=0, columnspan=4, sticky="e", pady=(12, 0))
+        btnf.grid(row=12, column=0, columnspan=4, sticky="e", pady=(12, 0))
         ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
         ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
         self._dlg.bind("<Escape>", lambda e: self._on_cancel())
+        self._bpp.trace_add("write", lambda *_: self._sync_bpp())
+        self._sync_bpp()
         self._dlg.wait_window()
+
+    def _sync_bpp(self, *_a: Any) -> None:
+        b = int(self._bpp.get())
+        if b == 4:
+            self._pal_n.set("16")
+            self._pal_hint.configure(text="(fixed 16 for 4bpp)")
+            self._pal_entry.configure(state="disabled")
+            self._rom_clip_row_tm.grid_remove()
+        elif b == 6:
+            self._pal_n.set("64")
+            self._pal_hint.configure(text="(fixed 64 for 6bpp)")
+            self._pal_entry.configure(state="disabled")
+            self._rom_clip_row_tm.grid_remove()
+        else:
+            if self._pal_entry.cget("state") == "disabled":
+                self._pal_n.set("256")
+            self._pal_entry.configure(state="normal")
+            self._pal_hint.configure(text="16–256, step 16")
+            self._rom_clip_row_tm.grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
     def _on_ok(self) -> None:
         try:
@@ -963,8 +1241,50 @@ class _TilemapPngDimsDialog:
         if mw < 1 or mh < 1:
             messagebox.showwarning("Import", "Width and height must be ≥ 1.")
             return
-        self.result = (mw, mh, int(self._bpp.get()))
-        self.skip_palette = bool(self._skip_pal.get())
+        bpp = int(self._bpp.get())
+        try:
+            pn = int(self._pal_n.get().strip(), 0)
+            ncolors = validate_manual_palette_color_count(bpp, pn)
+        except ValueError as e:
+            messagebox.showwarning("Import", str(e))
+            return
+        rom_clip_8: Optional[int] = None
+        if bpp == 8:
+            clip_s = self._pal_rom_clip_tm.get().strip()
+            if not clip_s:
+                rom_clip_8 = ncolors
+            else:
+                try:
+                    rom_clip_8 = parse_8bpp_palette_color_count(int(clip_s.strip(), 0))
+                except ValueError as e:
+                    messagebox.showwarning("Import", str(e))
+                    return
+            if rom_clip_8 > ncolors:
+                messagebox.showwarning(
+                    "Import",
+                    "ROM palette size cannot exceed the quantize color count "
+                    f"({rom_clip_8} > {ncolors}).",
+                )
+                return
+        skip = bool(self._skip_pal.get())
+        nm_map = self._nm_map.get().strip()
+        nm_ts = self._nm_ts.get().strip()
+        nm_pal = self._nm_pal.get().strip()
+        upd = bool(self._upd_toml.get())
+        if upd and not (nm_map or nm_ts or nm_pal):
+            messagebox.showwarning(
+                "Import",
+                "Enter at least one NamedAnchor name for TOML update, or disable TOML update.",
+            )
+            return
+        if upd and nm_map and not nm_ts:
+            messagebox.showwarning(
+                "Import",
+                "Tilemap anchor Format is ucm…|tileset — enter the tileset NamedAnchor name.",
+            )
+            return
+        self.result = (mw, mh, bpp, ncolors, skip, nm_map, nm_ts, nm_pal, upd, rom_clip_8)
+        self.skip_palette = skip
         self._dlg.destroy()
 
     def _on_cancel(self) -> None:
@@ -1366,7 +1686,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._sprite_pal_override_row.columnconfigure(1, weight=1)
         ttk.Label(
             self._sprite_pal_override_row,
-            text="Preview palette (ROM):",
+            text="Preview palette (offset or TOML Name):",
             font=("Consolas", 8),
         ).grid(row=0, column=0, sticky="nw", padx=(0, 4), pady=(2, 0))
         self._sprite_pal_off_var = tk.StringVar(value="")
@@ -1375,7 +1695,7 @@ class GraphicsPreviewFrame(ttk.Frame):
             textvariable=self._sprite_pal_off_var,
             width=12,
             font=("Consolas", 8),
-        ).grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=(2, 0))
+        ).grid(row=0, column=1, columnspan=3, sticky="ew", padx=(0, 6), pady=(2, 0))
         ttk.Label(self._sprite_pal_override_row, text="bpp:", font=("Consolas", 8)).grid(
             row=1, column=0, sticky="w", padx=(0, 4), pady=(2, 0)
         )
@@ -1388,21 +1708,21 @@ class GraphicsPreviewFrame(ttk.Frame):
             state="readonly",
             font=("Consolas", 8),
         )
-        self._sprite_pal_bpp_combo.grid(row=1, column=1, sticky="w", padx=(0, 12), pady=(2, 0))
+        self._sprite_pal_bpp_combo.grid(row=1, column=1, sticky="w", padx=(0, 0), pady=(2, 0))
         ttk.Label(self._sprite_pal_override_row, text="Data:", font=("Consolas", 8)).grid(
-            row=1, column=2, sticky="w", padx=(0, 4), pady=(2, 0)
+            row=2, column=0, sticky="w", padx=(0, 4), pady=(2, 0)
         )
         self._sprite_pal_storage_var = tk.StringVar(value="raw")
         ttk.Combobox(
             self._sprite_pal_override_row,
             textvariable=self._sprite_pal_storage_var,
             values=("raw", "lz77"),
-            width=7,
+            width=6,
             state="readonly",
             font=("Consolas", 8),
-        ).grid(row=1, column=3, sticky="w", padx=(0, 8), pady=(2, 0))
+        ).grid(row=2, column=1, sticky="w", padx=(0, 8), pady=(2, 0))
         pal_btns = ttk.Frame(self._sprite_pal_override_row)
-        pal_btns.grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        pal_btns.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
         ttk.Button(pal_btns, text="Load", command=self._on_sprite_preview_palette_load).pack(
             side=tk.LEFT, padx=(0, 6)
         )
@@ -1414,7 +1734,7 @@ class GraphicsPreviewFrame(ttk.Frame):
             foreground="#060",
             wraplength=320,
         )
-        self._sprite_pal_status.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        self._sprite_pal_status.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(4, 0))
 
         self._pal4_row = ttk.Frame(self)
         self._pal4_row.grid(row=1, column=0, sticky="w", pady=(0, 2))
@@ -1957,9 +2277,10 @@ class GraphicsPreviewFrame(ttk.Frame):
             return
         sp = info["spec"]
         s = self._sprite_pal_off_var.get().strip()
-        off, err = parse_rom_file_offset(s)
+        direct_off, _ = parse_rom_file_offset(s)
+        off, err = self._hex.resolve_file_offset_or_named_anchor(s)
         if off is None:
-            messagebox.showwarning("Preview palette", err or "Invalid offset.")
+            messagebox.showwarning("Preview palette", err or "Invalid offset or TOML Name.")
             return
         try:
             pb = int(str(self._sprite_pal_bpp_var.get()))
@@ -1982,9 +2303,14 @@ class GraphicsPreviewFrame(ttk.Frame):
             return
         self._sprite_palette_override = (off, pb, use_lz)
         src = "LZ77 at offset" if use_lz else "Raw bytes at"
+        loc = (
+            f"{src} 0x{off:X}"
+            if direct_off is not None
+            else f"{src} 0x{off:X} (NamedAnchor {normalize_named_anchor_lookup_key(s)!r})"
+        )
         self._sprite_pal_status.configure(
             text=(
-                f"{src} 0x{off:X} — {pb}bpp preview ({len(raw)} bytes decoded). "
+                f"{loc} — {pb}bpp preview ({len(raw)} bytes decoded). "
                 "Import still writes uncompressed palette bytes unless the anchor uses LZ in TOML."
             ),
             foreground="#060",
@@ -2103,8 +2429,8 @@ class GraphicsPreviewFrame(ttk.Frame):
                 "Import is only implemented for sprite (uct/lzt/ucs/lzs…) or tilemap (ucm/lzm…) anchors, not palette-only.",
             )
             return
-        if spec.bpp not in (4, 8):
-            messagebox.showinfo("Import graphic", "6bpp sprite import is not supported yet.")
+        if spec.bpp not in (4, 6, 8):
+            messagebox.showinfo("Import graphic", f"{spec.bpp}bpp sprite import is not supported.")
             return
         tbl_idx, _eff, _ = self._effective_table_state(info)
         blob_off = int(info["base_off"])
@@ -2120,7 +2446,31 @@ class GraphicsPreviewFrame(ttk.Frame):
         if not path:
             return
 
-        tile_bytes, flat_pal, err, tw, th = sprite_import_png(path, spec)
+        if spec.bpp == 6:
+            wt0, ht0 = int(spec.width_tiles), int(spec.height_tiles)
+            if wt0 <= 0 or ht0 <= 0:
+                messagebox.showinfo(
+                    "Import graphic",
+                    "6bpp import needs a fixed WxH in TOML (e.g. uct6x8x8 or ucs6x4x4), not a variable-length strip.",
+                )
+                return
+            tile_bytes, flat_pal, err, tw, th = sprite_import_png_manual(
+                path,
+                bpp=6,
+                width_tiles=wt0,
+                height_tiles=ht0,
+                palette_color_count=64,
+            )
+            log_intro = (
+                f"Import: 6bpp with index 0 = transparent #00FF00; quantized to 63 solid colors; "
+                f"{tw}×{th} tiles ({tw * 8}×{th * 8} px).\n"
+            )
+        else:
+            tile_bytes, flat_pal, err, tw, th = sprite_import_png(path, spec)
+            log_intro = (
+                f"Import: PNG pixel size → {tw}×{th} tiles ({tw * 8}×{th * 8} px canvas); "
+                f"not resized to match the TOML / preview window.\n"
+            )
         if err:
             messagebox.showerror("Import graphic", err)
             return
@@ -2134,10 +2484,7 @@ class GraphicsPreviewFrame(ttk.Frame):
             return
 
         sprite_payload = build_sprite_payload_for_rom(tile_bytes, spec, lz=spec.lz)
-        logs: List[str] = [
-            f"Import: PNG pixel size → {tw}×{th} tiles ({tw * 8}×{th * 8} px canvas); "
-            f"not resized to match the TOML / preview window.\n",
-        ]
+        logs: List[str] = [log_intro]
 
         ok_s, log_s = self._gfx_import_write_blob(
             "Sprite",
@@ -2250,6 +2597,82 @@ class GraphicsPreviewFrame(ttk.Frame):
                 ext_ps, ext_pb, _paln = self._hex.resolve_palette_for_graphics_row(pan.strip(), tbl_idx)
                 if ext_ps is None or ext_pb is None:
                     messagebox.showerror("Import graphic", "Could not resolve 8bpp palette data in ROM.")
+                    self._set_log("".join(logs))
+                    return
+                ga_p = self._hex.find_graphics_anchor_by_name(pan.strip())
+                pal_table_b = int(ga_p["row_byte_size"]) if ga_p and ga_p.get("graphics_table") else None
+                pal_is_table = bool(ga_p and ga_p.get("graphics_table"))
+                try:
+                    pal_cap = measure_palette_rom_footprint(
+                        bytes(rom), ext_pb, ext_ps, graphics_table_row_bytes=pal_table_b
+                    )
+                except ValueError as e:
+                    self._set_log("".join(logs))
+                    messagebox.showerror("Import graphic", str(e))
+                    return
+                pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
+                pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                pal_anchor_name = pan.strip() if ga_p and ga_p["spec"].kind == "palette" else None
+                if pal_anchor_name and pal_is_table:
+                    pal_anchor_name = None
+                ok_p, log_p = self._gfx_import_write_blob(
+                    "Palette",
+                    ext_pb,
+                    pal_payload,
+                    pal_cap,
+                    is_table=pal_is_table,
+                    named_anchor_for_reloc=pal_anchor_name,
+                )
+                logs.append(log_p)
+                if not ok_p:
+                    self._set_log("".join(logs))
+                    messagebox.showerror(
+                        "Import graphic",
+                        "Palette import failed; sprite data may already be written. See decode log.",
+                    )
+                    return
+        elif spec.bpp == 6:
+            if use_pal_override:
+                ext_ps = synthetic_palette_spec_for_sprite_import_write(6)
+                ext_pb = int(ov[0])
+                try:
+                    pal_cap = measure_palette_rom_footprint(
+                        bytes(rom), ext_pb, ext_ps, graphics_table_row_bytes=None
+                    )
+                except ValueError as e:
+                    self._set_log("".join(logs))
+                    messagebox.showerror("Import graphic", str(e))
+                    return
+                pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
+                pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                ok_p, log_p = self._gfx_import_write_blob(
+                    "Palette",
+                    ext_pb,
+                    pal_payload,
+                    pal_cap,
+                    is_table=False,
+                    named_anchor_for_reloc=None,
+                )
+                logs.append(log_p)
+                if not ok_p:
+                    self._set_log("".join(logs))
+                    messagebox.showerror(
+                        "Import graphic",
+                        "Palette import failed; sprite data may already be written. See decode log.",
+                    )
+                    return
+            elif not pan:
+                messagebox.showerror(
+                    "Import graphic",
+                    "6bpp sprites need a linked palette NamedAnchor (|palette… in TOML), "
+                    "or load a preview palette from a ROM offset (6 bpp / 64 colors).",
+                )
+                self._set_log("".join(logs))
+                return
+            else:
+                ext_ps, ext_pb, _paln = self._hex.resolve_palette_for_graphics_row(pan.strip(), tbl_idx)
+                if ext_ps is None or ext_pb is None:
+                    messagebox.showerror("Import graphic", "Could not resolve 6bpp palette data in ROM.")
                     self._set_log("".join(logs))
                     return
                 ga_p = self._hex.find_graphics_anchor_by_name(pan.strip())
@@ -3352,7 +3775,7 @@ class StructEditorFrame(ttk.Frame):
         self._gfx_struct_sprite_pal_row.columnconfigure(1, weight=1)
         ttk.Label(
             self._gfx_struct_sprite_pal_row,
-            text="Preview palette (ROM):",
+            text="Preview palette (offset or TOML Name):",
             font=("Consolas", 8),
         ).grid(row=0, column=0, sticky="nw", padx=(0, 4), pady=(2, 0))
         self._gfx_struct_sprite_pal_off_var = tk.StringVar(value="")
@@ -3361,7 +3784,7 @@ class StructEditorFrame(ttk.Frame):
             textvariable=self._gfx_struct_sprite_pal_off_var,
             width=12,
             font=("Consolas", 8),
-        ).grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=(2, 0))
+        ).grid(row=0, column=1, columnspan=3, sticky="ew", padx=(0, 6), pady=(2, 0))
         ttk.Label(self._gfx_struct_sprite_pal_row, text="bpp:", font=("Consolas", 8)).grid(
             row=1, column=0, sticky="w", padx=(0, 4), pady=(2, 0)
         )
@@ -3373,21 +3796,21 @@ class StructEditorFrame(ttk.Frame):
             width=3,
             state="readonly",
             font=("Consolas", 8),
-        ).grid(row=1, column=1, sticky="w", padx=(0, 12), pady=(2, 0))
+        ).grid(row=1, column=1, sticky="w", padx=(0, 0), pady=(2, 0))
         ttk.Label(self._gfx_struct_sprite_pal_row, text="Data:", font=("Consolas", 8)).grid(
-            row=1, column=2, sticky="w", padx=(0, 4), pady=(2, 0)
+            row=2, column=0, sticky="w", padx=(0, 4), pady=(2, 0)
         )
         self._gfx_struct_sprite_pal_storage_var = tk.StringVar(value="raw")
         ttk.Combobox(
             self._gfx_struct_sprite_pal_row,
             textvariable=self._gfx_struct_sprite_pal_storage_var,
             values=("raw", "lz77"),
-            width=7,
+            width=6,
             state="readonly",
             font=("Consolas", 8),
-        ).grid(row=1, column=3, sticky="w", padx=(0, 8), pady=(2, 0))
+        ).grid(row=2, column=1, sticky="w", padx=(0, 8), pady=(2, 0))
         struct_pal_btns = ttk.Frame(self._gfx_struct_sprite_pal_row)
-        struct_pal_btns.grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        struct_pal_btns.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
         ttk.Button(
             struct_pal_btns,
             text="Load",
@@ -3405,7 +3828,7 @@ class StructEditorFrame(ttk.Frame):
             foreground="#060",
             wraplength=280,
         )
-        self._gfx_struct_sprite_pal_status.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        self._gfx_struct_sprite_pal_status.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         self._gfx_log = tk.Text(
             self._gfx_sprite_frame, height=4, font=("Consolas", 7), wrap=tk.WORD, state=tk.DISABLED
         )
@@ -3865,9 +4288,10 @@ class StructEditorFrame(ttk.Frame):
             messagebox.showwarning("Preview palette", "No ROM loaded.")
             return
         s = self._gfx_struct_sprite_pal_off_var.get().strip()
-        off, err = parse_rom_file_offset(s)
+        direct_off, _ = parse_rom_file_offset(s)
+        off, err = self._hex.resolve_file_offset_or_named_anchor(s)
         if off is None:
-            messagebox.showwarning("Preview palette", err or "Invalid offset.")
+            messagebox.showwarning("Preview palette", err or "Invalid offset or TOML Name.")
             return
         try:
             pb = int(str(self._gfx_struct_sprite_pal_bpp_var.get()))
@@ -3890,9 +4314,14 @@ class StructEditorFrame(ttk.Frame):
             return
         self._gfx_struct_sprite_palette_override = (off, pb, use_lz)
         src = "LZ77 at" if use_lz else "Raw at"
+        loc = (
+            f"{src} 0x{off:X}"
+            if direct_off is not None
+            else f"{src} 0x{off:X} (NamedAnchor {normalize_named_anchor_lookup_key(s)!r})"
+        )
         self._gfx_struct_sprite_pal_status.configure(
             text=(
-                f"{src} 0x{off:X} — {pb}bpp ({len(raw)} bytes decoded). "
+                f"{loc} — {pb}bpp ({len(raw)} bytes decoded). "
                 "Decode uses this instead of the linked palette."
             ),
             foreground="#060",
@@ -5309,6 +5738,8 @@ class HexEditorFrame(ttk.Frame):
         self._goto_entry.grid(row=0, column=6, sticky="w", padx=(0, 8))
         self._goto_entry.bind("<KeyRelease>", self._on_goto_entry_change)
         self._goto_entry.bind("<FocusIn>", self._on_goto_focus_in)
+        self._goto_entry.bind("<KeyPress>", self._on_goto_keypress, add=True)
+        self._goto_entry.bind("<<Paste>>", self._on_goto_paste, add=True)
         ttk.Label(top_row, text="Chars:", font=("Consolas", 9)).grid(row=0, column=7, sticky="w", padx=(8, 2))
         self._encoding_var = tk.StringVar(value=self._encoding.upper())
         self._encoding_combo = ttk.Combobox(
@@ -5367,7 +5798,7 @@ class HexEditorFrame(ttk.Frame):
         self._scroll_asm = tk.Scrollbar(self._asm_frame)
         self._scroll_asm_h = tk.Scrollbar(self._asm_frame, orient=tk.HORIZONTAL)
         self._text_asm = tk.Text(
-            self._asm_frame, font=("Consolas", 10), wrap=tk.NONE, width=58,
+            self._asm_frame, font=("Consolas", 10), wrap=tk.NONE, width=44,
             borderwidth=1, relief=tk.SOLID, padx=4, pady=2,
             state=tk.DISABLED,
             background="#f8f8f8",
@@ -5396,7 +5827,7 @@ class HexEditorFrame(ttk.Frame):
         self._scroll_pseudo_c = tk.Scrollbar(self._pseudo_c_frame)
         self._scroll_pseudo_c_h = tk.Scrollbar(self._pseudo_c_frame, orient=tk.HORIZONTAL)
         self._text_pseudo_c = tk.Text(
-            self._pseudo_c_frame, font=("Consolas", 10), wrap=tk.NONE, width=48,
+            self._pseudo_c_frame, font=("Consolas", 10), wrap=tk.NONE, width=64,
             borderwidth=1, relief=tk.SOLID, padx=4, pady=2,
             state=tk.DISABLED,
             background="#fafaf8",
@@ -6214,6 +6645,52 @@ class HexEditorFrame(ttk.Frame):
         if self._data:
             self._goto_var.set(f"{self._cursor_byte_offset:08X}")
             self._goto_entry.select_range(0, tk.END)
+
+    def _on_goto_keypress(self, event: tk.Event) -> Optional[str]:
+        """Block characters that cannot appear in hex offsets or NamedAnchor names (e.g. spaces, symbols)."""
+        if event.keysym in (
+            "BackSpace",
+            "Delete",
+            "Tab",
+            "Return",
+            "Escape",
+            "Left",
+            "Right",
+            "Up",
+            "Down",
+            "Home",
+            "End",
+            "Prior",
+            "Next",
+        ):
+            return None
+        if event.state & 0x4:
+            return None  # Ctrl+A/C/V etc.
+        ch = event.char
+        if not ch:
+            return None
+        if ch not in _GOTO_ALLOWED_CHARS:
+            return "break"
+        return None
+
+    def _on_goto_paste(self, event: tk.Event) -> Optional[str]:
+        """Strip disallowed characters from pasted text (same rules as :meth:`_on_goto_keypress`)."""
+        try:
+            clip = self.winfo_toplevel().clipboard_get()
+        except tk.TclError:
+            return None
+        if not isinstance(clip, str):
+            return None
+        filt = "".join(c for c in clip if c in _GOTO_ALLOWED_CHARS)
+        if filt == clip:
+            return None
+        try:
+            self._goto_entry.delete(0, tk.END)
+            self._goto_entry.insert(0, filt)
+        except tk.TclError:
+            return None
+        self._on_goto_entry_change()
+        return "break"
 
     def _goto_resolve_and_maybe_open_tool(self, s: str) -> bool:
         """If ``s`` is a NamedAnchor name or a file/GBA offset inside one, select that anchor and notify tools."""
@@ -7165,6 +7642,33 @@ Format = "`f|u8`[u8 arg0]"
                 return val - GBA_ROM_BASE
         return None
 
+    def resolve_file_offset_or_named_anchor(self, s: str) -> Tuple[Optional[int], str]:
+        """Parse a ROM **file** offset (or GBA ``0x08…``), or resolve a ``[[NamedAnchors]]`` **Name** to file offset."""
+        off, err = parse_rom_file_offset(s)
+        if off is not None:
+            return off, ""
+        if not getattr(self, "_toml_data", None):
+            return None, err or "Enter a numeric offset, or load TOML to use a NamedAnchor Name."
+        key = normalize_named_anchor_lookup_key(s)
+        if not key:
+            return None, err or "Invalid offset or Name."
+        key_lo = key.lower()
+        for anchor in self._toml_data.get("NamedAnchors", []):
+            an = _named_anchor_row_name_field(anchor)
+            if not an or an.lower() != key_lo:
+                continue
+            addr = anchor.get("Address")
+            if addr is None:
+                return None, f"NamedAnchor {key!r} has no Address in TOML."
+            try:
+                val = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+            except (ValueError, TypeError):
+                return None, f"NamedAnchor {key!r} has an invalid Address."
+            if val < GBA_ROM_BASE:
+                val += GBA_ROM_BASE
+            return val - GBA_ROM_BASE, ""
+        return None, f"No [[NamedAnchors]] row named {key!r}."
+
     def _get_function_anchor_for_addr(self, gba_addr: int) -> Optional[Dict[str, Any]]:
         """Return FunctionAnchor or NamedAnchor dict if gba_addr matches any anchor Address."""
         if not self._toml_data:
@@ -7556,7 +8060,9 @@ Format = "`f|u8`[u8 arg0]"
         pcs_names = {a["name"] for a in self._get_pcs_table_anchors()}
         rom_len = len(self._data) if self._data else 0
         for anchor in self._toml_data.get("NamedAnchors", []):
-            name = str(anchor.get("Name", "")).strip().strip("'\"")
+            if not isinstance(anchor, dict):
+                continue
+            name = _named_anchor_row_name_field(anchor)
             if not name or name in pcs_names:
                 continue
             fmt = normalize_named_anchor_format(anchor.get("Format", ""))
@@ -7615,11 +8121,19 @@ Format = "`f|u8`[u8 arg0]"
         return result
 
     def find_graphics_anchor_by_name(self, anchor_name: str) -> Optional[Dict[str, Any]]:
-        want = anchor_name.strip()
+        want = normalize_named_anchor_lookup_key(anchor_name)
+        wl = want.lower()
+        exact: Optional[Dict[str, Any]] = None
+        folded: Optional[Dict[str, Any]] = None
         for a in self.get_graphics_anchors():
-            if a["name"] == want:
-                return a
-        return None
+            n = str(a.get("name", ""))
+            if n == want:
+                exact = a
+                break
+            if n.lower() == wl:
+                if folded is None:
+                    folded = a
+        return exact if exact is not None else folded
 
     def find_struct_anchor_by_name(self, anchor_name: str) -> Optional[Dict[str, Any]]:
         want = anchor_name.strip()
@@ -7912,30 +8426,120 @@ Format = "`f|u8`[u8 arg0]"
 
         ``gba_addr`` may be a full GBA ROM pointer (``0x08xxxxxx``) or a file offset; file offset is what gets stored.
         """
+        ok, err, _ = self.update_named_anchor_address_and_format(
+            anchor_name, gba_addr=gba_addr, new_format=None, create_if_missing=False
+        )
+        return ok, err
+
+    def update_named_anchor_address_and_format(
+        self,
+        anchor_name: str,
+        *,
+        gba_addr: Optional[int] = None,
+        new_format: Optional[str] = None,
+        create_if_missing: bool = False,
+    ) -> Tuple[bool, str, Optional[str]]:
+        """
+        Update ``Address`` and/or ``Format`` on a ``[[NamedAnchors]]`` row (needs tomli-w).
+
+        If ``create_if_missing`` is True and no row matches ``Name``, appends a **new**
+        ``[[NamedAnchors]]`` entry (requires both ``gba_addr`` and ``new_format``). Used when
+        importing graphics under a new logical name that is not in the TOML yet.
+
+        Returns ``(ok, message, action)`` where ``action`` is ``\"updated\"``, ``\"created\"``, or ``None`` on failure.
+        """
         _try_import_tomli_w()
         if not _TOMLI_W_AVAILABLE or tomli_w is None:
-            return False, _tomli_w_missing_message()
+            return False, _tomli_w_missing_message(), None
         if not self._toml_path or not os.path.isfile(self._toml_path):
-            return False, "No TOML file path set (open a ROM with a .toml beside it)."
-        g = int(gba_addr)
-        if GBA_ROM_BASE <= g <= GBA_ROM_MAX:
-            file_off = g - GBA_ROM_BASE
-        elif 0 <= g < GBA_ROM_BASE:
-            file_off = g
-        else:
-            return False, f"Invalid ROM address for TOML: 0x{g:X}"
-        want = anchor_name.strip().strip("'\"")
-        for anchor in self._toml_data.get("NamedAnchors", []):
-            n = str(anchor.get("Name", "")).strip().strip("'\"")
+            return False, "No TOML file path set (open a ROM with a .toml beside it).", None
+        if gba_addr is None and new_format is None:
+            return False, "Nothing to update (need gba_addr and/or new_format).", None
+        file_off: Optional[int] = None
+        if gba_addr is not None:
+            g = int(gba_addr)
+            if GBA_ROM_BASE <= g <= GBA_ROM_MAX:
+                file_off = g - GBA_ROM_BASE
+            elif 0 <= g < GBA_ROM_BASE:
+                file_off = g
+            else:
+                return False, f"Invalid ROM address for TOML: 0x{g:X}", None
+        want = normalize_named_anchor_lookup_key(anchor_name)
+        if not want:
+            return False, "NamedAnchor name is empty (check quotes/backticks).", None
+        want_lower = want.lower()
+        if "NamedAnchors" not in self._toml_data or self._toml_data.get("NamedAnchors") is None:
+            self._toml_data["NamedAnchors"] = []
+        rows_raw = self._toml_data.get("NamedAnchors")
+        if not isinstance(rows_raw, list):
+            return (
+                False,
+                "TOML has no [[NamedAnchors]] array (structure file missing or not loaded next to this ROM).",
+                None,
+            )
+        rows: List[Dict[str, Any]] = [a for a in rows_raw if isinstance(a, dict)]
+        match: Optional[Dict[str, Any]] = None
+        for anchor in rows:
+            n = _named_anchor_row_name_field(anchor)
+            if not n:
+                continue
             if n == want:
-                anchor["Address"] = _toml_named_anchor_address_hex_string(file_off)
-                try:
-                    with open(self._toml_path, "wb") as f:
-                        tomli_w.dump(self._toml_data, f)
-                except OSError as e:
-                    return False, str(e)
-                return True, ""
-        return False, f"NamedAnchor not found: {anchor_name!r}"
+                match = anchor
+                break
+        if match is None:
+            for anchor in rows:
+                n = _named_anchor_row_name_field(anchor)
+                if not n:
+                    continue
+                if n.lower() == want_lower:
+                    match = anchor
+                    break
+        action: str = "updated"
+        if match is None:
+            if create_if_missing and file_off is not None and new_format is not None:
+                match = {
+                    "Name": want,
+                    "Address": _toml_named_anchor_address_hex_string(file_off),
+                    "Format": new_format,
+                    # Placeholder; Channeler may recompute when you next save from the main tool.
+                    "DefaultHash": "00000000",
+                }
+                rows_raw.append(match)
+                action = "created"
+            else:
+                samples: List[str] = []
+                for anchor in rows[:200]:
+                    n = _named_anchor_row_name_field(anchor)
+                    if n and n not in samples:
+                        samples.append(n)
+                    if len(samples) >= 6:
+                        break
+                extra = ""
+                if samples:
+                    show = ", ".join(repr(s) for s in samples[:5])
+                    if len(samples) > 5:
+                        show += ", …"
+                    extra = f" First name(s) in this TOML: {show}."
+                hint = ""
+                if create_if_missing and (file_off is None or new_format is None):
+                    hint = " To add a new row, both a destination address and Format must be set."
+                tp = self._toml_path or "(unknown)"
+                return (
+                    False,
+                    f"NamedAnchor not found: {anchor_name!r} (normalized {want!r}). "
+                    f"Must match [[NamedAnchors]] Name in: {tp}.{extra}{hint}",
+                    None,
+                )
+        if file_off is not None:
+            match["Address"] = _toml_named_anchor_address_hex_string(file_off)
+        if new_format is not None:
+            match["Format"] = new_format
+        try:
+            with open(self._toml_path, "wb") as f:
+                tomli_w.dump(self._toml_data, f)
+        except OSError as e:
+            return False, str(e), None
+        return True, "", action
 
     def persist_toml_data(self) -> Tuple[bool, str]:
         """Write ``self._toml_data`` to ``self._toml_path`` (requires tomli-w)."""
@@ -7995,7 +8599,7 @@ Format = "`f|u8`[u8 arg0]"
     # ── File menu: static ROM imports (user-chosen offsets / FF gaps) ─
 
     def file_import_sprite_static(self) -> None:
-        """File → Import Sprite: PNG → tiles at a file offset (optional LZ); does not patch pointers."""
+        """File → Import Sprite: PNG → tiles and optional palette at file offsets (optional LZ)."""
         parent = self.winfo_toplevel()
         if not self._data:
             messagebox.showwarning("Import sprite", "No ROM loaded.")
@@ -8006,12 +8610,17 @@ Format = "`f|u8`[u8 arg0]"
         )
         if not path:
             return
-        opt = _SpriteImportOptionsDialog(parent, path)
+        opt = _SpriteImportOptionsDialog(parent, path, title="Import sprite — options")
         if opt.result is None:
             return
-        bpp, lz = opt.result
-        stub = GraphicsAnchorSpec(kind="sprite", bpp=bpp, lz=False, width_tiles=1, height_tiles=1)
-        tb, _pb, err, tw, th = sprite_import_png(path, stub)
+        bpp, lz, wt, ht, ncolors, tom_name, tom_pal_name, write_pal, upd, rom_clip_8 = opt.result
+        tb, flat_pal, err, tw, th = sprite_import_png_manual(
+            path,
+            bpp=bpp,
+            width_tiles=int(wt),
+            height_tiles=int(ht),
+            palette_color_count=int(ncolors),
+        )
         if err:
             messagebox.showerror("Import sprite", err)
             return
@@ -8021,22 +8630,79 @@ Format = "`f|u8`[u8 arg0]"
         except ValueError as e:
             messagebox.showerror("Import sprite", str(e))
             return
+        ext_ps = synthetic_palette_spec_for_sprite_import_write(
+            bpp,
+            rom_palette_colors_8bpp=rom_clip_8 if bpp == 8 else None,
+        )
+        try:
+            pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
+            pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=lz)
+        except ValueError as e:
+            messagebox.showerror("Import sprite", f"Palette pack: {e}")
+            return
+
         dest = _StaticRomOffsetDialog(
             parent,
             self,
             len(payload),
-            "Import sprite — destination",
+            "Import sprite — tile data destination",
             blurb=f"Sprite sheet {tw}×{th} tiles ({tw * 8}×{th * 8} px).",
         )
         if dest.result is None:
             return
         off = dest.result
+
+        pal_off: Optional[int] = None
+        if write_pal:
+            dest_pal = _StaticRomOffsetDialog(
+                parent,
+                self,
+                len(pal_payload),
+                "Import sprite — palette destination",
+                blurb=f"Quantized GBA palette: {len(pal_payload)} bytes ({bpp}bpp).",
+            )
+            if dest_pal.result is None:
+                return
+            pal_off = dest_pal.result
+
         self.write_bytes_at(off, payload)
         gba = off + GBA_ROM_BASE
-        messagebox.showinfo(
-            "Import sprite",
-            f"Wrote {len(payload)} byte(s) at file offset 0x{off:X} (GBA 0x{gba:08X}).",
+        msg = f"Tiles: {len(payload)} byte(s) at file 0x{off:X} (GBA 0x{gba:08X})."
+        gba_p: Optional[int] = None
+        if write_pal and pal_off is not None:
+            self.write_bytes_at(pal_off, pal_payload)
+            gba_p = pal_off + GBA_ROM_BASE
+            msg += f"\nPalette: {len(pal_payload)} byte(s) at file 0x{pal_off:X} (GBA 0x{gba_p:08X})."
+
+        link_pal = bool(write_pal and pal_off is not None and normalize_named_anchor_lookup_key(tom_pal_name))
+        fmt_sprite = _toml_sprite_format_token_with_palette(
+            lz, bpp, tw, th, tom_pal_name if link_pal else ""
         )
+        did_reload = False
+        if upd and tom_name:
+            ok_t, err_t, how = self.update_named_anchor_address_and_format(
+                tom_name, gba_addr=gba, new_format=fmt_sprite, create_if_missing=True
+            )
+            if ok_t:
+                tag = "Added new" if how == "created" else "Updated"
+                msg += f"\n\nTOML sprite: {tag} {tom_name!r} — {fmt_sprite}"
+                did_reload = True
+            else:
+                msg += f"\n\nTOML sprite failed: {err_t}"
+        if upd and link_pal and tom_pal_name and gba_p is not None:
+            fmt_pal = _toml_palette_format_for_tilemap_bpp(bpp, rom_clip_8 if bpp == 8 else None)
+            ok_p, err_p, how_p = self.update_named_anchor_address_and_format(
+                tom_pal_name, gba_addr=gba_p, new_format=fmt_pal, create_if_missing=True
+            )
+            if ok_p:
+                tagp = "Added new" if how_p == "created" else "Updated"
+                msg += f"\nTOML palette: {tagp} {tom_pal_name!r} — {fmt_pal}"
+                did_reload = True
+            else:
+                msg += f"\nTOML palette failed: {err_p}"
+        if did_reload:
+            self.reload_toml_from_disk()
+        messagebox.showinfo("Import sprite", msg)
 
     def file_import_palette_static(self) -> None:
         """File → Import Palette: PNG, standard text .pal/.gpl, or raw GBA .bin (optional LZ)."""
@@ -8153,12 +8819,17 @@ Format = "`f|u8`[u8 arg0]"
             )
             if not path:
                 return
-            opt = _SpriteImportOptionsDialog(parent, path)
+            opt = _SpriteImportOptionsDialog(parent, path, title="Import tileset — options")
             if opt.result is None:
                 return
-            bpp, lz = opt.result
-            stub = GraphicsAnchorSpec(kind="sprite", bpp=bpp, lz=False, width_tiles=1, height_tiles=1)
-            tb, _pb, err, tw, th = sprite_import_png(path, stub)
+            bpp, lz, wt, ht, ncolors, tom_name, tom_pal_name, write_pal, upd, rom_clip_8 = opt.result
+            tb, flat_pal, err, tw, th = sprite_import_png_manual(
+                path,
+                bpp=bpp,
+                width_tiles=int(wt),
+                height_tiles=int(ht),
+                palette_color_count=int(ncolors),
+            )
             if err:
                 messagebox.showerror("Import tileset", err)
                 return
@@ -8168,29 +8839,82 @@ Format = "`f|u8`[u8 arg0]"
             except ValueError as e:
                 messagebox.showerror("Import tileset", str(e))
                 return
+            ext_ps = synthetic_palette_spec_for_sprite_import_write(
+                bpp,
+                rom_palette_colors_8bpp=rom_clip_8 if bpp == 8 else None,
+            )
+            try:
+                pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
+                pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=lz)
+            except ValueError as e:
+                messagebox.showerror("Import tileset", f"Palette pack: {e}")
+                return
             dest = _StaticRomOffsetDialog(
                 parent,
                 self,
                 len(payload),
-                "Import tileset — destination",
+                "Import tileset — tile data destination",
                 blurb=f"Tile sheet {tw}×{th} tiles.",
             )
             if dest.result is None:
                 return
             off = dest.result
+            pal_off: Optional[int] = None
+            if write_pal:
+                dest_pal = _StaticRomOffsetDialog(
+                    parent,
+                    self,
+                    len(pal_payload),
+                    "Import tileset — palette destination",
+                    blurb=f"Quantized GBA palette: {len(pal_payload)} bytes ({bpp}bpp).",
+                )
+                if dest_pal.result is None:
+                    return
+                pal_off = dest_pal.result
             self.write_bytes_at(off, payload)
-            messagebox.showinfo(
-                "Import tileset",
-                f"Wrote {len(payload)} byte(s) at file offset 0x{off:X} (GBA 0x{off + GBA_ROM_BASE:08X}).",
+            gba = off + GBA_ROM_BASE
+            msg = f"Tiles: {len(payload)} byte(s) at file 0x{off:X} (GBA 0x{gba:08X})."
+            gba_p: Optional[int] = None
+            if write_pal and pal_off is not None:
+                self.write_bytes_at(pal_off, pal_payload)
+                gba_p = pal_off + GBA_ROM_BASE
+                msg += f"\nPalette: {len(pal_payload)} byte(s) at file 0x{pal_off:X} (GBA 0x{gba_p:08X})."
+            link_pal = bool(write_pal and pal_off is not None and normalize_named_anchor_lookup_key(tom_pal_name))
+            fmt_sprite = _toml_sprite_format_token_with_palette(
+                lz, bpp, tw, th, tom_pal_name if link_pal else ""
             )
+            did_reload = False
+            if upd and tom_name:
+                ok_t, err_t, how = self.update_named_anchor_address_and_format(
+                    tom_name, gba_addr=gba, new_format=fmt_sprite, create_if_missing=True
+                )
+                if ok_t:
+                    tag = "Added new" if how == "created" else "Updated"
+                    msg += f"\n\nTOML tileset: {tag} {tom_name!r} — {fmt_sprite}"
+                    did_reload = True
+                else:
+                    msg += f"\n\nTOML tileset failed: {err_t}"
+            if upd and link_pal and tom_pal_name and gba_p is not None:
+                fmt_pal = _toml_palette_format_for_tilemap_bpp(bpp, rom_clip_8 if bpp == 8 else None)
+                ok_p, err_p, how_p = self.update_named_anchor_address_and_format(
+                    tom_pal_name, gba_addr=gba_p, new_format=fmt_pal, create_if_missing=True
+                )
+                if ok_p:
+                    tagp = "Added new" if how_p == "created" else "Updated"
+                    msg += f"\nTOML palette: {tagp} {tom_pal_name!r} — {fmt_pal}"
+                    did_reload = True
+                else:
+                    msg += f"\nTOML palette failed: {err_p}"
+            if did_reload:
+                self.reload_toml_from_disk()
+            messagebox.showinfo("Import tileset", msg)
             return
 
         # png_map
         dim = _TilemapPngDimsDialog(parent)
         if dim.result is None:
             return
-        mw, mh, bpp = dim.result
-        skip_pal = bool(getattr(dim, "skip_palette", False))
+        mw, mh, bpp, pal_n, skip_pal, nm_map, nm_ts, nm_pal, upd, rom_clip_8 = dim.result
         path = filedialog.askopenfilename(
             title="Import tilemap — PNG",
             filetypes=[("PNG images", "*.png"), ("All files", "*.*")],
@@ -8202,6 +8926,8 @@ Format = "`f|u8`[u8 arg0]"
             map_w_tiles=mw,
             map_h_tiles=mh,
             bpp=bpp,
+            palette_color_count=pal_n,
+            use_burner_transparent=True,
         )
         if err:
             messagebox.showerror("Import tilemap", err)
@@ -8228,9 +8954,25 @@ Format = "`f|u8`[u8 arg0]"
         pal_payload = b""
         pal_off: Optional[int] = None
         if not skip_pal:
-            pal_spec = GraphicsAnchorSpec(kind="palette", bpp=bpp, lz=False)
+            if bpp == 4:
+                pal_spec = GraphicsAnchorSpec(kind="palette", bpp=4, lz=False, palette_4_indices=None)
+            elif bpp == 6:
+                pal_spec = GraphicsAnchorSpec(
+                    kind="palette",
+                    bpp=8,
+                    lz=False,
+                    palette_hex_digit=UCP8_PALETTE_4_CHUNK_HEX_DIGITS,
+                )
+            else:
+                pal_spec = synthetic_palette_spec_for_sprite_import_write(
+                    8,
+                    rom_palette_colors_8bpp=rom_clip_8,
+                )
+            pal_use = pal_flat
+            if bpp == 8 and rom_clip_8 is not None:
+                pal_use = pal_flat[: rom_clip_8 * 2]
             try:
-                pal_payload = palette_payload_for_rom(pal_flat, pal_spec, lz=False)
+                pal_payload = palette_payload_for_rom(pal_use, pal_spec, lz=False)
             except ValueError as e:
                 messagebox.showerror("Import tilemap", str(e))
                 return
@@ -8255,6 +8997,59 @@ Format = "`f|u8`[u8 arg0]"
         )
         if not skip_pal and pal_off is not None:
             msg += f"\nPalette: {len(pal_payload)} byte(s) at 0x{pal_off:X}."
+        if upd:
+            tw_g, th_g = suggest_sprite_grid_for_tile_count(n_u)
+            fmt_ts = _toml_sprite_format_token(False, bpp, tw_g, th_g)
+            fmt_pal = _toml_palette_format_for_tilemap_bpp(bpp, rom_clip_8 if bpp == 8 else None)
+            gba_m = dest_map.result + GBA_ROM_BASE
+            gba_ts = dest_ts.result + GBA_ROM_BASE
+            if nm_map:
+                cur_fmt = None
+                nm_key = normalize_named_anchor_lookup_key(nm_map)
+                nm_low = nm_key.lower()
+                for row in self._toml_data.get("NamedAnchors", []) or []:
+                    if not isinstance(row, dict):
+                        continue
+                    n = _named_anchor_row_name_field(row)
+                    if n == nm_key or n.lower() == nm_low:
+                        cur_fmt = str(row.get("Format", "") or "")
+                        break
+                fmt_map = (
+                    rewrite_standalone_tilemap_format_dimensions(cur_fmt, mw, mh)
+                    if cur_fmt
+                    else None
+                )
+                if fmt_map is None:
+                    fmt_map = _toml_tilemap_format_token(False, bpp, mw, mh, nm_ts)
+                ok_m, err_m, how_m = self.update_named_anchor_address_and_format(
+                    nm_map, gba_addr=gba_m, new_format=fmt_map, create_if_missing=True
+                )
+                if ok_m:
+                    tag = "Added" if how_m == "created" else "Updated"
+                    msg += f"\n\nTOML map ({tag}): {nm_map!r} — Address + Format ({fmt_map})"
+                else:
+                    msg += f"\n\nTOML map: {err_m}"
+            if nm_ts:
+                ok_t, err_t, how_t = self.update_named_anchor_address_and_format(
+                    nm_ts, gba_addr=gba_ts, new_format=fmt_ts, create_if_missing=True
+                )
+                if ok_t:
+                    tag = "Added" if how_t == "created" else "Updated"
+                    msg += f"\n\nTOML tileset ({tag}): {nm_ts!r} — Address + Format ({fmt_ts})"
+                else:
+                    msg += f"\n\nTOML tileset: {err_t}"
+            if not skip_pal and pal_off is not None and nm_pal:
+                gba_p = pal_off + GBA_ROM_BASE
+                ok_p, err_p, how_p = self.update_named_anchor_address_and_format(
+                    nm_pal, gba_addr=gba_p, new_format=fmt_pal, create_if_missing=True
+                )
+                if ok_p:
+                    tag = "Added" if how_p == "created" else "Updated"
+                    msg += f"\n\nTOML palette ({tag}): {nm_pal!r} — Address + Format ({fmt_pal})"
+                else:
+                    msg += f"\n\nTOML palette: {err_p}"
+            if nm_map or nm_ts or nm_pal:
+                self.reload_toml_from_disk()
         messagebox.showinfo("Import tilemap", msg)
 
     # ── Scrolling ────────────────────────────────────────────────────
