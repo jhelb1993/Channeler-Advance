@@ -249,7 +249,7 @@ def rgb888_to_gba_rgb555(r: int, g: int, b: int) -> int:
 
 
 def gba_palette_bytes_from_rgb888_list(colors: List[Tuple[int, int, int]], max_colors: int) -> bytes:
-    """``max_colors`` 16 or 256 → 32 or 512 bytes little-endian RGB555."""
+    """``max_colors`` entries (e.g. 16 for 4bpp, or 16–256 for 8bpp) → ``max_colors * 2`` bytes RGB555 LE."""
     out = bytearray()
     for i in range(max_colors):
         if i < len(colors):
@@ -259,6 +259,21 @@ def gba_palette_bytes_from_rgb888_list(colors: List[Tuple[int, int, int]], max_c
             w = 0
         out.extend(w.to_bytes(2, "little"))
     return bytes(out)
+
+
+def is_valid_8bpp_palette_color_count(n: int) -> bool:
+    """True if ``n`` is 16–256 and a multiple of 16 (one or more GBA 16-color rows)."""
+    return 16 <= n <= 256 and (n % 16) == 0
+
+
+def parse_8bpp_palette_color_count(n: int) -> int:
+    """Validate and return ``n`` for 8bpp palette import/export sizes."""
+    if not is_valid_8bpp_palette_color_count(n):
+        raise ValueError(
+            "8bpp palette color count must be 16–256 and a multiple of 16 "
+            "(each hardware row is 16 colors)."
+        )
+    return n
 
 
 def encode_gba_tile_4bpp_from_indices(indices: List[int]) -> bytes:
@@ -391,6 +406,213 @@ def sprite_import_png(
     else:
         pb = pb[:512].ljust(512, b"\x00")
     return tb, pb, "", tw, th
+
+
+def palette_import_png(
+    png_path: str,
+    bpp: int,
+    *,
+    colors_8bpp: int = 256,
+) -> Tuple[bytes, str]:
+    """
+    Build GBA palette bytes from a PNG (quantized: 16 colors for 4bpp, or ``colors_8bpp`` for 8bpp).
+
+    ``colors_8bpp`` must be 16–256 and a multiple of 16 (defaults to 256). Output length is
+    ``16 * 2`` or ``colors_8bpp * 2`` bytes.
+    """
+    if bpp not in (4, 8):
+        return b"", "bpp must be 4 or 8."
+    if bpp == 8:
+        try:
+            ncols = parse_8bpp_palette_color_count(int(colors_8bpp))
+        except ValueError as e:
+            return b"", str(e)
+    else:
+        ncols = 16
+    Image = _require_pillow()
+    try:
+        im = Image.open(png_path)
+    except OSError as e:
+        return b"", str(e)
+    rgba = im.convert("RGBA")
+    iw, ih = rgba.size
+    if iw < 1 or ih < 1:
+        return b"", "Image has zero width or height."
+    bg = Image.new("RGBA", (iw, ih), (255, 255, 255, 255))
+    bg.paste(rgba, (0, 0), rgba.split()[3])
+    rgb = bg.convert("RGB")
+    try:
+        q = rgb.quantize(colors=ncols, method=Image.Quantize.MEDIANCUT)  # type: ignore[attr-defined]
+    except AttributeError:
+        q = rgb.quantize(colors=ncols, method=2)
+    pal_raw = q.getpalette()
+    if not pal_raw:
+        return b"", "Could not build palette from image."
+    colors: List[Tuple[int, int, int]] = []
+    for i in range(ncols):
+        if i * 3 + 2 < len(pal_raw):
+            colors.append((pal_raw[i * 3], pal_raw[i * 3 + 1], pal_raw[i * 3 + 2]))
+        else:
+            colors.append((0, 0, 0))
+    out = gba_palette_bytes_from_rgb888_list(colors, ncols)
+    return out, ""
+
+
+def _clamp_rgb8(r: int, g: int, b: int) -> Tuple[int, int, int]:
+    return (max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
+
+
+def parse_standard_palette_text(text: str) -> Tuple[Optional[List[Tuple[int, int, int]]], str]:
+    """
+    Parse common **text** palette formats (not raw GBA RGB555):
+
+    - **JASC-PAL** (PaintShop / many tools, including Tilemap Studio export)
+    - **GIMP GPL**
+    - **Tilemap Studio “Assembly (RGB)”** — lines like ``RGB 31, 31, 31`` (5-bit components)
+
+    Returns ``(colors or None, error_message)``.
+    """
+    raw = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not raw:
+        return None, "Empty palette file."
+    lines = raw.split("\n")
+
+    # ── JASC-PAL ─────────────────────────────────────────────
+    if lines[0].strip().upper().startswith("JASC-PAL"):
+        if len(lines) < 4:
+            return None, "JASC-PAL: file too short (need header, version, count, colors)."
+        try:
+            n = int(lines[2].strip())
+        except ValueError:
+            return None, "JASC-PAL: invalid color count on line 3."
+        if n < 1 or n > 256:
+            return None, f"JASC-PAL: unsupported color count {n} (expected 1–256)."
+        colors: List[Tuple[int, int, int]] = []
+        for i in range(n):
+            li = 3 + i
+            if li >= len(lines):
+                return None, f"JASC-PAL: expected {n} color lines, got {i}."
+            parts = lines[li].strip().split()
+            if len(parts) < 3:
+                return None, f"JASC-PAL: bad color line {li + 1}."
+            try:
+                r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
+            except ValueError:
+                return None, f"JASC-PAL: non-integer RGB on line {li + 1}."
+            colors.append(_clamp_rgb8(r, g, b))
+        return colors, ""
+
+    # ── GIMP Palette ────────────────────────────────────────
+    if lines[0].strip().startswith("GIMP Palette"):
+        colors = []
+        for line in lines[1:]:
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("Name:") or line.startswith("Columns:"):
+                continue
+            # "R G B" or "R G B\t#hex" or "R G G B\tIndex"
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            try:
+                r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
+            except ValueError:
+                continue
+            colors.append(_clamp_rgb8(r, g, b))
+        if not colors:
+            return None, "GIMP palette: no color lines found after header."
+        return colors, ""
+
+    # ── Tilemap Studio assembly RGB (5-bit per channel) ─────
+    asm_re = re.compile(r"^\s*RGB\s+(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*$", re.IGNORECASE)
+    asm_colors: List[Tuple[int, int, int]] = []
+    for line in lines:
+        m = asm_re.match(line)
+        if not m:
+            continue
+        r5, g5, b5 = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if r5 > 31 or g5 > 31 or b5 > 31:
+            return None, "Assembly RGB: components must be 0–31 (5-bit)."
+        # Match pret/GBA conversion: (v * 255) // 31
+        asm_colors.append(((r5 * 255) // 31, (g5 * 255) // 31, (b5 * 255) // 31))
+    if asm_colors:
+        return asm_colors, ""
+
+    return (
+        None,
+        "Unrecognized text palette. Supported: JASC-PAL, GIMP (.gpl), or Tilemap Studio assembly RGB "
+        "(lines like RGB 31, 31, 31). For raw GBA RGB555 bytes, use a .bin file.",
+    )
+
+
+def palette_import_palette_file(
+    path: str,
+    bpp: int,
+    *,
+    colors_8bpp: int = 256,
+) -> Tuple[bytes, str]:
+    """
+    Load a **standard** palette file (text ``.pal`` / ``.gpl``), convert RGB888 → GBA RGB555 ROM layout.
+
+    For 8bpp, ``colors_8bpp`` sets how many colors to keep (16–256, multiple of 16); extra colors in the
+    file are truncated, missing slots are black.
+
+    This is **not** raw binary GBA palette data; use :func:`palette_import_gba_binary` for pre-encoded blobs.
+    """
+    if bpp not in (4, 8):
+        return b"", "bpp must be 4 or 8."
+    if bpp == 8:
+        try:
+            need = parse_8bpp_palette_color_count(int(colors_8bpp))
+        except ValueError as e:
+            return b"", str(e)
+    else:
+        need = 16
+    try:
+        with open(path, "rb") as f:
+            raw_b = f.read()
+    except OSError as e:
+        return b"", str(e)
+    if not raw_b:
+        return b"", "File is empty."
+    try:
+        text = raw_b.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw_b.decode("latin-1")
+    colors, err = parse_standard_palette_text(text)
+    if colors is None:
+        return b"", err
+    if len(colors) < need:
+        colors = colors + [(0, 0, 0)] * (need - len(colors))
+    else:
+        colors = colors[:need]
+    out = gba_palette_bytes_from_rgb888_list(colors, need)
+    return out, ""
+
+
+def palette_import_gba_binary(
+    path: str,
+    bpp: int,
+    *,
+    colors_8bpp: int = 256,
+) -> Tuple[bytes, str]:
+    """Read raw GBA palette bytes from disk (RGB555 LE: 32 bytes for 4bpp, or ``colors_8bpp * 2`` for 8bpp)."""
+    if bpp not in (4, 8):
+        return b"", "bpp must be 4 or 8."
+    if bpp == 8:
+        try:
+            need = parse_8bpp_palette_color_count(int(colors_8bpp)) * 2
+        except ValueError as e:
+            return b"", str(e)
+    else:
+        need = 32
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        return b"", str(e)
+    if len(raw) < need:
+        return b"", f"Need at least {need} bytes for this {bpp}bpp GBA palette, got {len(raw)}."
+    return raw[:need], ""
 
 
 def tilemap_png_to_tileset_map_palette(

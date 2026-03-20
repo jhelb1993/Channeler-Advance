@@ -59,6 +59,14 @@ class FireRedEditor:
         file_menu.add_command(label="Save", command=self._on_save, state=tk.DISABLED)
         file_menu.add_command(label="Save As...", command=self._on_save_as, state=tk.DISABLED)
         file_menu.add_separator()
+        file_menu.add_command(label="Import Sprite...", command=self._on_file_import_sprite, state=tk.DISABLED)
+        file_menu.add_command(
+            label="Import Tilemap/Tileset...",
+            command=self._on_file_import_tilemap,
+            state=tk.DISABLED,
+        )
+        file_menu.add_command(label="Import Palette...", command=self._on_file_import_palette, state=tk.DISABLED)
+        file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_exit)
         self._file_menu = file_menu
 
@@ -268,6 +276,8 @@ class FireRedEditor:
             "Use ROM-paired TOML (clear override)",
             state=tk.NORMAL if ov else tk.DISABLED,
         )
+        for _imp in ("Import Sprite...", "Import Tilemap/Tileset...", "Import Palette..."):
+            self._file_menu.entryconfig(_imp, state=state)
         if has_file:
             self._pcs_table.refresh_anchors()
             self._struct_editor.refresh_anchors()
@@ -297,6 +307,18 @@ class FireRedEditor:
         self._update_file_menu_state()
         paired = self._hex_editor.get_toml_path() or "(none)"
         messagebox.showinfo("TOML", f"Reloaded ROM-paired structure file:\n{paired}")
+
+    def _on_file_import_sprite(self) -> None:
+        if self._hex_editor:
+            self._hex_editor.file_import_sprite_static()
+
+    def _on_file_import_tilemap(self) -> None:
+        if self._hex_editor:
+            self._hex_editor.file_import_tilemap_tileset_static()
+
+    def _on_file_import_palette(self) -> None:
+        if self._hex_editor:
+            self._hex_editor.file_import_palette_static()
 
     def _on_open_rom(self) -> None:
         path = filedialog.askopenfilename(

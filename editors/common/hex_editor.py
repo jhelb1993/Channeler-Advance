@@ -16,6 +16,7 @@ from tkinter import ttk, filedialog, messagebox
 from typing import Optional, Dict, List, Tuple, Set, Any
 
 from editors.common.gba_graphics import (
+    GraphicsAnchorSpec,
     build_sprite_payload_for_rom,
     build_tilemap_payload_for_rom,
     compute_graphics_rom_span,
@@ -32,7 +33,11 @@ from editors.common.gba_graphics import (
     measure_sprite_rom_footprint,
     measure_tilemap_rom_footprint,
     palette_bytes_for_gbagfx,
+    palette_import_gba_binary,
+    palette_import_palette_file,
+    palette_import_png,
     palette_payload_for_rom,
+    parse_8bpp_palette_color_count,
     parse_graphics_anchor_format,
     parse_graphics_table_format,
     parse_sprite_field_spec,
@@ -533,6 +538,389 @@ class _GfxRelocateDialog:
             return
         self.fill_old_slot = bool(self._fill_old_var.get())
         self.result = off
+        self._dlg.destroy()
+
+    def _on_cancel(self) -> None:
+        self._dlg.destroy()
+
+
+def parse_rom_file_offset(s: str) -> Tuple[Optional[int], str]:
+    """Parse a ROM **file** offset; accepts decimal/hex or GBA pointer ``0x08……``."""
+    s = str(s).strip()
+    if not s:
+        return None, "Enter a file offset (or use Search FF gap)."
+    try:
+        v = int(s, 0)
+    except ValueError:
+        return None, "Invalid number (use decimal or 0x hex)."
+    if GBA_ROM_BASE <= v <= GBA_ROM_MAX:
+        v -= GBA_ROM_BASE
+    if v < 0:
+        return None, "Offset must be ≥ 0."
+    return v, ""
+
+
+class _StaticRomOffsetDialog:
+    """Pick where to write ``need_bytes``; optional FF-gap search (does not patch pointers)."""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        hex_editor: "HexEditorFrame",
+        need_bytes: int,
+        title: str,
+        *,
+        blurb: str = "",
+    ) -> None:
+        self.result: Optional[int] = None
+        self._need = need_bytes
+        self._hex = hex_editor
+        self._dlg = tk.Toplevel(parent)
+        self._dlg.title(title)
+        self._dlg.transient(parent)
+        self._dlg.grab_set()
+        f = ttk.Frame(self._dlg, padding=10)
+        f.pack(fill=tk.BOTH, expand=True)
+        n = need_bytes
+        head = (
+            f"Data size: {n} byte(s) (0x{n:X}).\n"
+            + (blurb + "\n" if blurb else "")
+            + "Enter a **file offset** (hex/decimal or GBA 0x08……) or search for an FF gap.\n"
+        )
+        ttk.Label(f, text=head, wraplength=440).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(f, text="File offset:", font=("Consolas", 9)).grid(row=1, column=0, sticky="w")
+        self._off_var = tk.StringVar(value="")
+        ttk.Entry(f, textvariable=self._off_var, width=22, font=("Consolas", 9)).grid(
+            row=1, column=1, sticky="ew", pady=2
+        )
+        ttk.Label(f, text="FF gap search from / through:", font=("Consolas", 8), foreground="#666").grid(
+            row=2, column=0, sticky="nw", pady=(8, 0)
+        )
+        gap_f = ttk.Frame(f)
+        gap_f.grid(row=2, column=1, sticky="ew", pady=(8, 0))
+        self._from_var = tk.StringVar(value="")
+        self._to_var = tk.StringVar(value="")
+        ttk.Entry(gap_f, textvariable=self._from_var, width=14, font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Entry(gap_f, textvariable=self._to_var, width=14, font=("Consolas", 8)).pack(side=tk.LEFT)
+        ttk.Button(f, text="Search FF gap", command=self._on_search).grid(row=3, column=1, sticky="e", pady=(6, 0))
+        btnf = ttk.Frame(f)
+        btnf.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
+        f.columnconfigure(1, weight=1)
+        self._dlg.bind("<Return>", lambda e: self._on_ok())
+        self._dlg.bind("<Escape>", lambda e: self._on_cancel())
+        self._dlg.wait_window()
+
+    def _on_search(self) -> None:
+        data = self._hex.get_data()
+        if not data:
+            messagebox.showerror("Import", "No ROM loaded.")
+            return
+        w_lo, w_hi_ex, w_err = parse_ff_gap_search_window_strings(data, self._from_var.get(), self._to_var.get())
+        if w_err:
+            messagebox.showerror("Import", w_err)
+            return
+        gap = find_disjoint_ff_gap_start(
+            data,
+            self._need,
+            0,
+            0,
+            window_lo=w_lo,
+            window_hi=w_hi_ex,
+        )
+        if gap is None:
+            messagebox.showerror(
+                "Import",
+                f"No qualifying block of {self._need} consecutive 0xFF byte(s) was found. "
+                "Adjust the search range or enter an offset manually.",
+            )
+            return
+        self._off_var.set(f"0x{gap:X}")
+
+    def _on_ok(self) -> None:
+        data = self._hex.get_data()
+        if not data:
+            self._dlg.destroy()
+            return
+        s = self._off_var.get().strip()
+        if not s:
+            messagebox.showwarning("Import", "Enter a file offset, or use Search FF gap.")
+            return
+        off, err = parse_rom_file_offset(s)
+        if off is None:
+            messagebox.showwarning("Import", err)
+            return
+        if off + self._need > len(data):
+            messagebox.showerror(
+                "Import",
+                f"ROM too small: need {self._need} byte(s) from file offset 0x{off:X}, "
+                f"but ROM ends at 0x{len(data):X}.",
+            )
+            return
+        self.result = off
+        self._dlg.destroy()
+
+    def _on_cancel(self) -> None:
+        self._dlg.destroy()
+
+
+class _SpriteImportOptionsDialog:
+    """4bpp/8bpp + optional LZ for static sprite import."""
+
+    def __init__(self, parent: tk.Misc, png_path: str) -> None:
+        self.result: Optional[Tuple[int, bool]] = None
+        self._dlg = tk.Toplevel(parent)
+        self._dlg.title("Import sprite — options")
+        self._dlg.transient(parent)
+        self._dlg.grab_set()
+        f = ttk.Frame(self._dlg, padding=10)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(f, text=f"File:\n{png_path}", wraplength=420).grid(row=0, column=0, columnspan=2, sticky="w")
+        self._bpp = tk.IntVar(value=4)
+        bf = ttk.Frame(f)
+        bf.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(bf, text="Tile format:").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Radiobutton(bf, text="4bpp", variable=self._bpp, value=4).pack(side=tk.LEFT, padx=4)
+        ttk.Radiobutton(bf, text="8bpp", variable=self._bpp, value=8).pack(side=tk.LEFT, padx=4)
+        self._lz = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            f,
+            text="Compress with LZ77 (0x10)",
+            variable=self._lz,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        btnf = ttk.Frame(f)
+        btnf.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
+        self._dlg.bind("<Escape>", lambda e: self._on_cancel())
+        self._dlg.wait_window()
+
+    def _on_ok(self) -> None:
+        self.result = (int(self._bpp.get()), bool(self._lz.get()))
+        self._dlg.destroy()
+
+    def _on_cancel(self) -> None:
+        self._dlg.destroy()
+
+
+class _PaletteImportOptionsDialog:
+    """4bpp / 8bpp, optional 8bpp color count (multiple of 16), optional LZ."""
+
+    def __init__(self, parent: tk.Misc, *, is_png: bool) -> None:
+        self.result: Optional[Tuple[int, bool, int]] = None  # bpp, lz, colors_8bpp (meaningful if bpp==8)
+        self._is_png = is_png
+        self._dlg = tk.Toplevel(parent)
+        self._dlg.title("Import palette — options")
+        self._dlg.transient(parent)
+        self._dlg.grab_set()
+        f = ttk.Frame(self._dlg, padding=10)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            f,
+            text=(
+                "PNG: quantized to a 4bpp (16-color) or 8bpp master palette.\n"
+                if is_png
+                else (
+                    "Standard .pal / .gpl: JASC-PAL, GIMP, or Tilemap Studio assembly RGB "
+                    "(then converted to GBA RGB555).\n"
+                    "Raw GBA palette bytes: use a .bin file.\n"
+                )
+            ),
+            wraplength=420,
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        self._bpp = tk.IntVar(value=4)
+        self._bpp_row = ttk.Frame(f)
+        self._bpp_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(self._bpp_row, text="Mode:").pack(side=tk.LEFT, padx=(0, 8))
+
+        def _sync_bpp(*_a: Any) -> None:
+            if int(self._bpp.get()) == 8:
+                self._c8_wrap.grid(row=2, column=0, columnspan=2, sticky="ew")
+            else:
+                self._c8_wrap.grid_remove()
+
+        ttk.Radiobutton(
+            self._bpp_row,
+            text="4bpp (16 colors, 32 bytes)",
+            variable=self._bpp,
+            value=4,
+            command=_sync_bpp,
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Radiobutton(
+            self._bpp_row,
+            text="8bpp",
+            variable=self._bpp,
+            value=8,
+            command=_sync_bpp,
+        ).pack(side=tk.LEFT, padx=4)
+
+        self._c8_wrap = ttk.Frame(f)
+        self._c8_frame = ttk.Frame(self._c8_wrap)
+        self._c8_frame.pack(anchor="w")
+        ttk.Label(
+            self._c8_frame,
+            text="8bpp color count (multiple of 16; unused slots filled with black):",
+            font=("TkDefaultFont", 9),
+        ).grid(row=0, column=0, sticky="w")
+        self._colors_8 = tk.StringVar(value="256")
+        self._c8_combo = ttk.Combobox(
+            self._c8_frame,
+            textvariable=self._colors_8,
+            values=[str(x) for x in range(16, 257, 16)],
+            width=5,
+            state="readonly",
+        )
+        self._c8_combo.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self._c8_bytes_lbl = ttk.Label(self._c8_frame, text="", font=("Consolas", 8), foreground="#666")
+        self._c8_bytes_lbl.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        def _upd_bytes(*_a: Any) -> None:
+            try:
+                n = int(self._colors_8.get())
+            except (ValueError, tk.TclError):
+                n = 256
+            self._c8_bytes_lbl.configure(text=f"ROM size: {n * 2} bytes (0x{n * 2:X})")
+
+        self._colors_8.trace_add("write", lambda *_: _upd_bytes())
+        _upd_bytes()
+        _sync_bpp()
+
+        self._lz = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            f,
+            text="Compress with LZ77 (0x10)",
+            variable=self._lz,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        btnf = ttk.Frame(f)
+        btnf.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
+        self._dlg.bind("<Escape>", lambda e: self._on_cancel())
+        self._dlg.wait_window()
+
+    def _on_ok(self) -> None:
+        bpp = int(self._bpp.get())
+        lz = bool(self._lz.get())
+        try:
+            n_raw = int(self._colors_8.get())
+        except (ValueError, tk.TclError):
+            n_raw = 256
+        if bpp == 8:
+            try:
+                n8 = parse_8bpp_palette_color_count(n_raw)
+            except ValueError as e:
+                messagebox.showwarning("Import palette", str(e))
+                return
+        else:
+            n8 = 16
+        self.result = (bpp, lz, n8)
+        self._dlg.destroy()
+
+    def _on_cancel(self) -> None:
+        self._dlg.destroy()
+
+
+class _TilemapImportModeDialog:
+    """How to import: raw blob, full PNG tilemap, or PNG tileset sheet."""
+
+    def __init__(self, parent: tk.Misc) -> None:
+        self.result: Optional[str] = None
+        self._dlg = tk.Toplevel(parent)
+        self._dlg.title("Import tilemap / tileset")
+        self._dlg.transient(parent)
+        self._dlg.grab_set()
+        f = ttk.Frame(self._dlg, padding=10)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            f,
+            text=(
+                "• Raw binary — any .bin (e.g. exported map or tile bytes).\n"
+                "• PNG tilemap — full map image → map + tileset + palette (same as Tools graphics).\n"
+                "• PNG tileset — one sprite sheet → tile data only."
+            ),
+            wraplength=420,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, sticky="w")
+        self._mode = tk.StringVar(value="raw")
+        ttk.Radiobutton(f, text="Raw binary file", variable=self._mode, value="raw").grid(
+            row=1, column=0, sticky="w", pady=(8, 0)
+        )
+        ttk.Radiobutton(f, text="PNG tilemap (image → map + tiles + palette)", variable=self._mode, value="png_map").grid(
+            row=2, column=0, sticky="w"
+        )
+        ttk.Radiobutton(f, text="PNG tileset (sprite sheet)", variable=self._mode, value="png_ts").grid(
+            row=3, column=0, sticky="w"
+        )
+        btnf = ttk.Frame(f)
+        btnf.grid(row=4, column=0, sticky="e", pady=(12, 0))
+        ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
+        self._dlg.bind("<Escape>", lambda e: self._on_cancel())
+        self._dlg.wait_window()
+
+    def _on_ok(self) -> None:
+        self.result = self._mode.get()
+        self._dlg.destroy()
+
+    def _on_cancel(self) -> None:
+        self._dlg.destroy()
+
+
+class _TilemapPngDimsDialog:
+    """Map size in tiles + bpp for static PNG tilemap import."""
+
+    def __init__(self, parent: tk.Misc) -> None:
+        self.result: Optional[Tuple[int, int, int]] = None
+        self.skip_palette = False
+        self._dlg = tk.Toplevel(parent)
+        self._dlg.title("PNG tilemap — size")
+        self._dlg.transient(parent)
+        self._dlg.grab_set()
+        f = ttk.Frame(self._dlg, padding=10)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            f,
+            text="PNG must match map width×height in tiles (8 px per tile).",
+            wraplength=400,
+        ).grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(f, text="Width (tiles):").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self._mw = tk.StringVar(value="32")
+        ttk.Entry(f, textvariable=self._mw, width=8).grid(row=1, column=1, sticky="w", pady=(8, 0))
+        ttk.Label(f, text="Height (tiles):").grid(row=1, column=2, sticky="w", padx=(12, 0), pady=(8, 0))
+        self._mh = tk.StringVar(value="20")
+        ttk.Entry(f, textvariable=self._mh, width=8).grid(row=1, column=3, sticky="w", pady=(8, 0))
+        self._bpp = tk.IntVar(value=4)
+        bf = ttk.Frame(f)
+        bf.grid(row=2, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Label(bf, text="BPP:").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Radiobutton(bf, text="4", variable=self._bpp, value=4).pack(side=tk.LEFT, padx=4)
+        ttk.Radiobutton(bf, text="8", variable=self._bpp, value=8).pack(side=tk.LEFT, padx=4)
+        self._skip_pal = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            f,
+            text="Skip writing palette (tileset + map only)",
+            variable=self._skip_pal,
+        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        btnf = ttk.Frame(f)
+        btnf.grid(row=4, column=0, columnspan=4, sticky="e", pady=(12, 0))
+        ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
+        self._dlg.bind("<Escape>", lambda e: self._on_cancel())
+        self._dlg.wait_window()
+
+    def _on_ok(self) -> None:
+        try:
+            mw = int(self._mw.get().strip(), 0)
+            mh = int(self._mh.get().strip(), 0)
+        except ValueError:
+            messagebox.showwarning("Import", "Width and height must be integers.")
+            return
+        if mw < 1 or mh < 1:
+            messagebox.showwarning("Import", "Width and height must be ≥ 1.")
+            return
+        self.result = (mw, mh, int(self._bpp.get()))
+        self.skip_palette = bool(self._skip_pal.get())
         self._dlg.destroy()
 
     def _on_cancel(self) -> None:
@@ -7147,6 +7535,271 @@ Format = "`f|u8`[u8 arg0]"
                 self._data[offset + i] = b
         self._modified = True
         self._refresh_visible()
+
+    # ── File menu: static ROM imports (user-chosen offsets / FF gaps) ─
+
+    def file_import_sprite_static(self) -> None:
+        """File → Import Sprite: PNG → tiles at a file offset (optional LZ); does not patch pointers."""
+        parent = self.winfo_toplevel()
+        if not self._data:
+            messagebox.showwarning("Import sprite", "No ROM loaded.")
+            return
+        path = filedialog.askopenfilename(
+            title="Import sprite — PNG",
+            filetypes=[("PNG images", "*.png"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        opt = _SpriteImportOptionsDialog(parent, path)
+        if opt.result is None:
+            return
+        bpp, lz = opt.result
+        stub = GraphicsAnchorSpec(kind="sprite", bpp=bpp, lz=False, width_tiles=1, height_tiles=1)
+        tb, _pb, err, tw, th = sprite_import_png(path, stub)
+        if err:
+            messagebox.showerror("Import sprite", err)
+            return
+        spec = GraphicsAnchorSpec(kind="sprite", bpp=bpp, lz=lz, width_tiles=tw, height_tiles=th)
+        try:
+            payload = build_sprite_payload_for_rom(tb, spec, lz=lz)
+        except ValueError as e:
+            messagebox.showerror("Import sprite", str(e))
+            return
+        dest = _StaticRomOffsetDialog(
+            parent,
+            self,
+            len(payload),
+            "Import sprite — destination",
+            blurb=f"Sprite sheet {tw}×{th} tiles ({tw * 8}×{th * 8} px).",
+        )
+        if dest.result is None:
+            return
+        off = dest.result
+        self.write_bytes_at(off, payload)
+        gba = off + GBA_ROM_BASE
+        messagebox.showinfo(
+            "Import sprite",
+            f"Wrote {len(payload)} byte(s) at file offset 0x{off:X} (GBA 0x{gba:08X}).",
+        )
+
+    def file_import_palette_static(self) -> None:
+        """File → Import Palette: PNG, standard text .pal/.gpl, or raw GBA .bin (optional LZ)."""
+        parent = self.winfo_toplevel()
+        if not self._data:
+            messagebox.showwarning("Import palette", "No ROM loaded.")
+            return
+        path = filedialog.askopenfilename(
+            title="Import palette",
+            filetypes=[
+                ("All supported", "*.png;*.pal;*.gpl;*.bin"),
+                ("PNG", "*.png"),
+                ("Standard palette (JASC / GIMP / asm RGB)", "*.pal;*.gpl"),
+                ("Raw GBA RGB555 binary", "*.bin"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        low = path.lower()
+        is_png = low.endswith(".png")
+        opt = _PaletteImportOptionsDialog(parent, is_png=is_png)
+        if opt.result is None:
+            return
+        bpp, lz, n_colors_8 = opt.result
+        kw: Dict[str, Any] = {}
+        if bpp == 8:
+            kw["colors_8bpp"] = n_colors_8
+        if is_png:
+            pal_body, err = palette_import_png(path, bpp, **kw)
+            if err:
+                messagebox.showerror("Import palette", err)
+                return
+        elif low.endswith(".bin"):
+            pal_body, err = palette_import_gba_binary(path, bpp, **kw)
+            if err:
+                messagebox.showerror("Import palette", err)
+                return
+        else:
+            pal_body, err = palette_import_palette_file(path, bpp, **kw)
+            if err:
+                messagebox.showerror("Import palette", err)
+                return
+        pal_spec = GraphicsAnchorSpec(kind="palette", bpp=bpp, lz=lz)
+        try:
+            payload = palette_payload_for_rom(pal_body, pal_spec, lz=lz)
+        except ValueError as e:
+            messagebox.showerror("Import palette", str(e))
+            return
+        dest = _StaticRomOffsetDialog(
+            parent,
+            self,
+            len(payload),
+            "Import palette — destination",
+        )
+        if dest.result is None:
+            return
+        off = dest.result
+        self.write_bytes_at(off, payload)
+        gba = off + GBA_ROM_BASE
+        messagebox.showinfo(
+            "Import palette",
+            f"Wrote {len(payload)} byte(s) at file offset 0x{off:X} (GBA 0x{gba:08X}).",
+        )
+
+    def file_import_tilemap_tileset_static(self) -> None:
+        """File → Import Tilemap/Tileset: raw blob, PNG tilemap pipeline, or PNG tileset sheet."""
+        parent = self.winfo_toplevel()
+        if not self._data:
+            messagebox.showwarning("Import tilemap/tileset", "No ROM loaded.")
+            return
+        mode_dlg = _TilemapImportModeDialog(parent)
+        if mode_dlg.result is None:
+            return
+        mode = mode_dlg.result
+
+        if mode == "raw":
+            path = filedialog.askopenfilename(
+                title="Import raw tilemap or tileset bytes",
+                filetypes=[("Binary", "*.bin"), ("All files", "*.*")],
+            )
+            if not path:
+                return
+            try:
+                with open(path, "rb") as f:
+                    blob = f.read()
+            except OSError as e:
+                messagebox.showerror("Import", str(e))
+                return
+            if not blob:
+                messagebox.showerror("Import", "File is empty.")
+                return
+            dest = _StaticRomOffsetDialog(
+                parent,
+                self,
+                len(blob),
+                "Import raw data — destination",
+                blurb="Writes the file bytes unchanged.",
+            )
+            if dest.result is None:
+                return
+            off = dest.result
+            self.write_bytes_at(off, blob)
+            messagebox.showinfo(
+                "Import",
+                f"Wrote {len(blob)} byte(s) at file offset 0x{off:X} (GBA 0x{off + GBA_ROM_BASE:08X}).",
+            )
+            return
+
+        if mode == "png_ts":
+            path = filedialog.askopenfilename(
+                title="Import tileset — PNG",
+                filetypes=[("PNG images", "*.png"), ("All files", "*.*")],
+            )
+            if not path:
+                return
+            opt = _SpriteImportOptionsDialog(parent, path)
+            if opt.result is None:
+                return
+            bpp, lz = opt.result
+            stub = GraphicsAnchorSpec(kind="sprite", bpp=bpp, lz=False, width_tiles=1, height_tiles=1)
+            tb, _pb, err, tw, th = sprite_import_png(path, stub)
+            if err:
+                messagebox.showerror("Import tileset", err)
+                return
+            spec = GraphicsAnchorSpec(kind="sprite", bpp=bpp, lz=lz, width_tiles=tw, height_tiles=th)
+            try:
+                payload = build_sprite_payload_for_rom(tb, spec, lz=lz)
+            except ValueError as e:
+                messagebox.showerror("Import tileset", str(e))
+                return
+            dest = _StaticRomOffsetDialog(
+                parent,
+                self,
+                len(payload),
+                "Import tileset — destination",
+                blurb=f"Tile sheet {tw}×{th} tiles.",
+            )
+            if dest.result is None:
+                return
+            off = dest.result
+            self.write_bytes_at(off, payload)
+            messagebox.showinfo(
+                "Import tileset",
+                f"Wrote {len(payload)} byte(s) at file offset 0x{off:X} (GBA 0x{off + GBA_ROM_BASE:08X}).",
+            )
+            return
+
+        # png_map
+        dim = _TilemapPngDimsDialog(parent)
+        if dim.result is None:
+            return
+        mw, mh, bpp = dim.result
+        skip_pal = bool(getattr(dim, "skip_palette", False))
+        path = filedialog.askopenfilename(
+            title="Import tilemap — PNG",
+            filetypes=[("PNG images", "*.png"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        raw_map, tile_body, pal_flat, n_u, err = tilemap_png_to_tileset_map_palette(
+            path,
+            map_w_tiles=mw,
+            map_h_tiles=mh,
+            bpp=bpp,
+        )
+        if err:
+            messagebox.showerror("Import tilemap", err)
+            return
+        dest_map = _StaticRomOffsetDialog(
+            parent,
+            self,
+            len(raw_map),
+            "Import tilemap — map destination",
+            blurb=f"Non-affine map: {mw}×{mh} cells, {len(raw_map)} bytes.",
+        )
+        if dest_map.result is None:
+            return
+        dest_ts = _StaticRomOffsetDialog(
+            parent,
+            self,
+            len(tile_body),
+            "Import tilemap — tileset destination",
+            blurb=f"Unique tiles: {n_u} ({len(tile_body)} bytes).",
+        )
+        if dest_ts.result is None:
+            return
+
+        pal_payload = b""
+        pal_off: Optional[int] = None
+        if not skip_pal:
+            pal_spec = GraphicsAnchorSpec(kind="palette", bpp=bpp, lz=False)
+            try:
+                pal_payload = palette_payload_for_rom(pal_flat, pal_spec, lz=False)
+            except ValueError as e:
+                messagebox.showerror("Import tilemap", str(e))
+                return
+            dpal = _StaticRomOffsetDialog(
+                parent,
+                self,
+                len(pal_payload),
+                "Import tilemap — palette destination",
+                blurb="Quantized master palette for this map.",
+            )
+            if dpal.result is None:
+                return
+            pal_off = dpal.result
+
+        self.write_bytes_at(dest_map.result, raw_map)
+        self.write_bytes_at(dest_ts.result, tile_body)
+        if not skip_pal and pal_off is not None:
+            self.write_bytes_at(pal_off, pal_payload)
+        msg = (
+            f"Map: {len(raw_map)} byte(s) at 0x{dest_map.result:X}.\n"
+            f"Tileset: {len(tile_body)} byte(s) at 0x{dest_ts.result:X}."
+        )
+        if not skip_pal and pal_off is not None:
+            msg += f"\nPalette: {len(pal_payload)} byte(s) at 0x{pal_off:X}."
+        messagebox.showinfo("Import tilemap", msg)
 
     # ── Scrolling ────────────────────────────────────────────────────
 
