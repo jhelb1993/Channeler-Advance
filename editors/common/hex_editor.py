@@ -225,6 +225,11 @@ def devkit_tool(name: str) -> str:
     return name
 
 
+# Anchor browser: virtual folder for ``pokefirered.sym`` (segment must not contain ".")
+ANCHOR_SYM_BROWSER_LABEL = "pokefirered.sym"
+ANCHOR_SYM_BROWSER_SEGMENT = "sym"
+
+
 def load_pokefirered_sym_name_to_addr(path: Optional[str] = None) -> Dict[str, int]:
     """Map symbol name -> address (field 0). On duplicate names, keep higher-priority ``g``/``l`` entry."""
     p = path or _pokefirered_sym_default_path()
@@ -6411,6 +6416,8 @@ class HexEditorFrame(ttk.Frame):
         self._anchor_browser_pane_visible = False
         self._anchor_tools_pane_layout: bool = False  # True when Anchors + Tools share a horizontal PanedWindow
         self._anchor_browser_path: List[str] = []
+        self._anchor_sym_filter_var = tk.StringVar(value="")
+        self._sym_browser_rom_list: Optional[List[Tuple[str, int]]] = None  # (name, file_off) ROM only, sorted
         self._ldr_pc_targets: Optional[Set[int]] = None
         self._ldr_pc_targets_valid = False
         # Reverse refs: file offset T -> list of source file offsets (word pointers / BL sites)
@@ -6644,7 +6651,19 @@ class HexEditorFrame(ttk.Frame):
         # Function/NamedAnchor browser: hierarchical nav (1st -> 2nd -> 3rd order), Ctrl+M
         self._anchor_frame = ttk.LabelFrame(body, text=" Anchors ", padding=2)
         self._anchor_frame.columnconfigure(0, weight=1)
-        self._anchor_frame.rowconfigure(0, weight=1)
+        self._anchor_frame.rowconfigure(1, weight=1)
+        self._anchor_sym_filter_frame = ttk.Frame(self._anchor_frame)
+        ttk.Label(self._anchor_sym_filter_frame, text="sym filter:", font=("Consolas", 8)).pack(
+            side=tk.LEFT, padx=(0, 4)
+        )
+        self._anchor_sym_filter_entry = ttk.Entry(
+            self._anchor_sym_filter_frame,
+            textvariable=self._anchor_sym_filter_var,
+            width=32,
+            font=("Consolas", 8),
+        )
+        self._anchor_sym_filter_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._anchor_sym_filter_entry.bind("<KeyRelease>", self._on_anchor_sym_filter_keyrelease)
         self._scroll_anchor = tk.Scrollbar(self._anchor_frame)
         self._scroll_anchor_h = tk.Scrollbar(self._anchor_frame, orient=tk.HORIZONTAL)
         self._listbox_anchor = tk.Listbox(
@@ -6655,15 +6674,17 @@ class HexEditorFrame(ttk.Frame):
         )
         self._scroll_anchor.configure(command=self._listbox_anchor.yview)
         self._scroll_anchor_h.configure(command=self._listbox_anchor.xview)
-        self._listbox_anchor.grid(row=0, column=0, sticky="nsew")
-        self._scroll_anchor.grid(row=0, column=1, sticky="ns")
-        self._scroll_anchor_h.grid(row=1, column=0, sticky="ew")
-        ttk.Frame(self._anchor_frame, width=12).grid(row=1, column=1, sticky="se")
+        self._listbox_anchor.grid(row=1, column=0, sticky="nsew")
+        self._scroll_anchor.grid(row=1, column=1, sticky="ns")
+        self._scroll_anchor_h.grid(row=2, column=0, sticky="ew")
+        ttk.Frame(self._anchor_frame, width=12).grid(row=2, column=1, sticky="se")
         self._listbox_anchor.bind("<Double-Button-1>", self._on_anchor_browser_double_click)
+        self._anchor_sym_filter_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self._anchor_sym_filter_frame.grid_remove()
 
         def _anchor_scroll(delta: int) -> None:
             self._listbox_anchor.yview_scroll(-delta, "units")
-        for w in (self._listbox_anchor, self._anchor_frame):
+        for w in (self._listbox_anchor, self._anchor_frame, self._anchor_sym_filter_frame, self._anchor_sym_filter_entry):
             w.bind("<MouseWheel>", lambda e: _anchor_scroll(int((e.delta or 0) / 120)))
             w.bind("<Button-4>", lambda e: _anchor_scroll(3))
             w.bind("<Button-5>", lambda e: _anchor_scroll(-3))
@@ -6741,6 +6762,7 @@ class HexEditorFrame(ttk.Frame):
         _bind_anchor_toggle(self._text_pseudo_c)
         _bind_anchor_toggle(self._anchor_frame)
         _bind_anchor_toggle(self._listbox_anchor)
+        _bind_anchor_toggle(self._anchor_sym_filter_entry)
         _bind_anchor_toggle(outer)
         self.winfo_toplevel().bind("<Control-m>", self._toggle_anchor_browser_pane, add=True)
         self.winfo_toplevel().bind("<Control-M>", self._toggle_anchor_browser_pane, add=True)
@@ -6753,6 +6775,7 @@ class HexEditorFrame(ttk.Frame):
         _bind_goto(self._text_asm)
         _bind_goto(self._pseudo_c_frame)
         _bind_goto(self._text_pseudo_c)
+        _bind_goto(self._anchor_sym_filter_entry)
         _bind_goto(outer)
         self.winfo_toplevel().bind("<Control-g>", self._focus_goto_entry, add=True)
         self.winfo_toplevel().bind("<Control-G>", self._focus_goto_entry, add=True)
@@ -7631,13 +7654,49 @@ class HexEditorFrame(ttk.Frame):
         self.after_idle(self._refresh_visible)
         return "break"
 
+    def _on_anchor_sym_filter_keyrelease(self, event: Optional[tk.Event] = None) -> None:
+        """Refresh symbol list while typing the filter (``pokefirered.sym`` browser only)."""
+        if self._anchor_browser_path == [ANCHOR_SYM_BROWSER_SEGMENT]:
+            self._refresh_anchor_browser()
+
+    def _ensure_sym_browser_rom_list(self) -> None:
+        """Build sorted (name, file_off) list for ROM symbols from ``pokefirered.sym`` (cached)."""
+        if self._sym_browser_rom_list is not None:
+            return
+        sym = load_pokefirered_sym_name_to_addr()
+        lst: List[Tuple[str, int]] = []
+        for name, addr in sym.items():
+            if GBA_ROM_BASE <= addr <= GBA_ROM_MAX:
+                lst.append((name, addr - GBA_ROM_BASE))
+        lst.sort(key=lambda t: t[0].lower())
+        self._sym_browser_rom_list = lst
+
+    def _get_pokefirered_sym_browser_items(self) -> List[Tuple[str, Optional[int]]]:
+        """List ROM symbols from ``pokefirered.sym`` with optional substring filter."""
+        self._ensure_sym_browser_rom_list()
+        filt = (self._anchor_sym_filter_var.get() or "").strip().lower()
+        if not os.path.isfile(_pokefirered_sym_default_path()):
+            return [("(pokefirered.sym not found)", -2)]
+        if not self._sym_browser_rom_list:
+            return [("(no ROM symbols in pokefirered.sym)", -2)]
+        out: List[Tuple[str, Optional[int]]] = []
+        for name, fo in self._sym_browser_rom_list:
+            if filt and filt not in name.lower():
+                continue
+            out.append((name, fo))
+        if not out:
+            return [("(no ROM symbols match filter)", -2)]
+        return out
+
     def _get_anchor_browser_items(self) -> List[Tuple[str, Optional[int]]]:
         """Return [(display_text, address_or_none), ...]. address is set for leaves (full anchor names).
         Includes both FunctionAnchors and NamedAnchors."""
+        path = self._anchor_browser_path
+        if path == [ANCHOR_SYM_BROWSER_SEGMENT]:
+            return self._get_pokefirered_sym_browser_items()
         funcs = self._toml_data.get("FunctionAnchors", [])
         named = self._toml_data.get("NamedAnchors", [])
         anchors = list(funcs) + [a for a in named if a.get("Address") is not None]
-        path = self._anchor_browser_path
         prefix = ".".join(path) + "." if path else ""
         branches: Set[str] = set()
         leaves: List[Tuple[str, int]] = []
@@ -7675,6 +7734,8 @@ class HexEditorFrame(ttk.Frame):
                             leaves.append((name, 0))
                 else:
                     branches.add(parts[0])
+        if not path:
+            branches.add(ANCHOR_SYM_BROWSER_LABEL)
         result: List[Tuple[str, Optional[int]]] = []
         for b in sorted(branches):
             result.append((b, None))
@@ -7684,6 +7745,11 @@ class HexEditorFrame(ttk.Frame):
 
     def _refresh_anchor_browser(self) -> None:
         """Populate the anchor browser Listbox from current path."""
+        if self._anchor_browser_path == [ANCHOR_SYM_BROWSER_SEGMENT]:
+            self._anchor_sym_filter_frame.grid()
+            self.after_idle(lambda: self._anchor_sym_filter_entry.focus_set())
+        else:
+            self._anchor_sym_filter_frame.grid_remove()
         self._listbox_anchor.delete(0, tk.END)
         items: List[Tuple[str, Optional[int]]] = []
         if self._anchor_browser_path:
@@ -7706,10 +7772,17 @@ class HexEditorFrame(ttk.Frame):
         display, address = items[idx]
         if address == -1:
             self._anchor_browser_path = self._anchor_browser_path[:-1]
+            if not self._anchor_browser_path:
+                self._anchor_sym_filter_var.set("")
             self._refresh_anchor_browser()
             return
+        if address == -2:
+            return
         if address is None:
-            self._anchor_browser_path = display.split(".")
+            if display == ANCHOR_SYM_BROWSER_LABEL:
+                self._anchor_browser_path = self._anchor_browser_path + [ANCHOR_SYM_BROWSER_SEGMENT]
+            else:
+                self._anchor_browser_path = display.split(".")
             self._refresh_anchor_browser()
             return
         self._do_goto(address)
