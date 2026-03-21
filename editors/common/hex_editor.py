@@ -10,7 +10,9 @@ import os
 import re
 import shutil
 import string
+import subprocess
 import sys
+import tempfile
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
@@ -141,6 +143,170 @@ except ImportError:
 
 GBA_ROM_BASE = 0x08000000
 GBA_ROM_MAX = 0x09FFFFFF  # addresses > this are not ROM code pointers; treat as code, not .word
+
+
+def _channeler_repo_root() -> str:
+    """Parent of ``editors/``; ``hex_editor.py`` is under ``editors/common/``."""
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _pokefirered_sym_default_path() -> str:
+    return os.path.join(_channeler_repo_root(), "pokefirered.sym")
+
+
+def _pokefirered_include_dir_default() -> str:
+    return os.path.join(_channeler_repo_root(), "editors", "firered", "pokefirered", "include")
+
+
+def _sym_type_priority(typ: str) -> int:
+    """Higher wins when ``pokefirered.sym`` has duplicate addresses."""
+    t = (typ or "").strip()
+    if t in ("T", "t", "D", "d", "R", "r"):
+        return 4
+    if t in ("g", "G"):
+        return 3
+    if t in ("l", "L"):
+        return 1
+    return 2
+
+
+def load_pokefirered_sym_norm_to_name(path: Optional[str] = None) -> Dict[int, str]:
+    """Parse ``pokefirered.sym``: address field 0, symbol field 3 (0-based). Keys are ``addr & ~1``."""
+    p = path or _pokefirered_sym_default_path()
+    out: Dict[int, str] = {}
+    pri: Dict[int, int] = {}
+    if not os.path.isfile(p):
+        return out
+    with open(p, "r", encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "//" in line:
+                line = line.split("//", 1)[0].strip()
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            try:
+                addr = int(parts[0], 16)
+            except ValueError:
+                continue
+            stype = parts[1]
+            name = parts[3]
+            if not name or not re.match(r"^[A-Za-z_]\w*$", name):
+                continue
+            norm = addr & ~1
+            pr = _sym_type_priority(stype)
+            if norm not in out or pr >= pri.get(norm, 0):
+                out[norm] = name
+                pri[norm] = pr
+    return out
+
+
+def find_devkitarm_bin_dir() -> Optional[str]:
+    """Directory containing ``arm-none-eabi-gcc``, or ``None`` / ``\"\"`` to use ``PATH``."""
+    if sys.platform.startswith("win"):
+        path_var = os.environ.get("Path") or os.environ.get("PATH") or ""
+        for candidate in path_var.split(";"):
+            if "devkitARM" in candidate and os.path.isdir(candidate):
+                return candidate
+        default = os.path.join("C:", os.sep, "devkitPro", "devkitARM", "bin")
+        if os.path.isdir(default):
+            return default
+        return None
+    return ""
+
+
+def devkit_tool(name: str) -> str:
+    """``arm-none-eabi-gcc`` etc.: full path on Windows when devkitARM is found."""
+    d = find_devkitarm_bin_dir()
+    if d:
+        return os.path.join(d, name)
+    return name
+
+
+def load_pokefirered_sym_name_to_addr(path: Optional[str] = None) -> Dict[str, int]:
+    """Map symbol name -> address (field 0). On duplicate names, keep higher-priority ``g``/``l`` entry."""
+    p = path or _pokefirered_sym_default_path()
+    out: Dict[str, int] = {}
+    pri: Dict[str, int] = {}
+    if not os.path.isfile(p):
+        return out
+    with open(p, "r", encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "//" in line:
+                line = line.split("//", 1)[0].strip()
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            try:
+                addr = int(parts[0], 16)
+            except ValueError:
+                continue
+            stype = parts[1]
+            name = parts[3]
+            if not name or not re.match(r"^[A-Za-z_]\w*$", name):
+                continue
+            if name.startswith(".") and name != ".":
+                continue
+            pr = _sym_type_priority(stype)
+            if name not in out or pr >= pri.get(name, 0):
+                out[name] = addr
+                pri[name] = pr
+    return out
+
+
+def load_channeler_c_inject_rom_data_symbol_names() -> Set[str]:
+    """Symbols in ROM that are data labels (even address); one name per line, ``#`` comments."""
+    p = os.path.join(_channeler_repo_root(), "rom.txt")
+    out: Set[str] = set()
+    if not os.path.isfile(p):
+        return out
+    with open(p, "r", encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if not re.match(r"^[A-Za-z_]\w*$", line):
+                continue
+            out.add(line)
+    return out
+
+
+def link_defsym_value_for_rom_sym(addr: int, name: str, rom_data_names: Set[str]) -> int:
+    """ROM Thumb code uses ``addr|1``; ROM data labels use even ``addr`` (see override file)."""
+    if GBA_ROM_BASE <= addr <= GBA_ROM_MAX:
+        if name in rom_data_names:
+            return addr & ~1
+        return addr | 1
+    return addr
+
+
+def collect_nm_undefined_symbols(nm_exe: str, obj_path: str) -> Tuple[List[str], str]:
+    """Symbols marked ``U`` in ``nm -u`` output. On failure, second element is an error string."""
+    try:
+        r = subprocess.run(
+            [nm_exe, "-u", obj_path],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as e:
+        return [], str(e)
+    if r.returncode != 0:
+        return [], (r.stderr or r.stdout or "nm failed").strip()
+    names: List[str] = []
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[-2] == "U":
+            names.append(parts[-1])
+        elif len(parts) == 2 and parts[0] == "U":
+            names.append(parts[1])
+    return names, ""
+
+
 GBA_EWRAM_START = 0x02000000
 GBA_EWRAM_END = 0x0203FFFF
 GBA_IWRAM_START = 0x03000000
@@ -6110,6 +6276,8 @@ class HexEditorFrame(ttk.Frame):
         self._hackmew_asm_start: Optional[int] = None
         self._hackmew_asm_end: Optional[int] = None
         self._pseudo_c_pane_visible = False
+        self._c_inject_mode = False
+        self._pokefirered_sym_norm_to_name: Optional[Dict[int, str]] = None
         self._anchor_browser_pane_visible = False
         self._anchor_tools_pane_layout: bool = False  # True when Anchors + Tools share a horizontal PanedWindow
         self._anchor_browser_path: List[str] = []
@@ -6250,7 +6418,21 @@ class HexEditorFrame(ttk.Frame):
         self._pseudo_c_frame = ttk.LabelFrame(body, text=" Pseudo-C ", padding=2)
         self._pseudo_c_frame.grid(row=1, column=4, sticky="nsew", padx=(4, 0))
         self._pseudo_c_frame.columnconfigure(0, weight=1)
-        self._pseudo_c_frame.rowconfigure(0, weight=1)
+        self._pseudo_c_frame.rowconfigure(1, weight=1)
+        self._c_inject_offset_var = tk.StringVar(value="")
+        self._c_inject_size_var = tk.StringVar(value="—")
+        pc_toolbar = ttk.Frame(self._pseudo_c_frame)
+        pc_toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 2))
+        ttk.Label(pc_toolbar, text="Inject @", font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 2))
+        self._c_inject_offset_entry = ttk.Entry(
+            pc_toolbar, textvariable=self._c_inject_offset_var, width=20, font=("Consolas", 8)
+        )
+        self._c_inject_offset_entry.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(pc_toolbar, text="Compiled:", font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Label(pc_toolbar, textvariable=self._c_inject_size_var, font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(pc_toolbar, text="Ctrl+Shift+4 edit · 5 compile", font=("Consolas", 8), foreground="#555").pack(
+            side=tk.LEFT
+        )
         self._scroll_pseudo_c = tk.Scrollbar(self._pseudo_c_frame)
         self._scroll_pseudo_c_h = tk.Scrollbar(self._pseudo_c_frame, orient=tk.HORIZONTAL)
         self._text_pseudo_c = tk.Text(
@@ -6263,9 +6445,9 @@ class HexEditorFrame(ttk.Frame):
         self._text_pseudo_c.configure(yscrollcommand=self._scroll_pseudo_c.set, xscrollcommand=self._scroll_pseudo_c_h.set)
         self._scroll_pseudo_c.configure(command=self._text_pseudo_c.yview)
         self._scroll_pseudo_c_h.configure(command=self._text_pseudo_c.xview)
-        self._text_pseudo_c.grid(row=0, column=0, sticky="nsew")
-        self._scroll_pseudo_c.grid(row=0, column=1, sticky="ns")
-        self._scroll_pseudo_c_h.grid(row=1, column=0, sticky="ew")
+        self._text_pseudo_c.grid(row=1, column=0, sticky="nsew")
+        self._scroll_pseudo_c.grid(row=1, column=1, sticky="ns")
+        self._scroll_pseudo_c_h.grid(row=2, column=0, sticky="ew")
 
         def _pseudo_c_scroll(delta: int) -> None:
             self._text_pseudo_c.yview_scroll(-delta, "units")
@@ -6406,6 +6588,19 @@ class HexEditorFrame(ttk.Frame):
         self.winfo_toplevel().bind("<Control-H>", self._toggle_hackmew_mode, add=True)
         self.winfo_toplevel().bind("<Control-i>", self._compile_hackmew_asm, add=True)
         self.winfo_toplevel().bind("<Control-I>", self._compile_hackmew_asm, add=True)
+        for w in (
+            self._text, self._text_ascii, self._goto_entry, self._encoding_combo,
+            self._asm_mode_combo, self._asm_frame, self._text_asm,
+            self._pseudo_c_frame, self._text_pseudo_c, pc_toolbar, self._c_inject_offset_entry, outer,
+        ):
+            w.bind("<Control-Shift-Key-4>", self._toggle_c_inject_edit_mode)
+            w.bind("<Control-Shift-dollar>", self._toggle_c_inject_edit_mode)
+            w.bind("<Control-Shift-Key-5>", self._compile_c_inject)
+            w.bind("<Control-Shift-percent>", self._compile_c_inject)
+        self.winfo_toplevel().bind("<Control-Shift-Key-4>", self._toggle_c_inject_edit_mode, add=True)
+        self.winfo_toplevel().bind("<Control-Shift-dollar>", self._toggle_c_inject_edit_mode, add=True)
+        self.winfo_toplevel().bind("<Control-Shift-Key-5>", self._compile_c_inject, add=True)
+        self.winfo_toplevel().bind("<Control-Shift-percent>", self._compile_c_inject, add=True)
         for w in (
             self._text, self._text_ascii, self._goto_entry, self._encoding_combo,
             self._asm_mode_combo, self._asm_frame, self._text_asm,
@@ -6774,6 +6969,230 @@ class HexEditorFrame(ttk.Frame):
         else:
             self._pseudo_c_frame.grid_remove()
         self.after_idle(self._refresh_visible)
+        return "break"
+
+    def _toggle_c_inject_edit_mode(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Toggle editable Pseudo-C for devkitARM C injection. Bound to Ctrl+Shift+4."""
+        if not self._pseudo_c_pane_visible:
+            self._pseudo_c_pane_visible = True
+            self._pseudo_c_frame.grid(row=1, column=4, sticky="nsew", padx=(4, 0))
+            self.after_idle(self._refresh_visible)
+        self._c_inject_mode = not self._c_inject_mode
+        if self._c_inject_mode:
+            self._pseudo_c_frame.configure(text=" Pseudo-C (C edit) ")
+            self._text_pseudo_c.configure(state=tk.NORMAL)
+            self._text_pseudo_c.focus_set()
+        else:
+            self._pseudo_c_frame.configure(text=" Pseudo-C ")
+            self._refresh_pseudo_c_selection()
+        return "break"
+
+    def _prepare_c_inject_source(self, user_text: str) -> str:
+        """Build one translation unit with ``channeler_inject`` unless the user supplied a full file."""
+        t = user_text.strip()
+        if not t:
+            return ""
+        first_stmt = ""
+        for line in t.splitlines():
+            s = line.strip()
+            if s:
+                first_stmt = s
+                break
+        if first_stmt.startswith("#"):
+            return t
+        if re.search(r"\bchanneler_inject\s*\(", t):
+            return t
+        return (
+            '#include "global.h"\n\n'
+            "void channeler_inject(void) {\n"
+            + "\n".join("    " + line if line.strip() else line for line in t.splitlines())
+            + "\n}\n"
+        )
+
+    def _compile_c_inject(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Compile C with devkitARM and write raw ``.text`` bytes at Inject @. Bound to Ctrl+Shift+5."""
+        if not self._pseudo_c_pane_visible:
+            return "break"
+        if not self._c_inject_mode:
+            messagebox.showinfo(
+                "C inject",
+                "Enable C edit mode first (Ctrl+Shift+4), then edit C and set Inject @.",
+            )
+            return "break"
+        if not self._data:
+            messagebox.showerror("C inject", "No ROM loaded.")
+            return "break"
+        src_raw = self._text_pseudo_c.get("1.0", tk.END)
+        c_src = self._prepare_c_inject_source(src_raw)
+        if not c_src.strip():
+            messagebox.showerror("C inject", "Pseudo-C source is empty.")
+            return "break"
+        off_str = (self._c_inject_offset_var.get() or "").strip()
+        if not off_str:
+            messagebox.showerror(
+                "C inject",
+                "Set Inject @ (file offset, 0x08… GBA address, or NamedAnchor name).",
+            )
+            return "break"
+        file_off, err = self.resolve_file_offset_or_named_anchor(off_str)
+        if file_off is None:
+            messagebox.showerror("C inject", f"Bad inject offset: {err or off_str!r}")
+            return "break"
+        if file_off < 0 or file_off >= len(self._data):
+            messagebox.showerror("C inject", "Inject offset is outside the ROM.")
+            return "break"
+        inc = _pokefirered_include_dir_default()
+        if not os.path.isdir(inc):
+            messagebox.showerror(
+                "C inject",
+                "Include directory not found:\n"
+                f"{inc}\n\n"
+                "Place pret pokefirered headers under:\n"
+                "  editors/firered/pokefirered/include\n"
+                "(at least global.h).",
+            )
+            return "break"
+        gcc = devkit_tool("arm-none-eabi-gcc")
+        objcopy = devkit_tool("arm-none-eabi-objcopy")
+        nm = devkit_tool("arm-none-eabi-nm")
+        nm_tool = nm if os.path.isfile(nm) else shutil.which("arm-none-eabi-nm")
+        if not nm_tool:
+            messagebox.showerror(
+                "C inject",
+                "arm-none-eabi-nm was not found (needed to resolve ROM symbols).\n"
+                "Install devkitARM and ensure arm-none-eabi-nm is on PATH.",
+            )
+            return "break"
+        link_addr = GBA_ROM_BASE + (file_off & ~1)
+        sym_by_name = load_pokefirered_sym_name_to_addr()
+        rom_data_names = load_channeler_c_inject_rom_data_symbol_names()
+        with tempfile.TemporaryDirectory(prefix="ch_c_inj_") as tmp:
+            c_path = os.path.join(tmp, "inject.c")
+            o_path = os.path.join(tmp, "inject.o")
+            elf_path = os.path.join(tmp, "inject.elf")
+            bin_path = os.path.join(tmp, "inject.bin")
+            with open(c_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(c_src)
+            # Headers only declare ROM APIs; the linker needs absolute symbols (pokefirered.sym).
+            # Thumb BL reaches only ±4 MiB: inject sites in expanded ROM (e.g. 0x0871…) cannot reach
+            # vanilla code at 0x0800… with a direct BL. -mlong-calls emits load+bx (or veneer) so calls
+            # resolve to real PutWindowTilemap-style addresses instead of nearby glue (sub_871a25x).
+            compile_flags = [
+                "-mcpu=arm7tdmi",
+                "-mtune=arm7tdmi",
+                "-mthumb",
+                "-mthumb-interwork",
+                "-mlong-calls",
+                "-O2",
+                "-ffreestanding",
+                "-fno-builtin",
+                "-nostdlib",
+                "-fno-asynchronous-unwind-tables",
+                "-I",
+                inc,
+                "-c",
+                "-o",
+                o_path,
+                c_path,
+            ]
+            try:
+                r0 = subprocess.run([gcc] + compile_flags, capture_output=True, text=True)
+            except FileNotFoundError:
+                messagebox.showerror(
+                    "C inject",
+                    "arm-none-eabi-gcc was not found.\n"
+                    "Install devkitARM (devkitPro) and ensure its bin directory is on PATH,\n"
+                    "or use the default C:\\devkitPro\\devkitARM\\bin on Windows.",
+                )
+                return "break"
+            if r0.returncode != 0 or not os.path.isfile(o_path):
+                err = (r0.stdout + "\n" + r0.stderr).strip()
+                messagebox.showerror("C inject", f"Compile failed:\n{err[:4000]}")
+                return "break"
+            undef, nm_err = collect_nm_undefined_symbols(nm_tool, o_path)
+            if nm_err:
+                messagebox.showerror("C inject", f"arm-none-eabi-nm failed:\n{nm_err[:1200]}")
+                return "break"
+            missing: List[str] = []
+            link_cmd: List[str] = [
+                gcc,
+                "-o",
+                elf_path,
+                o_path,
+                "-nostdlib",
+                "-nostartfiles",
+                f"-Wl,-Ttext=0x{link_addr:08X}",
+                "-Wl,-e,channeler_inject",
+            ]
+            for name in undef:
+                addr = sym_by_name.get(name)
+                if addr is None:
+                    missing.append(name)
+                    continue
+                val = link_defsym_value_for_rom_sym(addr, name, rom_data_names)
+                link_cmd.append(f"-Wl,--defsym,{name}=0x{val:X}")
+            if missing:
+                sample = ", ".join(missing[:12])
+                more = f" (+{len(missing) - 12} more)" if len(missing) > 12 else ""
+                messagebox.showerror(
+                    "C inject",
+                    "Undefined symbols not found in pokefirered.sym (or nm failed):\n"
+                    f"{sample}{more}\n\n"
+                    "Runtime/compiler helpers (e.g. __aeabi_*) need libgcc or different flags.\n"
+                    "ROM data labels in ROM (0x08…) need an even address: add the symbol name to\n"
+                    "rom.txt in the repo root (one per line).",
+                )
+                return "break"
+            try:
+                r = subprocess.run(link_cmd, capture_output=True, text=True)
+            except FileNotFoundError:
+                messagebox.showerror("C inject", "arm-none-eabi-gcc was not found for linking.")
+                return "break"
+            if r.returncode != 0 or not os.path.isfile(elf_path):
+                err = (r.stdout + "\n" + r.stderr).strip()
+                messagebox.showerror("C inject", f"Link failed:\n{err[:4000]}")
+                return "break"
+            try:
+                r2 = subprocess.run(
+                    [objcopy, "-O", "binary", "-j", ".text", elf_path, bin_path],
+                    capture_output=True,
+                    text=True,
+                )
+            except FileNotFoundError:
+                messagebox.showerror(
+                    "C inject",
+                    "arm-none-eabi-objcopy was not found (devkitARM bin directory).",
+                )
+                return "break"
+            if r2.returncode != 0 or not os.path.isfile(bin_path):
+                err = (r2.stdout + "\n" + r2.stderr).strip()
+                messagebox.showerror("C inject", f"objcopy failed:\n{err[:2000]}")
+                return "break"
+            with open(bin_path, "rb") as f:
+                blob = f.read()
+        if not blob:
+            messagebox.showerror("C inject", "Compiled binary is empty.")
+            return "break"
+        if file_off + len(blob) > len(self._data):
+            messagebox.showerror(
+                "C inject",
+                f"Binary ({len(blob)} bytes) does not fit in ROM from 0x{file_off:X}.",
+            )
+            return "break"
+        self._c_inject_size_var.set(f"{len(blob)} bytes")
+        for i, b in enumerate(blob):
+            self._data[file_off + i] = b
+        self._modified = True
+        self._ldr_pc_targets_valid = False
+        self._schedule_xref_rebuild()
+        self._refresh_visible()
+        if self._asm_pane_visible:
+            self._refresh_asm_selection()
+        messagebox.showinfo(
+            "C inject",
+            f"Wrote {len(blob)} bytes at file offset 0x{file_off:08X} "
+            f"(GBA 0x{GBA_ROM_BASE + file_off:08X}).",
+        )
         return "break"
 
     def _toggle_anchor_browser_pane(self, event: Optional[tk.Event] = None) -> Optional[str]:
@@ -8131,29 +8550,60 @@ Format = "`f|u8`[u8 arg0]"
             return val - GBA_ROM_BASE, ""
         return None, f"No [[NamedAnchors]] row named {key!r}."
 
+    def _anchor_address_matches_gba(self, anchor: Dict[str, Any], gba_addr: int) -> bool:
+        """True if anchor ``Address`` matches ``gba_addr`` (Thumb-aware)."""
+        addr = anchor.get("Address")
+        if addr is None:
+            return False
+        if isinstance(addr, int):
+            anchor_addr = addr
+        else:
+            try:
+                anchor_addr = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+            except (ValueError, TypeError):
+                return False
+        if anchor_addr < GBA_ROM_BASE:
+            anchor_addr += GBA_ROM_BASE
+        if (anchor_addr & 0x01) != (gba_addr & 0x01):
+            anchor_addr &= ~1
+            gba_check = gba_addr & ~1
+        else:
+            gba_check = gba_addr
+        return anchor_addr == gba_check or anchor_addr == gba_addr
+
+    def _toml_format_has_function_decomp_spec(self, fmt: Any) -> bool:
+        """True if Format carries a pret-style function template (`` `f` `` / `` `f|` ``), not just data/free-space."""
+        s = str(fmt or "").strip()
+        if not s:
+            return False
+        return "`f`" in s or "`f|" in s
+
     def _get_function_anchor_for_addr(self, gba_addr: int) -> Optional[Dict[str, Any]]:
         """Return FunctionAnchor or NamedAnchor dict if gba_addr matches any anchor Address."""
         if not self._toml_data:
             return None
         for anchor in list(self._toml_data.get("FunctionAnchors", [])) + list(self._toml_data.get("NamedAnchors", [])):
-            addr = anchor.get("Address")
-            if addr is None:
+            if self._anchor_address_matches_gba(anchor, gba_addr):
+                return anchor
+        return None
+
+    def _get_function_anchor_for_decompilation(self, gba_addr: int) -> Optional[Dict[str, Any]]:
+        """Anchor used to shape angr pseudo-C: ``[[FunctionAnchors]]`` only, plus ``[[NamedAnchors]]`` that have a real ``Format`` function spec.
+
+        Generic NamedAnchors (e.g. free-space labels like ``gFreeSpace1`` with non-function Format) must not
+        override signatures or rewrite parameters — that produced wrong names (e.g. ``gFreeSpace1``) for injected code.
+        """
+        if not self._toml_data:
+            return None
+        for anchor in self._toml_data.get("FunctionAnchors", []):
+            if isinstance(anchor, dict) and self._anchor_address_matches_gba(anchor, gba_addr):
+                return anchor
+        for anchor in self._toml_data.get("NamedAnchors", []):
+            if not isinstance(anchor, dict):
                 continue
-            if isinstance(addr, int):
-                anchor_addr = addr
-            else:
-                try:
-                    anchor_addr = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
-                except (ValueError, TypeError):
-                    continue
-            if anchor_addr < GBA_ROM_BASE:
-                anchor_addr += GBA_ROM_BASE
-            if (anchor_addr & 0x01) != (gba_addr & 0x01):
-                anchor_addr &= ~1
-                gba_check = gba_addr & ~1
-            else:
-                gba_check = gba_addr
-            if anchor_addr == gba_check or anchor_addr == gba_addr:
+            if not self._toml_format_has_function_decomp_spec(anchor.get("Format", "")):
+                continue
+            if self._anchor_address_matches_gba(anchor, gba_addr):
                 return anchor
         return None
 
@@ -8201,6 +8651,45 @@ Format = "`f|u8`[u8 arg0]"
             return mapped if mapped is not None else m.group(0)
 
         return re.sub(r"\bsub_([0-9a-fA-F]+)\b", repl, text)
+
+    def _get_pokefirered_sym_norm_map(self) -> Dict[int, str]:
+        """Lazy-loaded ``pokefirered.sym`` (repo root): normalized GBA address -> symbol name."""
+        if self._pokefirered_sym_norm_to_name is None:
+            self._pokefirered_sym_norm_to_name = load_pokefirered_sym_norm_to_name()
+        return self._pokefirered_sym_norm_to_name
+
+    def _merged_sub_name_map(self) -> Dict[int, str]:
+        """``pokefirered.sym`` plus TOML FunctionAnchors/NamedAnchors; TOML overrides on duplicate addresses."""
+        merged = dict(self._get_pokefirered_sym_norm_map())
+        merged.update(self._build_toml_sub_name_map())
+        return merged
+
+    def _rewrite_decompiler_hex_literals(self, text: str, merged: Dict[int, str]) -> str:
+        """Replace ``0x08…`` / RAM literals with symbol names when present in ``merged`` (keys are norm addresses)."""
+        if not text or not merged:
+            return text
+
+        def repl(m: re.Match[str]) -> str:
+            raw = m.group(0)
+            try:
+                val = int(m.group(1), 16)
+            except ValueError:
+                return raw
+            if val > 0xFFFFFFFF:
+                return raw
+            name = merged.get(val) or merged.get(val & ~1)
+            return name if name is not None else raw
+
+        return re.sub(r"\b0x([0-9A-Fa-f]+)\b", repl, text)
+
+    def _apply_symbol_names_to_decompiler_text(self, text: str) -> str:
+        """Apply ``pokefirered.sym`` + TOML names: ``sub_*`` identifiers and hex address literals."""
+        merged = self._merged_sub_name_map()
+        if not merged:
+            return text
+        text = self._rewrite_angr_sub_names(text, merged)
+        text = self._rewrite_decompiler_hex_literals(text, merged)
+        return text
 
     def _extract_extern_lines(self, text: str) -> List[str]:
         """Extract lines that are extern declarations from decompiler output."""
@@ -9772,6 +10261,8 @@ Format = "`f|u8`[u8 arg0]"
         """Decompile selected/visible bytes into pseudo-C. Uses angr when available."""
         if not self._pseudo_c_pane_visible:
             return
+        if self._c_inject_mode:
+            return
         self._text_pseudo_c.configure(state=tk.NORMAL)
         self._text_pseudo_c.delete("1.0", tk.END)
         if not self._data:
@@ -9823,6 +10314,8 @@ Format = "`f|u8`[u8 arg0]"
         """Called on main thread after angr decompilation completes."""
         if not self._pseudo_c_pane_visible:
             return
+        if self._c_inject_mode:
+            return
         self._text_pseudo_c.configure(state=tk.NORMAL)
         self._text_pseudo_c.delete("1.0", tk.END)
         self._text_pseudo_c.insert(tk.END, text)
@@ -9832,6 +10325,8 @@ Format = "`f|u8`[u8 arg0]"
     def _angr_fallback_to_capstone(self, start: int, end: int, align: int, angr_error: Optional[str]) -> None:
         """When angr fails, show error + Capstone pseudo-C fallback."""
         if not self._pseudo_c_pane_visible:
+            return
+        if self._c_inject_mode:
             return
         self._text_pseudo_c.configure(state=tk.NORMAL)
         self._text_pseudo_c.delete("1.0", tk.END)
@@ -9872,13 +10367,12 @@ Format = "`f|u8`[u8 arg0]"
         if not funcs_in_region:
             funcs_in_region = list(cfg.kb.functions.items())
         constants = {c["Name"]: c.get("Value", 0) for c in self._toml_data.get("Constants", [])}
-        toml_sub_names = self._build_toml_sub_name_map()
         for addr, func in sorted(funcs_in_region, key=lambda x: x[0]):
             try:
                 dec = proj.analyses.Decompiler(func, cfg=cfg)
                 if dec and dec.codegen and dec.codegen.text:
                     raw_codegen = dec.codegen.text
-                    anchor = self._get_function_anchor_for_addr(addr)
+                    anchor = self._get_function_anchor_for_decompilation(addr)
                     if anchor:
                         # Replace angr output with TOML-derived struct(s) + externs + signature
                         repl: List[str] = []
@@ -9888,15 +10382,12 @@ Format = "`f|u8`[u8 arg0]"
                             repl.append("")
                         externs = self._extract_extern_lines(raw_codegen)
                         if externs:
-                            repl.extend(
-                                self._rewrite_angr_sub_names(e, toml_sub_names) for e in externs
-                            )
+                            repl.extend(externs)
                             repl.append("")
                         sig = self._format_sig_from_anchor(anchor, constants)
                         repl.append(sig)
                         body = self._extract_angr_function_body(raw_codegen)
                         if body:
-                            body = self._rewrite_angr_sub_names(body, toml_sub_names)
                             struct_names = self._get_struct_names_from_anchor(anchor)
                             body = self._rewrite_angr_struct_refs(body, struct_names)
                             param_names = self._get_param_names_from_anchor(anchor)
@@ -9910,9 +10401,7 @@ Format = "`f|u8`[u8 arg0]"
                         out_lines.extend(repl)
                     else:
                         out_lines.append(f"/* sub_{addr:08X} */")
-                        out_lines.append(
-                            self._rewrite_angr_sub_names(raw_codegen.strip(), toml_sub_names)
-                        )
+                        out_lines.append(raw_codegen.strip())
                     out_lines.append("")
             except Exception as e:
                 err_msg = str(e).replace("\n", " ")[:120]
@@ -9924,7 +10413,7 @@ Format = "`f|u8`[u8 arg0]"
         if out_lines:
             if errors:
                 out_lines.insert(0, "/* Some functions failed: " + "; ".join(errors[:2]) + " */\n")
-            return "\n".join(out_lines)
+            return self._apply_symbol_names_to_decompiler_text("\n".join(out_lines))
         return None
 
     def _refresh_pseudo_c_capstone_fallback(self, start: int, end: int, align: int) -> None:
@@ -9953,6 +10442,8 @@ Format = "`f|u8`[u8 arg0]"
         except Exception:
             pass
         content = "".join(lines) if lines else "(No instructions)"
+        if lines and content != "(No instructions)":
+            content = self._apply_symbol_names_to_decompiler_text(content)
         self._text_pseudo_c.insert(tk.END, content)
         if lines:
             self._apply_syntax_highlighting(self._text_pseudo_c, "c")
