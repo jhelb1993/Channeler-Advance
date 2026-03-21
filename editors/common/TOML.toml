@@ -21,6 +21,10 @@
 #     **pipe-separated** subfields ``name`` + bit-width run where ``.`` = 1 bit and ``:`` = 2 bits (LSB-first packing).
 #     Named subfields need not fill the whole storage word; the high bits are padding (preserved on edit).
 #     Example: ``field.|t|x::.|y:.`` → 5+3 bits in one byte; ``evs:|t|hp:|atk:|…`` → 6×2 bits in 16 bits leaves 4 padding bits.
+#     If you accidentally use one ``.`` before ``|t|`` but subfields need two bytes (9–16 bits), the parser promotes to 2 bytes.
+#   ``field|h`` — show this **uint** in **hex** in the Structure tool (unsigned unless ``|z`` is also used).
+#   ``field|z`` — treat ROM integer as **signed** (two’s complement) for display and inline edit.
+#   ``field|b[]listOrTableName`` — **bit array**: one bit per ``[[List]]`` row (``len(List)`` bits) or, if ``listOrTableName`` is a NamedAnchor table, ``count`` rows; storage is ``ceil(bits/8)`` bytes, LSB-first within each byte. Tools label this as a bit array and show raw bytes.
 #
 # Standalone NamedAnchor string tables (not ``[struct…]``):
 #   ``[field""N]count`` — PCS table (existing).

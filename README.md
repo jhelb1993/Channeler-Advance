@@ -8,6 +8,27 @@ A ROM hacking tool for Game Boy Advance games, built with Python and Tkinter —
 
 - Use the bundled **`FireRed.toml`** when hacking FireRed, or **`WCT06.toml`** for *Yu-Gi-Oh! Ultimate Masters: World Championship Tournament 2006*.
 - By default, the editor looks for **`{YourRomBasename}.toml`** next to the ROM. You can load another file with **File → Load structure TOML**.
+- **Authoritative DSL notes** for anchors and `Format` strings also live in **`editors/common/TOML.toml`** (commented reference). The summary below matches that file.
+
+### Anchor addresses
+
+- **`[[NamedAnchors]]` / `[[FunctionAnchors]]` — `Address`:** ROM **file** offset in hex (e.g. `0x147148`), **not** a GBA bus address with the `0x08` prefix.
+- Deprecated **`[[OffsetPointer]]`** sections are ignored and are not written back.
+
+### Struct `Format`: integers, lists, and text
+
+Inside **`[ … ]count`** struct layouts:
+
+- **Uint width:** `.` = 1 byte, `:` = 2 bytes per colon (e.g. `field:` = 2 bytes, `field::` = 4 bytes).
+- **List / PCS enums:** `name:listname` or `name:listname+3` / `name:pcs.table-1` — optional trailing signed integer shifts the label index (`ROM index + offset`).
+- **PCS string:** `name""N` — PCS-encoded, `N` bytes wide (`0xFF` terminator; same rules as PCS string tables).
+- **Raw Latin-1 / byte string:** `name''N` — `N` bytes, NUL-padded; display stops at first `0x00`.
+- **Helper (no ROM bytes):** `name|=a+b+…` — sums named **uint** fields; not editable in the struct grid.
+- **Modifiers (append to a uint token):**
+  - **`|h`** — show this **uint** in **hex** in the Structure tool (combine with **`|z`** for signed hex + decimal).
+  - **`|z`** — treat the value as **signed** (two’s complement) for display and inline edit.
+  - **`|b[]listOrTableName`** — **bit array:** one bit per row of the named **`[[List]]`**, or **`count`** rows if `listOrTableName` is a NamedAnchor table; storage is `ceil(bits/8)` bytes, LSB-first within each byte. The tool labels this as a bit array and shows raw bytes.
+- **Bitfield (`|t|`):** storage before **`|t|`** uses the same `.` / `:` width rules as uints. After **`|t|`**, pipe-separated subfields use `.` = 1 bit and `:` = 2 bits (LSB-first). Subfields need not fill the word; high bits are padding. If you use one `.` before **`|t|`** but subfields need 9–16 bits, the parser promotes to 2 bytes.
 
 ### Struct `Format`: count-based nested arrays
 
@@ -26,6 +47,24 @@ In a NamedAnchor **struct** `Format`, a nested field can end with **`!HEX`** ins
 - **`name<[inner]!0000>inline`** — **legacy / packed inline**: the nested bytes are stored **inline** in the struct row (no pointer). If the struct has **only** this field, consecutive table entries are **packed** back-to-back in ROM until each terminator; the editor scans row-by-row.
 
 The terminator form must be the **last** field in the struct body. Suffix after `]` is still the table length (e.g. `]deckinfo`).
+
+### Standalone string tables (not `[struct…]`)
+
+- **`[field""N]count`** — PCS table (`count` = row count or table name).
+- **`[field''N]count`** — same idea, ASCII / Latin-1 slots.
+- **`''N`** — single ASCII blob of `N` bytes at `Address` (Tools → PCS list shows one row).
+
+### Quoting `Format` in TOML
+
+The tools do **not** strip stray `'` / `"` from `Format` (that broke `''N`). Prefer `Format = "''12"` or `Format = '[field''8]100'`. In multi-line `'''…'''` literals, each `''` is one `'`, so you may need extra quotes to get `''` in the value — or use lenient forms like `'12` / `['12]1` (collapsed).
+
+### Graphics NamedAnchors (summary)
+
+Whole-anchor **Format** (no `[`…`]` struct wrapper) describes sprites, tile sheets, palettes, tilemaps, and tables — decode uses Python + Pillow and aims for **pret/gbagfx**-compatible layouts. You may wrap the value in backticks in TOML, e.g. `` `ucs4x8x8|graphics.items.fossils.palette1` ``.
+
+Common tokens include **`ucp4`**, **`ucp4:`** index runs, **`lzp4` / `lzp8`**, **`ucs4xWxH`** sprites, **`uct4xWxH` / `uct8xWxH`** tile sheets, **`lzt4` / `lzt8`** variable strips, **`ucs6xWxH`**, **`ucm4xMWxMH`** tilemaps, **`lzm4` / `lzm8`**, and **`[rowSpec]count`** graphics tables. In struct layouts, fields can use **pointer + backtick-wrapped graphics specs** inside angle brackets, and composite **tileset** / **tilemap** / **palette** fields; see **`editors/common/TOML.toml`** for full syntax.
+
+**Full graphics DSL** (every prefix, LZ rules, palette linking, struct field patterns): **`editors/common/TOML.toml`** (Graphics section).
 
 ## Supported Games
 

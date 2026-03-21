@@ -17,7 +17,7 @@ import threading
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
-from typing import Optional, Dict, List, Tuple, Set, Any
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from editors.common.channeler_script_api import format_run_header, run_user_script
 from editors.common.gba_graphics import (
@@ -384,15 +384,26 @@ def _gba_real_repoint_all_scan(
     new_target_file_off: int,
     slide: int,
     skip_region: Optional[Tuple[int, int]],
+    scan_limit: Optional[Tuple[int, int]] = None,
 ) -> int:
-    """Replace every word equal to the sample pointer; optional skip_region is [start,end) insert blob."""
+    """Replace every word equal to the sample pointer; optional skip_region is [start,end) insert blob.
+
+    ``scan_limit`` if set is ``[lo, hi)`` file offsets: only scan aligned words in that half-open range
+    (useful to repoint pointers only within a bank or region). Empty/unset = whole ROM.
+    """
     old = int.from_bytes(data[sample_word_file_off : sample_word_file_off + 4], "little")
     new_val = new_target_file_off + GBA_ROM_BASE + slide
     n = 0
     end_insert = skip_region[1] if skip_region else -1
     start_insert = skip_region[0] if skip_region else -1
-    offset = 0
-    lim = len(data) - 3
+    if scan_limit:
+        offset = scan_limit[0]
+        while offset % 4:
+            offset += 1
+        lim = min(len(data) - 3, scan_limit[1])
+    else:
+        offset = 0
+        lim = len(data) - 3
     while offset < lim:
         if offset in _CFRU_REALPOINT_IGNORE_FILE_OFFS:
             offset += 4
@@ -3548,13 +3559,49 @@ def _struct_tree_spec_is_nested(spec: Any) -> bool:
     return isinstance(spec, tuple) and len(spec) > 0 and spec[0] in ("na", "nab")
 
 
+def _normalize_bitfield_token_spacing(token: str) -> str:
+    """Collapse stray spaces around ``|t|`` so ``evs: |t| hp:`` still tokenizes like ``evs:|t|hp:``."""
+    t = token.strip()
+    t = re.sub(r"\s+\|t\|", "|t|", t)
+    t = re.sub(r"\|t\|\s+", "|t|", t)
+    return t
+
+
+def _parse_bitfield_segment_spec(seg: str) -> Optional[Tuple[str, int]]:
+    """Parse one ``name`` + ``[.:]+`` width segment; optional trailing ``.table.path`` enum label (not bits).
+
+    Example: ``color:::.bodycolors`` → 6 bits for ``color`` (``:::``), ``.bodycolors`` is the [[List]] path only."""
+    seg = seg.strip()
+    if not seg:
+        return None
+    body = seg
+    mtail = re.search(r"(\.[\w.]+)$", seg)
+    if mtail:
+        cand = seg[: mtail.start()]
+        if re.match(r"^(\w+)([.:]+)$", cand):
+            body = cand
+    sm = re.match(r"^(\w+)([.:]+)$", body)
+    if not sm:
+        return None
+    sub_name = sm.group(1)
+    sch = sm.group(2)
+    nbits = sum(1 if c == "." else 2 for c in sch)
+    if nbits <= 0:
+        return None
+    return (sub_name, nbits)
+
+
 def _parse_bitfield_token(token: str) -> Optional[Dict[str, Any]]:
     """Parse bitfield tokens. Storage width before ``|t|`` matches uints: ``.`` = 1 byte, ``:`` = 2 bytes per colon
     (e.g. ``field.|t|`` = 1 byte, ``field:|t|`` = 2 bytes, ``field::|t|`` = 4 bytes). After ``|t|``, subfields are
     ``|``-separated; in each subfield, ``.`` = 1 bit and ``:`` = 2 bits per run.
-    Subfields may sum to fewer bits than the storage size; the rest is implicit padding (kept on write)."""
+    Subfields may sum to fewer bits than the storage size; the rest is implicit padding (kept on write).
+
+    If the head uses a single ``.`` (1 byte) but subfields need 9–16 bits, storage is promoted to **2 bytes**
+    (same as ``field:|t|``) so ``evs.|t|hp:|…`` still parses when the intent was ``evs:|t|…``."""
     if "|t|" not in token:
         return None
+    token = _normalize_bitfield_token_spacing(token)
     head, tail = token.split("|t|", 1)
     head, tail = head.strip(), tail.strip()
     if not head or not tail:
@@ -3567,24 +3614,33 @@ def _parse_bitfield_token(token: str) -> Optional[Dict[str, Any]]:
     byte_width = sum(1 if c == "." else 2 for c in size_chars)
     if byte_width <= 0:
         return None
+
+    segments = [x.strip() for x in tail.split("|") if x.strip()]
+    if not segments:
+        return None
+    part_specs: List[Tuple[str, int]] = []
+    for seg in segments:
+        parsed_seg = _parse_bitfield_segment_spec(seg)
+        if parsed_seg is None:
+            return None
+        part_specs.append(parsed_seg)
+    sum_bits = sum(n for _, n in part_specs)
+    if sum_bits <= 0:
+        return None
+
     total_bits = byte_width * 8
+    # Promote 1-byte head to 2 bytes when subfields need 9–16 bits (common typo: evs.|t| vs evs:|t|).
+    if sum_bits > total_bits and byte_width == 1 and sum_bits <= 16:
+        byte_width = 2
+        total_bits = byte_width * 8
+    if sum_bits > total_bits:
+        return None
+
     parts: List[Dict[str, Any]] = []
     shift = 0
-    segments = [x.strip() for x in tail.split("|") if x.strip()]
-    for seg in segments:
-        sm = re.match(r"^(\w+)([.:]+)$", seg)
-        if not sm:
-            return None
-        sub_name = sm.group(1)
-        sch = sm.group(2)
-        nbits = sum(1 if c == "." else 2 for c in sch)
-        if nbits <= 0 or shift + nbits > total_bits:
-            return None
+    for sub_name, nbits in part_specs:
         parts.append({"name": sub_name, "bits": nbits, "shift": shift})
         shift += nbits
-    if shift > total_bits or not parts:
-        return None
-    # Subfields may not use every bit (e.g. 12 bits of named 2-bit slots in a 16-bit word); remainder is padding.
     padding_bits = total_bits - shift
     return {
         "name": base_name,
@@ -3659,6 +3715,11 @@ def _merge_bitfield_tokens_list(tokens: List[str]) -> List[str]:
                 merged.append(buf)
                 ti = j
                 continue
+            # Avoid leaving ``evs:|t|`` and ``hp:…`` as separate tokens (would mis-parse the rest of the struct).
+            if j > ti + 1:
+                merged.append(buf)
+                ti = j
+                continue
         merged.append(t)
         ti += 1
     return merged
@@ -3688,9 +3749,15 @@ def _parse_struct_inner_content_to_fields(inner: str) -> Optional[List[Dict[str,
     return fields if fields else None
 
 
-def _parse_struct_fields(fmt: str) -> Optional[List[Dict[str, Any]]]:
+def _parse_struct_fields(
+    fmt: str,
+    blist_resolver: Optional[Callable[[str], Optional[int]]] = None,
+) -> Optional[List[Dict[str, Any]]]:
     """Parse the fields inside a Format like '[field1. field2: ...]count'.
-    Returns list of field descriptors with byte offsets, or None if not a struct format."""
+    Returns list of field descriptors with byte offsets, or None if not a struct format.
+
+    ``blist_resolver(ref)`` returns bit count for ``field|b[]ref`` (packed bits); used to set byte ``size``.
+    """
     s = fmt.strip()
     if s.startswith("^"):
         s = s[1:]
@@ -3722,6 +3789,19 @@ def _parse_struct_fields(fmt: str) -> Optional[List[Dict[str, Any]]]:
             if fd.get("type") == "nested_array":
                 fd["size"] = 0
             fields.append(fd)
+    if blist_resolver:
+        for fd in fields:
+            ref = fd.get("blist_ref")
+            if not ref:
+                continue
+            bits = blist_resolver(ref)
+            if bits is not None and bits > 0:
+                fd["blist_bits"] = int(bits)
+                fd["size"] = (int(bits) + 7) // 8
+            else:
+                fd["blist_bits"] = None
+                fd["size"] = 1
+                fd["blist_unresolved"] = True
     _finalize_nested_array_pointer_semantics(fields)
     if not _validate_nested_array_fields(fields):
         return None
@@ -4058,6 +4138,24 @@ def _try_parse_nested_array_token(token: str) -> Optional[Dict[str, Any]]:
     return out
 
 
+def _strip_struct_field_modifiers(token: str) -> Tuple[str, bool, bool]:
+    """Remove ``|h`` (hex display) and ``|z`` (signed integer) suffixes; return ``(token, hex_hint, signed_hint)``."""
+    t = token.strip()
+    hex_hint = "|h" in t
+    signed_hint = "|z" in t
+    for mod in ("|h", "|z"):
+        t = t.replace(mod, "")
+    return t, hex_hint, signed_hint
+
+
+def _encode_struct_uint_field(fd: Dict[str, Any], val: int) -> bytes:
+    """Little-endian ROM bytes for a struct ``uint`` (honors ``signed``)."""
+    sz = int(fd["size"])
+    if fd.get("signed"):
+        return int(val).to_bytes(sz, "little", signed=True)
+    return int(val).to_bytes(sz, "little")
+
+
 def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
     """Parse a single field token like 'hp.', 'type1.enumname', 'unknown:cardgraphicsindexes+1', etc."""
     bf = _parse_bitfield_token(token)
@@ -4068,12 +4166,19 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
         return na
     if "|s=" in token:
         token = token.split("|s=")[0]
-    hex_hint = False
-    if "|h" in token:
-        hex_hint = True
-        token = token.replace("|h", "")
-    if "|b[" in token:
-        token = token.split("|b[")[0]
+    token, hex_hint, signed_hint = _strip_struct_field_modifiers(token)
+    m_blist = re.match(r"^(\w+)\|b\[\]([\w.]+)$", token.strip())
+    if m_blist:
+        return {
+            "name": m_blist.group(1),
+            "size": 0,
+            "type": "uint",
+            "enum": None,
+            "hex": hex_hint,
+            "signed": False,
+            "bit_array": True,
+            "blist_ref": m_blist.group(2),
+        }
 
     m = re.match(r'^(\w+)""(\d+)', token)
     if m:
@@ -4166,7 +4271,14 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
         tail = m.group(4) or ""
         enum_ref = (base + tail).strip() if base else None
         size = sum(1 if c == "." else 2 for c in size_chars)
-        return {"name": name, "size": size, "type": "uint", "enum": enum_ref or None, "hex": hex_hint}
+        return {
+            "name": name,
+            "size": size,
+            "type": "uint",
+            "enum": enum_ref or None,
+            "hex": hex_hint,
+            "signed": signed_hint,
+        }
 
     return None
 
@@ -4649,6 +4761,18 @@ class StructEditorFrame(ttk.Frame):
         self._tree.bind("<F2>", self._start_inline_edit)
         self._tree.bind("<ButtonRelease-1>", self._on_tree_click)
         self._tree.bind("<<TreeviewSelect>>", lambda e: self._sync_field_aux_panels())
+
+        def _tree_wheel(e: tk.Event) -> None:
+            if e.delta:
+                self._tree.yview_scroll(int(-1 * e.delta / 120), "units")
+            elif getattr(e, "num", None) == 4:
+                self._tree.yview_scroll(-3, "units")
+            elif getattr(e, "num", None) == 5:
+                self._tree.yview_scroll(3, "units")
+
+        self._tree.bind("<MouseWheel>", _tree_wheel)
+        self._tree.bind("<Button-4>", _tree_wheel)
+        self._tree.bind("<Button-5>", _tree_wheel)
 
     def _on_tree_click(self, event: tk.Event) -> None:
         reg = self._tree.identify_region(event.x, event.y)
@@ -5985,17 +6109,31 @@ class StructEditorFrame(ttk.Frame):
                 ptr = int.from_bytes(raw[:4], "little")
                 return f"0x{ptr:08X}  (sprite)"
             return ""
-        val = int.from_bytes(raw, "little")
+        val_u = int.from_bytes(raw, "little")
+        if fd.get("blist_ref"):
+            hx = raw.hex().upper()
+            spaced = " ".join(hx[i : i + 2] for i in range(0, len(hx), 2))
+            bb = fd.get("blist_bits")
+            if bb is not None:
+                return f"bit array ({int(bb)} bits, {len(raw)} B)  [{spaced}]"
+            return f"bit array (unresolved |b[], {len(raw)} B)  [{spaced}]"
         enum_ref = fd.get("enum")
         if enum_ref:
-            label = self._resolve_enum(val, enum_ref)
+            label = self._resolve_enum(val_u, enum_ref)
             if label is not None:
                 if self._is_enum_panel_field(fd):
                     return f"{label}  ▾"
                 return label
+        if fd.get("signed"):
+            val_s = int.from_bytes(raw, "little", signed=True)
+            w = len(raw) * 2
+            mask = (1 << (8 * len(raw))) - 1
+            if fd.get("hex"):
+                return f"0x{(val_s & mask):0{w}X}  ({val_s})"
+            return str(val_s)
         if fd.get("hex"):
-            return f"0x{val:0{len(raw) * 2}X}"
-        return str(val)
+            return f"0x{val_u:0{len(raw) * 2}X}"
+        return str(val_u)
 
     def _read_pcs_at_pointer(self, file_off: int) -> str:
         data = self._hex.get_data()
@@ -6262,7 +6400,11 @@ class StructEditorFrame(ttk.Frame):
                 except ValueError:
                     self._cancel_inline_edit()
                     return
-                enc = val.to_bytes(fd["size"], "little")
+                enc = (
+                    _encode_struct_uint_field(fd, val)
+                    if fd["type"] == "uint"
+                    else val.to_bytes(fd["size"], "little")
+                )
                 self._hex.write_bytes_at(foff, enc)
                 if fd.get("type") == "uint" and self._count_field_drives_nested(str(fd["name"])):
                     self._load_entry(entry_idx)
@@ -6350,7 +6492,11 @@ class StructEditorFrame(ttk.Frame):
             except ValueError:
                 self._cancel_inline_edit()
                 return
-            enc = val.to_bytes(fd["size"], "little")
+            enc = (
+                _encode_struct_uint_field(fd, val)
+                if fd["type"] == "uint"
+                else val.to_bytes(fd["size"], "little")
+            )
             self._hex.write_bytes_at(foff, enc)
             if fd.get("type") == "uint" and self._count_field_drives_nested(str(fd["name"])):
                 self._load_entry(entry_idx)
@@ -6576,9 +6722,11 @@ class HexEditorFrame(ttk.Frame):
         self._pseudo_c_frame.grid(row=1, column=4, sticky="nsew", padx=(4, 0))
         self._pseudo_c_frame.columnconfigure(0, weight=3)
         self._pseudo_c_frame.columnconfigure(1, weight=5)
-        self._pseudo_c_frame.rowconfigure(1, weight=1)
+        self._pseudo_c_frame.rowconfigure(2, weight=1)
         self._c_inject_offset_var = tk.StringVar(value="")
         self._c_inject_size_var = tk.StringVar(value="—")
+        self._c_inject_rom_window_from_var = tk.StringVar(value="")
+        self._c_inject_rom_window_to_var = tk.StringVar(value="")
         pc_toolbar = ttk.Frame(self._pseudo_c_frame)
         pc_toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 2))
         ttk.Label(pc_toolbar, text="Inject @", font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 2))
@@ -6592,8 +6740,36 @@ class HexEditorFrame(ttk.Frame):
             side=tk.LEFT
         )
 
+        c_inj_opts = ttk.Frame(self._pseudo_c_frame)
+        c_inj_opts.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        for col in (0, 1, 2):
+            c_inj_opts.columnconfigure(col, weight=1)
+        ttk.Label(
+            c_inj_opts,
+            text="Optional ROM window (file offsets): limits ### repointall; same range for FF gap → Inject @.",
+            font=("Consolas", 8),
+            foreground="#555",
+            wraplength=520,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=3, sticky="ew")
+        ttk.Label(c_inj_opts, text="from", font=("Consolas", 8), foreground="#555").grid(row=1, column=0, sticky="w")
+        self._c_inject_rom_window_from = ttk.Entry(
+            c_inj_opts, textvariable=self._c_inject_rom_window_from_var, width=18, font=("Consolas", 8)
+        )
+        self._c_inject_rom_window_from.grid(row=2, column=0, sticky="ew", padx=(0, 6))
+        ttk.Label(c_inj_opts, text="through", font=("Consolas", 8), foreground="#555").grid(row=1, column=1, sticky="w")
+        self._c_inject_rom_window_to = ttk.Entry(
+            c_inj_opts, textvariable=self._c_inject_rom_window_to_var, width=18, font=("Consolas", 8)
+        )
+        self._c_inject_rom_window_to.grid(row=2, column=1, sticky="ew", padx=(0, 6))
+        ttk.Button(
+            c_inj_opts,
+            text="FF gap → Inject @",
+            command=self._c_inject_search_ff_gap_to_inject_offset,
+        ).grid(row=2, column=2, sticky="ew")
+
         self._pseudo_c_left = ttk.Frame(self._pseudo_c_frame)
-        self._pseudo_c_left.grid(row=1, column=0, sticky="nsew", padx=(0, 4))
+        self._pseudo_c_left.grid(row=2, column=0, sticky="nsew", padx=(0, 4))
         self._pseudo_c_left.columnconfigure(0, weight=1)
         self._pseudo_c_left.rowconfigure(0, weight=1)
 
@@ -7323,7 +7499,7 @@ class HexEditorFrame(ttk.Frame):
 
     def _show_c_inject_patches_pane(self) -> None:
         """Show ``### hooks`` / repoint column to the right of decompilation."""
-        self._pseudo_c_right.grid(row=1, column=1, sticky="nsew")
+        self._pseudo_c_right.grid(row=2, column=1, sticky="nsew")
         if not self._text_c_inject_patches.get("1.0", tk.END).strip():
             self._text_c_inject_patches.insert("1.0", C_INJECT_PATCHES_TEMPLATE)
 
@@ -7470,6 +7646,57 @@ class HexEditorFrame(ttk.Frame):
         self.after_idle(self._refresh_visible)
         return "break"
 
+    def _parse_c_inject_repointall_scan_limit(self) -> Tuple[Optional[Tuple[int, int]], Optional[str]]:
+        """Half-open ``[lo, hi)`` file offsets for ``### repointall`` only; ``None`` = scan entire ROM."""
+        fs = (self._c_inject_rom_window_from_var.get() or "").strip()
+        ts = (self._c_inject_rom_window_to_var.get() or "").strip()
+        if not fs and not ts:
+            return None, None
+        lo, hi_ex, err = parse_ff_gap_search_window_strings(self._data, fs, ts)
+        if err:
+            return None, err
+        if lo is None or hi_ex is None:
+            return None, "Repoint-all scan: enter both from and through, or leave both empty."
+        return (lo, hi_ex), None
+
+    def _c_inject_search_ff_gap_to_inject_offset(self) -> None:
+        """Find ``0xFF`` padding in an optional window and set **Inject @** (same rules as Struct FF gap)."""
+        if not self._data:
+            messagebox.showerror("FF gap", "No ROM loaded.")
+            return
+        m = re.match(r"(\d+)\s*bytes?\b", self._c_inject_size_var.get() or "", re.I)
+        need = int(m.group(1)) if m else 256
+        fs = (self._c_inject_rom_window_from_var.get() or "").strip()
+        ts = (self._c_inject_rom_window_to_var.get() or "").strip()
+        w_lo, w_hi_ex, err = parse_ff_gap_search_window_strings(self._data, fs, ts)
+        if err:
+            messagebox.showerror("FF gap", err)
+            return
+        excl = self._c_inject_region
+        if excl is None:
+            excl_lo, excl_hi = 0, 0
+        else:
+            excl_lo, excl_hi = excl
+        gap = find_disjoint_ff_gap_start(
+            self._data,
+            need,
+            excl_lo,
+            excl_hi,
+            window_lo=w_lo,
+            window_hi=w_hi_ex,
+        )
+        if gap is None:
+            messagebox.showwarning(
+                "FF gap",
+                f"No contiguous 0xFF region of {need} bytes found in the search window.",
+            )
+            return
+        self._c_inject_offset_var.set(f"0x{gap:X}")
+        messagebox.showinfo(
+            "FF gap",
+            f"Inject @ set to file offset 0x{gap:X} (GBA 0x{GBA_ROM_BASE + gap:08X}).",
+        )
+
     def _effective_inject_skip_region(self) -> Optional[Tuple[int, int]]:
         """Skip region for repoint-all scan (insert blob). Uses last compile span or Inject @ + compiled size."""
         if self._c_inject_region is not None:
@@ -7599,6 +7826,12 @@ class HexEditorFrame(ttk.Frame):
             _gba_repoint_word_write(self._data, tfo, wfo, 1)
             log.append(f"routinepointers: *0x{GBA_ROM_BASE + wfo:08X} = Thumb ptr to {sym} (+1)")
 
+        scan_limit: Optional[Tuple[int, int]] = None
+        if sections["repointall"]:
+            scan_limit, scan_err = self._parse_c_inject_repointall_scan_limit()
+            if scan_err:
+                return False, scan_err
+
         for raw in sections["repointall"]:
             parts = raw.split()
             if len(parts) < 2:
@@ -7613,8 +7846,13 @@ class HexEditorFrame(ttk.Frame):
                 return False, f"repointall: bad sample {sample_tok!r}: {e2}"
             if sfo + 4 > len(self._data):
                 return False, f"repointall: sample past ROM"
-            n = _gba_real_repoint_all_scan(self._data, sfo, tfo, 0, skip)
-            log.append(f"repointall: {n} word(s) → ptr to {sym} (no +1), sample 0x{GBA_ROM_BASE + sfo:08X}")
+            n = _gba_real_repoint_all_scan(self._data, sfo, tfo, 0, skip, scan_limit)
+            win_note = ""
+            if scan_limit:
+                win_note = f", scan 0x{scan_limit[0]:X}..0x{scan_limit[1]:X}"
+            log.append(
+                f"repointall: {n} word(s) → ptr to {sym} (no +1), sample 0x{GBA_ROM_BASE + sfo:08X}{win_note}"
+            )
 
         self._modified = True
         self._ldr_pc_targets_valid = False
@@ -7923,6 +8161,14 @@ class HexEditorFrame(ttk.Frame):
             return [("(no ROM symbols match filter)", -2)]
         return out
 
+    def _is_function_anchor_name(self, name: str) -> bool:
+        """True if ``name`` matches a ``[[FunctionAnchors]]`` entry (exact ``Name``)."""
+        want = name.strip()
+        for a in self._toml_data.get("FunctionAnchors", []) or []:
+            if str(a.get("Name", "")).strip() == want:
+                return True
+        return False
+
     def _get_anchor_browser_items(self) -> List[Tuple[str, Optional[int]]]:
         """Return [(display_text, address_or_none), ...]. address is set for leaves (full anchor names).
         Includes both FunctionAnchors and NamedAnchors."""
@@ -8021,10 +8267,32 @@ class HexEditorFrame(ttk.Frame):
             self._refresh_anchor_browser()
             return
         self._do_goto(address)
+        if self._is_function_anchor_name(display):
+            ext = self._find_function_extent(address)
+            if ext is not None:
+                fs, fe = ext
+                self._selection_start = fs
+                self._selection_end = fe
+                self._cursor_byte_offset = fs
+            elif self._data and 0 <= int(address) < len(self._data):
+                fe = min(int(address) + 0x100, len(self._data)) - 1
+                self._selection_start = int(address)
+                self._selection_end = fe
+                self._cursor_byte_offset = int(address)
+            if not self._asm_pane_visible:
+                self._asm_frame.grid(row=1, column=3, sticky="nsew", padx=(4, 0))
+                self._asm_pane_visible = True
+            self._refresh_asm_selection()
+            if self._ensure_cursor_visible():
+                self._update_scrollbar()
+            self._update_cursor_display()
+            self.after_idle(self._refresh_visible)
         cb = self._on_pointer_to_named_anchor_cb
         if not cb:
             return
         anchor_info = self._named_anchor_info_for_tools(display)
+        if anchor_info is None and address is not None and int(address) >= 0:
+            anchor_info = self._find_named_anchor_at_offset(int(address), exact=False)
         if anchor_info:
             self.after(10, lambda ai=anchor_info: cb(ai))
 
@@ -9929,6 +10197,31 @@ Format = "`f|u8`[u8 arg0]"
 
         return None, None, notes + f"Lookup struct {ref!r} has no uint index or gfx_palette field.\n"
 
+    def _bit_count_for_blist_ref(self, ref: str) -> Optional[int]:
+        """Bit width for ``field|b[]ref``: ``[[List]]`` length or PCS/struct table row count for ``ref``."""
+        ref = ref.strip()
+        if not ref:
+            return None
+        lm = self.get_lists().get(ref)
+        if lm is not None:
+            if not lm:
+                return None
+            # One bit per [[List]] row (contiguous indices); ``len`` matches ``max+1`` for dense tables.
+            return len(lm)
+        for anchor in self._toml_data.get("NamedAnchors", []) or []:
+            name = str(anchor.get("Name", "")).strip().strip("'\"")
+            if name != ref:
+                continue
+            a_fmt = normalize_named_anchor_format(anchor.get("Format", ""))
+            cr = _parse_struct_count(a_fmt)
+            if isinstance(cr, int) and cr > 0:
+                return cr
+            if isinstance(cr, str):
+                c2 = self._resolve_struct_count(cr)
+                if c2 is not None and c2 > 0:
+                    return c2
+        return None
+
     def get_struct_anchors(self) -> List[Dict[str, Any]]:
         """Return NamedAnchors whose Format is a parseable struct (not pure PCS tables)."""
         result: List[Dict[str, Any]] = []
@@ -9938,7 +10231,7 @@ Format = "`f|u8`[u8 arg0]"
             if name in pcs_names:
                 continue
             fmt = normalize_named_anchor_format(anchor.get("Format", ""))
-            fields = _parse_struct_fields(fmt)
+            fields = _parse_struct_fields(fmt, blist_resolver=self._bit_count_for_blist_ref)
             if not fields:
                 continue
             count_raw = _parse_struct_count(fmt)
@@ -12485,7 +12778,7 @@ class RomToolsShell:
         return cls in ("TEntry", "Entry", "TSpinbox", "Spinbox", "TCombobox")
 
     def _make_scroll_slot(self) -> Tuple[ttk.Frame, ttk.Frame]:
-        """Canvas + horizontal scrollbar; inner frame scrolls (~1/3 screen width)."""
+        """Canvas + vertical and horizontal scrollbars; inner frame scrolls (~1/3 screen wide / tall)."""
         third = max(200, self._root.winfo_screenwidth() // 3)
         outer = ttk.Frame(self._tools_frame, width=third)
         outer.grid_propagate(False)
@@ -12499,8 +12792,9 @@ class RomToolsShell:
             bg = "#f0f0f0"
         canvas.configure(background=bg)
 
+        vsb = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
         hsb = ttk.Scrollbar(outer, orient=tk.HORIZONTAL, command=canvas.xview)
-        canvas.configure(xscrollcommand=hsb.set)
+        canvas.configure(xscrollcommand=hsb.set, yscrollcommand=vsb.set)
 
         inner = ttk.Frame(canvas)
         wid = canvas.create_window((0, 0), window=inner, anchor="nw")
@@ -12519,11 +12813,26 @@ class RomToolsShell:
             canvas.itemconfigure(wid, width=w, height=h)
             canvas.configure(scrollregion=canvas.bbox("all"))
 
+        def _slot_wheel(ev: tk.Event) -> None:
+            if ev.delta:
+                canvas.yview_scroll(int(-1 * ev.delta / 120), "units")
+            elif getattr(ev, "num", None) == 4:
+                canvas.yview_scroll(-3, "units")
+            elif getattr(ev, "num", None) == 5:
+                canvas.yview_scroll(3, "units")
+
         inner.bind("<Configure>", _sync_inner)
         canvas.bind("<Configure>", _sync_canvas)
+        canvas.bind("<MouseWheel>", _slot_wheel)
+        canvas.bind("<Button-4>", _slot_wheel)
+        canvas.bind("<Button-5>", _slot_wheel)
+        inner.bind("<MouseWheel>", _slot_wheel)
+        inner.bind("<Button-4>", _slot_wheel)
+        inner.bind("<Button-5>", _slot_wheel)
 
         canvas.grid(row=0, column=0, sticky="nsew")
-        hsb.grid(row=1, column=0, sticky="ew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, columnspan=2, sticky="ew")
 
         outer._canvas = canvas  # type: ignore[attr-defined]
         return outer, inner
