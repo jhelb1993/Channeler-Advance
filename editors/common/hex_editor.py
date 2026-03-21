@@ -19,6 +19,7 @@ import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
 from typing import Optional, Dict, List, Tuple, Set, Any
 
+from editors.common.channeler_script_api import format_run_header, run_user_script
 from editors.common.gba_graphics import (
     GraphicsAnchorSpec,
     build_sprite_payload_for_rom,
@@ -333,6 +334,20 @@ C_INJECT_PATCHES_TEMPLATE = """### hooks
 
 ### routinepointers
 # Same as repoints, but the written pointer uses Thumb (+1) for a function address.
+"""
+
+CHANNELER_SCRIPT_TEMPLATE = """# In-tool script (Ctrl+Shift+Enter). API: ch / channeler
+#  ch.log("msg")          — append to output pane
+#  ch.toml                — copy of loaded TOML dict (FunctionAnchors / NamedAnchors / …)
+#  ch.resolve("name")      — (file_offset|None, err) for Goto-style / NamedAnchor names
+#  ch.read_u32_le(off)     ch.write_bytes(off, bytes)
+#  ch.label_for_gba(0x08001234)  — merged pokefirered.sym + TOML name, or None
+#  ch.label_for_rom_pointer_word(w)  — word as symbol or hex
+#  ch.classify_gba(addr)   — "rom" | "ewram" | "iwram" | "other"
+#  ch.sym_name_to_addr()   full pokefirered.sym map
+#  GBA_ROM_BASE, GBA_ROM_MAX, GBA_EWRAM_* … in namespace
+
+ch.log("Hello from Channeler script")
 """
 
 
@@ -6431,6 +6446,8 @@ class HexEditorFrame(ttk.Frame):
         self._toml_manual_override: Optional[str] = None
         # Row index for ``[format]count`` graphics / palette tables (spinbox in Tools → Graphics).
         self.graphics_table_row_var = tk.IntVar(value=0)
+        self._script_pane_visible = False
+        self._script_ui_saved: Optional[Dict[str, Any]] = None
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -6692,6 +6709,65 @@ class HexEditorFrame(ttk.Frame):
         self._tools_frame = ttk.Frame(body, width=1)
         self._tools_frame.grid(row=1, column=6, sticky="nsew", padx=(4, 0))
 
+        # Python script pane (Ctrl+Shift+7): full right side; hides disasm / pseudo-C / tools
+        self._script_frame = ttk.LabelFrame(body, text=" Python script ", padding=2)
+        self._script_frame.columnconfigure(0, weight=1)
+        self._script_frame.rowconfigure(1, weight=1)
+        _stb = ttk.Frame(self._script_frame)
+        _stb.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ttk.Label(
+            _stb,
+            text="Ctrl+Shift+Enter — run   ·   Ctrl+Shift+7 — close",
+            font=("Consolas", 8),
+            foreground="#555",
+        ).pack(side=tk.LEFT)
+        self._script_paned = ttk.PanedWindow(self._script_frame, orient=tk.VERTICAL)
+        self._script_paned.grid(row=1, column=0, sticky="nsew")
+        _code_fr = ttk.Frame(self._script_paned)
+        _out_fr = ttk.Frame(self._script_paned)
+        _sc_code = tk.Scrollbar(_code_fr)
+        _sc_out = tk.Scrollbar(_out_fr)
+        self._text_script = tk.Text(
+            _code_fr,
+            font=("Consolas", 10),
+            wrap=tk.WORD,
+            height=18,
+            undo=True,
+            borderwidth=1,
+            relief=tk.SOLID,
+            padx=4,
+            pady=4,
+            background="#fffef8",
+        )
+        self._text_script_output = tk.Text(
+            _out_fr,
+            font=("Consolas", 9),
+            wrap=tk.WORD,
+            height=12,
+            state=tk.DISABLED,
+            borderwidth=1,
+            relief=tk.SOLID,
+            padx=4,
+            pady=4,
+            background="#f4f4f4",
+            foreground="#111",
+        )
+        self._text_script.grid(row=0, column=0, sticky="nsew")
+        _sc_code.grid(row=0, column=1, sticky="ns")
+        self._text_script_output.grid(row=0, column=0, sticky="nsew")
+        _sc_out.grid(row=0, column=1, sticky="ns")
+        _code_fr.columnconfigure(0, weight=1)
+        _code_fr.rowconfigure(0, weight=1)
+        _out_fr.columnconfigure(0, weight=1)
+        _out_fr.rowconfigure(0, weight=1)
+        self._text_script.configure(yscrollcommand=_sc_code.set)
+        _sc_code.configure(command=self._text_script.yview)
+        self._text_script_output.configure(yscrollcommand=_sc_out.set)
+        _sc_out.configure(command=self._text_script_output.yview)
+        self._script_paned.add(_code_fr, weight=3)
+        self._script_paned.add(_out_fr, weight=2)
+        self._script_frame.grid_remove()
+
         self._on_pointer_to_named_anchor_cb: Optional[Any] = None
 
         if not self._asm_pane_visible:
@@ -6810,6 +6886,42 @@ class HexEditorFrame(ttk.Frame):
         self.winfo_toplevel().bind("<Control-Shift-percent>", self._compile_c_inject, add=True)
         self.winfo_toplevel().bind("<Control-Shift-Key-6>", self._apply_c_inject_rom_patches_cmd, add=True)
         self.winfo_toplevel().bind("<Control-Shift-asciicircum>", self._apply_c_inject_rom_patches_cmd, add=True)
+        for w in (
+            self._text,
+            self._text_ascii,
+            self._goto_entry,
+            self._encoding_combo,
+            self._asm_mode_combo,
+            self._asm_frame,
+            self._text_asm,
+            self._pseudo_c_frame,
+            self._text_pseudo_c,
+            self._text_script,
+            self._text_script_output,
+            outer,
+        ):
+            w.bind("<Control-Shift-Key-7>", self._toggle_script_pane)
+            w.bind("<Control-Shift-ampersand>", self._toggle_script_pane)
+        self.winfo_toplevel().bind("<Control-Shift-Key-7>", self._toggle_script_pane, add=True)
+        self.winfo_toplevel().bind("<Control-Shift-ampersand>", self._toggle_script_pane, add=True)
+        self._text_script.bind("<Control-Shift-Return>", self._run_channeler_script)
+        self._text_script.bind("<Control-Shift-Key-Return>", self._run_channeler_script)
+        self._text_script_output.bind("<Control-Shift-Return>", self._run_channeler_script)
+        self._text_script_output.bind("<Control-Shift-Key-Return>", self._run_channeler_script)
+        self.winfo_toplevel().bind("<Control-Shift-Return>", self._run_channeler_script, add=True)
+        self.winfo_toplevel().bind("<Control-Shift-Key-Return>", self._run_channeler_script, add=True)
+
+        def _script_scroll(delta: int) -> None:
+            w = self.winfo_toplevel().focus_get()
+            if w == self._text_script_output:
+                self._text_script_output.yview_scroll(-delta, "units")
+            else:
+                self._text_script.yview_scroll(-delta, "units")
+
+        for w in (self._text_script, self._text_script_output, self._script_frame):
+            w.bind("<MouseWheel>", lambda e: _script_scroll(int((e.delta or 0) / 120)))
+            w.bind("<Button-4>", lambda e: _script_scroll(3))
+            w.bind("<Button-5>", lambda e: _script_scroll(-3))
         for w in (
             self._text, self._text_ascii, self._goto_entry, self._encoding_combo,
             self._asm_mode_combo, self._asm_frame, self._text_asm,
@@ -7214,6 +7326,126 @@ class HexEditorFrame(ttk.Frame):
 
     def _hide_c_inject_patches_pane(self) -> None:
         self._pseudo_c_right.grid_remove()
+
+    def _append_script_log(self, s: str) -> None:
+        """Append text to the script output pane (thread: main / Tk only)."""
+        self._text_script_output.configure(state=tk.NORMAL)
+        self._text_script_output.insert(tk.END, s)
+        self._text_script_output.configure(state=tk.DISABLED)
+        self._text_script_output.see(tk.END)
+
+    def _hide_right_side_for_script(self) -> None:
+        """Remove disassembly, pseudo-C, anchors, and tools from the grid (script pane will cover columns 3–6)."""
+        self._script_ui_saved = {
+            "asm_visible": self._asm_pane_visible,
+            "pseudo_c_visible": self._pseudo_c_pane_visible,
+            "c_inject": self._c_inject_mode,
+            "anchor_browser": self._anchor_browser_pane_visible,
+            "anchor_layout": self._anchor_tools_pane_layout,
+            "hackmew": self._hackmew_mode,
+        }
+        if self._asm_pane_visible:
+            self._asm_frame.grid_remove()
+        if self._pseudo_c_pane_visible:
+            self._pseudo_c_frame.grid_remove()
+        if self._anchor_browser_pane_visible:
+            if self._anchor_tools_pane_layout:
+                self._anchor_tools_pane.grid_remove()
+                try:
+                    self._anchor_tools_pane.remove(self._anchor_frame)
+                except tk.TclError:
+                    pass
+                try:
+                    self._anchor_tools_pane.remove(self._tools_frame)
+                except tk.TclError:
+                    pass
+                self._tools_frame.grid(row=1, column=6, sticky="nsew", padx=(4, 0))
+                self._anchor_tools_pane_layout = False
+            else:
+                self._anchor_frame.grid_remove()
+        self._tools_frame.grid_remove()
+
+    def _restore_right_side_after_script(self) -> None:
+        """Restore panes saved by :meth:`_hide_right_side_for_script`."""
+        st = self._script_ui_saved or {}
+        self._script_ui_saved = None
+        if st.get("asm_visible"):
+            self._asm_frame.grid(row=1, column=3, sticky="nsew", padx=(4, 0))
+            if st.get("hackmew"):
+                self._refresh_asm_hackmew()
+            else:
+                self._refresh_asm_selection()
+        if st.get("pseudo_c_visible"):
+            self._pseudo_c_frame.grid(row=1, column=4, sticky="nsew", padx=(4, 0))
+            if st.get("c_inject"):
+                self._c_inject_mode = True
+                self._pseudo_c_frame.configure(text=" Pseudo-C (C edit) ")
+                self._text_pseudo_c.configure(state=tk.NORMAL)
+                self._show_c_inject_patches_pane()
+            else:
+                self._c_inject_mode = False
+                self._pseudo_c_frame.configure(text=" Pseudo-C ")
+                self._hide_c_inject_patches_pane()
+                self._refresh_pseudo_c_selection()
+        if st.get("anchor_browser"):
+            try:
+                self._tools_frame.grid_remove()
+            except tk.TclError:
+                pass
+            self._anchor_tools_pane.add(self._anchor_frame, weight=1)
+            self._anchor_tools_pane.add(self._tools_frame, weight=1)
+            self._anchor_tools_pane.grid(row=1, column=5, columnspan=2, sticky="nsew", padx=(4, 0))
+            self._anchor_tools_pane_layout = True
+            self._anchor_browser_pane_visible = True
+
+            def _sash() -> None:
+                try:
+                    self._anchor_tools_pane.sashpos(0, 320)
+                except tk.TclError:
+                    pass
+
+            self.after_idle(_sash)
+        else:
+            self._tools_frame.grid(row=1, column=6, sticky="nsew", padx=(4, 0))
+
+    def _toggle_script_pane(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Toggle full-width Python script pane. Bound to Ctrl+Shift+7."""
+        self._goto_entry.selection_clear()
+        self._script_pane_visible = not self._script_pane_visible
+        if self._script_pane_visible:
+            self._hide_right_side_for_script()
+            if not self._text_script.get("1.0", tk.END).strip():
+                self._text_script.insert("1.0", CHANNELER_SCRIPT_TEMPLATE)
+            self._append_script_log(format_run_header())
+            self._append_script_log(
+                "Script pane opened. Edit above, Ctrl+Shift+Enter to run. Output below.\n\n"
+            )
+            self._script_frame.grid(row=1, column=3, columnspan=4, sticky="nsew", padx=(4, 0))
+            self._text_script.focus_set()
+        else:
+            self._script_frame.grid_remove()
+            self._restore_right_side_after_script()
+            self._text.focus_set()
+        self.after_idle(self._refresh_visible)
+        return "break"
+
+    def _run_channeler_script(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Execute script text; log full traceback on error. Ctrl+Shift+Enter."""
+        if not self._script_pane_visible:
+            return None
+        if not self._data:
+            self._append_script_log("ERROR: No ROM loaded.\n")
+            return "break"
+        source = self._text_script.get("1.0", tk.END)
+        self._append_script_log("\n" + format_run_header())
+
+        def log_fn(msg: str) -> None:
+            self._append_script_log(msg)
+            self.update_idletasks()
+
+        run_user_script(source, self, log_fn)
+        self.after_idle(self._refresh_visible)
+        return "break"
 
     def _toggle_c_inject_edit_mode(self, event: Optional[tk.Event] = None) -> Optional[str]:
         """Toggle editable Pseudo-C for devkitARM C injection. Bound to Ctrl+Shift+4."""
@@ -12039,7 +12271,7 @@ Format = "`f|u8`[u8 arg0]"
                 self._selection_end = len(self._data) - 1
                 self._update_cursor_display()
             return "break"
-        if w in (self._text_asm, self._text_pseudo_c, self._text_c_inject_patches):
+        if w in (self._text_asm, self._text_pseudo_c, self._text_c_inject_patches, self._text_script, self._text_script_output):
             try:
                 w.tag_remove("sel", "1.0", "end")
                 w.tag_add("sel", "1.0", "end-1c")
