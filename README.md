@@ -156,18 +156,6 @@ Without using NamedAnchors, **File → Import Sprite / Import Tilemap/Tileset / 
 
 **Import palette:** Choose **4bpp** (16 colors) or **8bpp**. For 8bpp, set the **color count** to any **multiple of 16** from 16–256 (full “master” palette is 256 colors / 512 bytes; smaller counts match multi-row ``ucp8:``-style blobs). ``.pal`` / ``.gpl`` files are **standard text palettes** (JASC-PAL, GIMP GPL, or Tilemap Studio assembly ``RGB`` lines), then converted to GBA RGB555. Use a **``.bin``** for **raw** GBA RGB555 bytes (length must match the selected 4bpp/8bpp size).
 
-### Tilemap import debugging (8bpp / palette size)
-
-If a tilemap PNG import still looks like **16 colors**, check the **graphics decode log** after import: lines prefixed with **`[debug]`** are written **above** the normal decode text (import output is prepended once, then the preview is re-decoded). They show `palette_color_count`, `len_pal_flat`, TOML-derived `need_bytes_spec`, and packed `len_pal_payload` so you can see whether quantization, `prepare_palette_rom_body_from_import`, or the anchor format is capping the palette.
-
-For extra tracing in a terminal, set the logger **`channeler.tilemap_import`** to **DEBUG**, for example:
-
-```python
-import logging
-logging.basicConfig(level=logging.DEBUG)
-logging.getLogger("channeler.tilemap_import").setLevel(logging.DEBUG)
-```
-
 ## Features overview (from project release notes)
 
 High-level capabilities include:
