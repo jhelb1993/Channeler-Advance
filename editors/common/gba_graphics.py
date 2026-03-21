@@ -11,16 +11,19 @@ Tilemaps: ucm/lzm 4bpp or 8bpp non-affine maps (2 bytes/cell, same layout as [Ti
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tempfile
 from dataclasses import dataclass, replace
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Repo root: editors/common -> repo
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.normpath(os.path.join(_MODULE_DIR, "..", ".."))
 GBAGFX_PATH = os.path.join(_REPO_ROOT, "deps", "gbagfx")
+
+_log_tilemap = logging.getLogger("channeler.tilemap_import")
 
 
 def repo_gbagfx_path() -> str:
@@ -825,6 +828,34 @@ def palette_import_gba_binary(
     return raw[:need], ""
 
 
+def _tilemap_exact_indices_and_colors_from_rgb(
+    rgb: Any,
+    bpp: int,
+) -> Tuple[List[int], List[Tuple[int, int, int]], str]:
+    """
+    Build per-pixel indices and an ordered palette from **exact** RGB888 colors (first-seen order),
+    without quantizing to a new palette. ``bpp`` 4 → max 16 colors; 8 → max 256.
+    ``rgb`` is a Pillow ``Image`` in **RGB** mode, size already final.
+    """
+    max_c = 16 if bpp == 4 else 256
+    pixels = list(rgb.getdata())
+    order: List[Tuple[int, int, int]] = []
+    idx_map: Dict[Tuple[int, int, int], int] = {}
+    for px in pixels:
+        if px not in idx_map:
+            if len(order) >= max_c:
+                return (
+                    [],
+                    [],
+                    f"This image has more than {max_c} unique RGB colors after compositing for {bpp}bpp. "
+                    f"Enable “Quantize palette” in Tools, or use ≤{max_c} unique colors.",
+                )
+            idx_map[px] = len(order)
+            order.append(px)
+    idx_flat = [idx_map[px] for px in pixels]
+    return idx_flat, order, ""
+
+
 def tilemap_png_to_tileset_map_palette(
     png_path: str,
     *,
@@ -834,6 +865,8 @@ def tilemap_png_to_tileset_map_palette(
     palette_color_count: Optional[int] = None,
     use_burner_transparent: bool = False,
     burner_rgb: Tuple[int, int, int] = MANUAL_BURNER_RGB,
+    preserve_exact_palette: bool = True,
+    reduce_palette: bool = False,
 ) -> Tuple[bytes, bytes, bytes, int, str]:
     """
     Tilemap Studio–style **image → tiles**: quantize the full map image, dedupe 8×8 tiles (with H/V flips),
@@ -842,8 +875,12 @@ def tilemap_png_to_tileset_map_palette(
     The PNG is composited onto a ``map_w×map_h`` tile canvas (8 px/tile); smaller images align top-left
     (legacy) or are resized (``use_burner_transparent``).
 
-    ``palette_color_count`` / ``use_burner_transparent``: index 0 is ``burner_rgb`` (transparent); Pillow
-    quantizes to ``palette_color_count - 1`` solid colors. Supports 4bpp / 6bpp / 8bpp in that mode.
+    ``palette_color_count`` with ``use_burner_transparent``: index 0 is ``burner_rgb`` (transparent);
+    Pillow quantizes to ``palette_color_count - 1`` solid colors. Supports 4bpp / 6bpp / 8bpp in that mode.
+
+    Without burner: default ``preserve_exact_palette=True`` keeps **exact** RGB colors from the PNG
+    (no MedianCut). Set ``reduce_palette=True`` to quantize; ``palette_color_count`` then caps 8bpp
+    quantize (default 256).
 
     Returns ``(map_body, tileset_body, palette_flat, n_unique_tiles, err)`` where ``map_body`` is
     ``map_w * map_h * 2`` bytes (little-endian u16 per cell). ``palette_flat`` is 32 / 128 / 512 bytes.
@@ -879,30 +916,68 @@ def tilemap_png_to_tileset_map_palette(
         )
         if err:
             return b"", b"", b"", 0, err
+        _log_tilemap.debug(
+            "tilemap_png_to_tileset_map_palette (burner): bpp=%s len(pal_bytes)=%s palette_color_count=%s",
+            bpp,
+            len(pal_bytes),
+            palette_color_count,
+        )
     else:
         bg = Image.new("RGBA", (wpx, hpx), (255, 255, 255, 255))
         bg.paste(rgba, (0, 0), rgba.split()[3])
         rgb = bg.convert("RGB")
-        ncols = 16 if bpp == 4 else 256
-        try:
-            q = rgb.quantize(colors=ncols, method=Image.Quantize.MEDIANCUT)  # type: ignore[attr-defined]
-        except AttributeError:
-            q = rgb.quantize(colors=ncols, method=2)
-        pal_raw = q.getpalette()
-        if not pal_raw:
-            return b"", b"", b"", 0, "Could not build palette from image."
-        colors: List[Tuple[int, int, int]] = []
-        for i in range(ncols):
-            if i * 3 + 2 < len(pal_raw):
-                colors.append((pal_raw[i * 3], pal_raw[i * 3 + 1], pal_raw[i * 3 + 2]))
+        use_quantize = bool(reduce_palette) or not preserve_exact_palette
+        if not use_quantize:
+            idx_flat, order, eex = _tilemap_exact_indices_and_colors_from_rgb(rgb, bpp)
+            if eex:
+                return b"", b"", b"", 0, eex
+            n_pal = len(order)
+            pal_bytes = gba_palette_bytes_from_rgb888_list(order, n_pal if bpp == 4 else 256)
+            if bpp == 4:
+                pal_bytes = pal_bytes[:32].ljust(32, b"\x00")
             else:
-                colors.append((0, 0, 0))
-        pal_bytes = gba_palette_bytes_from_rgb888_list(colors, ncols)
-        if bpp == 4:
-            pal_bytes = pal_bytes[:32].ljust(32, b"\x00")
+                pal_bytes = pal_bytes[:512].ljust(512, b"\x00")
+            _log_tilemap.debug(
+                "tilemap_png_to_tileset_map_palette (non-burner exact): bpp=%s unique_colors=%s len(pal_bytes)=%s",
+                bpp,
+                n_pal,
+                len(pal_bytes),
+            )
         else:
-            pal_bytes = pal_bytes[:512].ljust(512, b"\x00")
-        idx_flat = list(q.getdata())
+            if bpp == 4:
+                ncols = 16
+            else:
+                if palette_color_count is not None:
+                    ncols = parse_8bpp_palette_color_count(int(palette_color_count))
+                else:
+                    ncols = 256
+            try:
+                q = rgb.quantize(colors=ncols, method=Image.Quantize.MEDIANCUT)  # type: ignore[attr-defined]
+            except AttributeError:
+                q = rgb.quantize(colors=ncols, method=2)
+            pal_raw = q.getpalette()
+            if not pal_raw:
+                return b"", b"", b"", 0, "Could not build palette from image."
+            colors = []
+            for i in range(ncols):
+                if i * 3 + 2 < len(pal_raw):
+                    colors.append((pal_raw[i * 3], pal_raw[i * 3 + 1], pal_raw[i * 3 + 2]))
+                else:
+                    colors.append((0, 0, 0))
+            pal_bytes = gba_palette_bytes_from_rgb888_list(colors, ncols)
+            if bpp == 4:
+                pal_bytes = pal_bytes[:32].ljust(32, b"\x00")
+            else:
+                pal_bytes = pal_bytes[:512].ljust(512, b"\x00")
+            idx_flat = list(q.getdata())
+            _log_tilemap.debug(
+                "tilemap_png_to_tileset_map_palette (non-burner quantize): bpp=%s ncols=%s len(pal_bytes)=%s "
+                "palette_color_count_kw=%s",
+                bpp,
+                ncols,
+                len(pal_bytes),
+                palette_color_count,
+            )
 
     if len(idx_flat) != wpx * hpx:
         return b"", b"", b"", 0, "Internal error: quantized buffer size mismatch."
@@ -956,8 +1031,7 @@ def palette_byte_count_for_spec(spec: GraphicsAnchorSpec) -> int:
     """Bytes written for a palette anchor (uncompressed body)."""
     if spec.kind != "palette" or spec.bpp != 4:
         if spec.kind == "palette" and spec.bpp == 8:
-            assert spec.palette_hex_digit is not None
-            return palette_byte_count_8_variant(spec.palette_hex_digit)
+            return palette_byte_count_8_variant(effective_ucp8_palette_hex_suffix(spec))
         return 32
     return 32 * palette_4_chunk_count(spec)
 
@@ -968,8 +1042,12 @@ def palette_byte_count_8_variant(hex_digits: str) -> int:
     - **One** hex digit ``N``: ``N * 32`` bytes (``N == 0`` is treated as ``1``), original rule.
     - **Several** digits (e.g. ``0123``): ``len(digits) * 32`` bytes — contiguous 32-byte chunks (64 colors
       when 4 chunks), used by card graphics tables.
+    - **Empty** suffix: treat as full **256-color** master (512 bytes), same as bare ``ucp8`` in TOML
+      (avoids accidentally resolving ``""`` to single-digit ``"1"`` → 32 bytes).
     """
-    s = (hex_digits or "1").strip().upper()
+    s = (hex_digits or "").strip().upper()
+    if not s:
+        return 512
     if len(s) == 1:
         n = int(s, 16)
         if n == 0:
@@ -996,7 +1074,7 @@ def compute_graphics_rom_span(spec: GraphicsAnchorSpec, rom_len: int, base: int)
             return min(rest, 512 * 1024)
         if spec.bpp == 4:
             return min(rest, 32 * palette_4_chunk_count(spec))
-        dig = spec.palette_hex_digit or "1"
+        dig = effective_ucp8_palette_hex_suffix(spec)
         return min(rest, palette_byte_count_8_variant(dig))
     if spec.kind == "tilemap":
         if spec.lz:
@@ -1059,7 +1137,17 @@ def prepare_palette_rom_body_from_import(spec: GraphicsAnchorSpec, flat: bytes) 
         nchunks = max(1, need // 32)
         body = (chunk * nchunks)[:need]
         return body.ljust(need, b"\xFF")
-    # 8bpp
+    # 8bpp — if the importer produced a larger valid GBA palette blob than TOML implies (e.g. legacy
+    # ``ucp8:1`` / 32 B spec vs bare ``ucp8`` / 512 B data), expand ``need`` so we never truncate a
+    # 256-color master to one 16-color row (``base[:32]``).
+    nflat = len(flat)
+    if nflat > need:
+        try:
+            nc = parse_8bpp_palette_color_count(nflat // 2)
+            if nc * 2 == nflat and nflat <= 512:
+                need = max(need, nflat)
+        except ValueError:
+            pass
     base = flat[:512].ljust(512, b"\x00")
     if need <= 512:
         return base[:need].ljust(need, b"\xFF")
@@ -1293,6 +1381,19 @@ def ucp8_slot_hex_digits_for_chunk_count(n_chunks: int) -> str:
 # Digits name **16-color subpalette slots** in order (same convention as ``ucp4:0123``).
 UCP8_PALETTE_4_CHUNK_HEX_DIGITS = ucp8_slot_hex_digits_for_chunk_count(4)  # 128 B (e.g. 6bpp / 64 colors)
 UCP8_PALETTE_16_CHUNK_HEX_DIGITS = ucp8_slot_hex_digits_for_chunk_count(16)  # 512 B (256 colors)
+
+
+def effective_ucp8_palette_hex_suffix(spec: GraphicsAnchorSpec) -> str:
+    """
+    Hex digits for ``ucp8:`` ROM size. If missing or empty, treat like **bare** ``ucp8`` / ``lzp8`` in TOML:
+    full 256-color master (16×32-byte chunks = ``0123456789ABCDEF``), not a single ``1`` chunk (32 B).
+    """
+    if spec.kind != "palette" or spec.bpp != 8:
+        raise ValueError("effective_ucp8_palette_hex_suffix: 8bpp palette spec only")
+    d = spec.palette_hex_digit
+    if d is None or not str(d).strip():
+        return UCP8_PALETTE_16_CHUNK_HEX_DIGITS
+    return str(d).strip()
 
 
 def toml_format_ucp8_from_8bpp_rom_colors(num_colors: int) -> str:
@@ -1732,6 +1833,17 @@ def parse_graphics_anchor_format(fmt: str) -> Optional[GraphicsAnchorSpec]:
             palette_hex_digit=m.group(2).upper(),
         )
 
+    # Bare ``ucp8`` / ``lzp8`` — same footprint as full 256-color master (16×32-byte chunks).
+    m = re.fullmatch(r"(uc|lz)p8", s, re.IGNORECASE)
+    if m:
+        lz = m.group(1).lower() == "lz"
+        return GraphicsAnchorSpec(
+            kind="palette",
+            bpp=8,
+            lz=lz,
+            palette_hex_digit=ucp8_slot_hex_digits_for_chunk_count(16),
+        )
+
     # 4bpp palette: optional :HEX… — each hex digit names a palette index (0–F); one 32-byte chunk per digit in ROM order
     m = re.fullmatch(r"(uc|lz)p4(?::([0-9a-fA-F]+))?", s, re.IGNORECASE)
     if m:
@@ -1885,9 +1997,7 @@ def graphics_row_byte_size(spec: GraphicsAnchorSpec) -> int:
             raise ValueError("LZ palette rows in graphics tables are not supported")
         if spec.bpp == 4:
             return 32 * palette_4_chunk_count(spec)
-        if spec.palette_hex_digit is None:
-            raise ValueError("8bpp palette spec missing palette_hex_digit")
-        return palette_byte_count_8_variant(spec.palette_hex_digit)
+        return palette_byte_count_8_variant(effective_ucp8_palette_hex_suffix(spec))
     if spec.kind == "sprite":
         if spec.lz:
             raise ValueError("LZ sprite rows in graphics tables are not supported")
@@ -2141,8 +2251,7 @@ def extract_palette_bytes(spec: GraphicsAnchorSpec, raw: bytes) -> bytes:
     if spec.bpp == 4:
         need = 32 * palette_4_chunk_count(spec)
     else:
-        assert spec.palette_hex_digit is not None
-        need = palette_byte_count_8_variant(spec.palette_hex_digit)
+        need = palette_byte_count_8_variant(effective_ucp8_palette_hex_suffix(spec))
     if len(data) < need:
         raise ValueError(f"Palette data too short: need {need}, have {len(data)}")
     return data[:need]

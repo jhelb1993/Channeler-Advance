@@ -1,8 +1,6 @@
 c injection
 python scripting
-update README with lots of info, shortcuts, and instructions
 addresses should be in hex (tomli-w)
-fix tilemap/tileset logic
 get rid of second scrollbar (tools)
 undo (ctrl + z)
 port firered editor code to hex_editor.py

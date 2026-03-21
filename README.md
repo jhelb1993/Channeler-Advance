@@ -1,6 +1,13 @@
 # Channeler Advance
 
-A ROM hacking tool for Game Boy Advance games, built with Python and Tkinter.
+A ROM hacking tool for Game Boy Advance games, built with Python and Tkinter — hex/table/struct editing, ARM7TDMI disassembly and HackMew-style ASM insertion, pseudo-C decompilation, and graphics preview tied to TOML “NamedAnchors” (similar in spirit to [Hex Maniac Advance](https://github.com/huderlem/hex-maniac-advance)).
+
+**Releases & changelog:** [GitHub Releases — Channeler-Advance](https://github.com/Soul-8691/Channeler-Advance/releases) (e.g. demo **v0.1.0** notes).
+
+## ROM and structure TOML
+
+- Use the bundled **`FireRed.toml`** when hacking FireRed, or **`WCT06.toml`** for *Yu-Gi-Oh! Ultimate Masters: World Championship Tournament 2006*.
+- By default, the editor looks for **`{YourRomBasename}.toml`** next to the ROM. You can load another file with **File → Load structure TOML**.
 
 ## Supported Games
 
@@ -49,6 +56,8 @@ Channeler-Advance/
 - Python 3.8+
 - Tkinter (included with most Python installations)
 
+Python packages used by the app include **tomli** / **tomli-w**, **Pillow**, **Capstone** (disassembly), **angr** (pseudo-C / analysis, optional in some paths), **Pygments** (syntax highlighting), and the repo may integrate external tools such as **HackMew’s THUMB assembler** for ASM insertion workflows.
+
 Install Python dependencies (use the same interpreter you use to run `main.py`):
 
 ```bash
@@ -63,13 +72,119 @@ python -m pip install -U tomli-w
 
 Or copy the path shown in the error dialog and run `"<that path>" -m pip install -U tomli-w`.
 
+## Keyboard shortcuts
+
+Bindings use **Ctrl** as the primary modifier (Windows/Linux). macOS may use **Cmd** for some system shortcuts; Tkinter typically still uses **Control** for these bindings.
+
+### Pokémon FireRed editor — window / tools
+
+| Shortcut | Action |
+| -------- | ------ |
+| **Ctrl+S** | Save ROM |
+| **Ctrl+T** | Show or hide the **Tools** pane (PCS string table, Struct editor, Graphics preview) |
+| **Ctrl+Shift+1** / **Ctrl+Shift+!** | Toggle Tools **slot 1** (PCS string table) |
+| **Ctrl+Shift+2** / **Ctrl+Shift+@** | Toggle Tools **slot 2** (Struct editor) |
+| **Ctrl+Shift+3** / **Ctrl+Shift+#** | Toggle Tools **slot 3** (Graphics preview) |
+
+### Hex editor (all game editors)
+
+These apply when the main hex view (or the overall window, for global toggles) has focus unless noted.
+
+| Shortcut | Action |
+| -------- | ------ |
+| **Ctrl+G** | Focus the **Goto** (file offset) field |
+| **Ctrl+F** | Open **Find** |
+| **Ctrl+R** | Open **Replace** |
+| **Ctrl+Shift+A** | **Select all** bytes in the ROM |
+| **Ctrl+C** / **Copy** | Copy selection (hex + ASCII) |
+| **Ctrl+V** / **Paste** | Paste — **insert** bytes at cursor (insert mode) |
+| **Ctrl+B** | Paste — **overwrite** (write) |
+| **Ctrl+Home** | Jump to **start** of ROM |
+| **Ctrl+End** | Jump to **end** of ROM |
+| **Ctrl+A** | Toggle **ARM/Thumb disassembly** pane |
+| **Ctrl+D** | Toggle **pseudo-C** pane |
+| **Ctrl+M** | Toggle **Named Anchor browser** pane (with the pane open, **drag the vertical sash** between Anchors and the Tools column to resize width; **horizontal scrollbar** under the list scrolls long names) |
+| **Ctrl+H** | Toggle **HackMew** mode (when available) |
+| **Ctrl+I** | **Compile** HackMew ASM (when HackMew mode and the disassembly pane are active) |
+
+### Hex view — movement and editing
+
+| Shortcut | Action |
+| -------- | ------ |
+| **←** / **→** | Move by byte (nybble within byte) |
+| **↑** / **↓** | Move by **row** |
+| **Home** / **End** | Start / end of **current row** |
+| **PgUp** / **PgDn** | Scroll by **one visible page** |
+| **Mouse wheel** | Scroll hex (and ASCII column) |
+| **0–9**, **A–F** | Enter hex digits |
+| **Insert** | Toggle **INSERT** vs **REPLACE** mode |
+| **Delete** | Delete byte(s) (selection or at cursor) |
+| **Backspace** | Delete previous byte |
+
+### Tools panes (PCS / Struct / Graphics)
+
+| Shortcut | Action |
+| -------- | ------ |
+| **F2** or **Enter** | Start **inline edit** on selected PCS / Struct tree row |
+| **Enter** | Commit inline edit (also **FocusOut**) |
+| **Escape** | Cancel inline edit |
+| **↑** / **↓** | While editing PCS inline field — move to **previous/next row** |
+| **Enter** in various fields | Apply (Goto, struct index, graphics table row, list enum, etc.) |
+
+### Dialogs
+
+Many modal dialogs use **Enter** to confirm and **Escape** to cancel.
+
+### Yu-Gi-Oh! WCT 2006 editor
+
+| Shortcut | Action |
+| -------- | ------ |
+| **Ctrl+S** | Save ROM |
+
+All **Hex editor** shortcuts above apply. The FireRed-only **Ctrl+T** / **Ctrl+Shift+1–3** tools layout is not present in the WCT 2006 UI.
+
 ## Graphics import (Tools → graphics preview)
 
 - **Sprites** (`uct`/`lzt`/`ucs`/`lzs`): Import PNG; if the data is moved to a new ROM address, the relocate dialog can **fill the original slot with `0xFF`** to reclaim it as free space.
 - **Tilemaps** (`ucm`/`lzm`): Import a PNG sized to the map in **tiles × 8 pixels** per side. The tool builds a deduped tileset (with flip matching, similar in spirit to [Tilemap Studio](https://github.com/Rangi42/tilemap-studio)’s image→tiles workflow), writes the **tileset**, **tilemap**, and linked **palette** blobs, and updates the tileset NamedAnchor **Format** grid when the unique tile count changes.
+  - **Palette:** By default the ROM palette matches the image’s **exact** RGB colors after compositing onto white (first-seen order, no MedianCut). Check **Quantize tilemap palette** next to **Import graphic…** to use Pillow quantization instead (e.g. if the PNG has more than 256 unique colors for 8bpp).
+- **8bpp palette preview** (`ucp8` / `lzp8`): The swatch grid is **scrollable** (wheel / scrollbar) so full **256-color** masters show as multiple rows, not just the first 16 colors.
 
 ## File → static imports (any offset)
 
 Without using NamedAnchors, **File → Import Sprite / Import Tilemap/Tileset / Import Palette** writes encoded data to a **file offset** you enter (or to the start of an **FF gap** found via Search). These commands **do not** update pointers or TOML—you repoint data in your disassembly or structs yourself.
 
 **Import palette:** Choose **4bpp** (16 colors) or **8bpp**. For 8bpp, set the **color count** to any **multiple of 16** from 16–256 (full “master” palette is 256 colors / 512 bytes; smaller counts match multi-row ``ucp8:``-style blobs). ``.pal`` / ``.gpl`` files are **standard text palettes** (JASC-PAL, GIMP GPL, or Tilemap Studio assembly ``RGB`` lines), then converted to GBA RGB555. Use a **``.bin``** for **raw** GBA RGB555 bytes (length must match the selected 4bpp/8bpp size).
+
+### Tilemap import debugging (8bpp / palette size)
+
+If a tilemap PNG import still looks like **16 colors**, check the **graphics decode log** after import: lines prefixed with **`[debug]`** are written **above** the normal decode text (import output is prepended once, then the preview is re-decoded). They show `palette_color_count`, `len_pal_flat`, TOML-derived `need_bytes_spec`, and packed `len_pal_payload` so you can see whether quantization, `prepare_palette_rom_body_from_import`, or the anchor format is capping the palette.
+
+For extra tracing in a terminal, set the logger **`channeler.tilemap_import`** to **DEBUG**, for example:
+
+```python
+import logging
+logging.basicConfig(level=logging.DEBUG)
+logging.getLogger("channeler.tilemap_import").setLevel(logging.DEBUG)
+```
+
+## Features overview (from project release notes)
+
+High-level capabilities include:
+
+- General editing: write, insert (**Insert** key toggles insert mode), delete, copy, paste-overwrite (**Ctrl+B**) / paste-insert (**Ctrl+V**), find/replace, goto.
+- Hex / ASCII / PCS text; table and struct editing from TOML; repointing text and pointers (including optional **FF**-fill of old space when relocating).
+- In-tool editing of TOML anchor formats; **double-click** pointers to follow (red highlight); **double-click** the start of an ASM routine in the hex view to highlight through the end (when applicable).
+- **Ctrl+T** / **Ctrl+Shift+1–3** to show or focus Tools slots (FireRed layout).
+- Disassembly (**Ctrl+A**), HackMew ASM (**Ctrl+H**), pseudo-C (**Ctrl+D**), **Ctrl+M** anchor browser.
+- Graphics: sprites, tilemaps, tilesets, palettes; anchor visual browser.
+
+**Rough roadmap / not implemented yet** (non-exhaustive): auto-generated TOML on ROM open, C injection, Python scripting interface, complete pret→TOML function/struct/constant conversion, undo, some FireRed-specific editors (trainer teams, overworld sprites, egg moves).
+
+**Not currently planned:** mapping, event scripting, battle/animation/trainer-AI scripting.
+
+## Credits
+
+- **[pret/pokefirered](https://github.com/pret/pokefirered)** — decomp and **gbagfx**-aligned behavior used throughout graphics code.
+- **HackMew** and the THUMB assembler tooling referenced for ASM workflows.
+- Tooling built with **Cursor** (often **Composer**).

@@ -5,6 +5,7 @@ ASCII/PCS (Pokemon GBA) encoding for the character pane.
 Optional Capstone disassembly (ARM7TDMI Thumb/ARM).
 """
 
+import logging
 import os
 import re
 import shutil
@@ -22,6 +23,7 @@ from editors.common.gba_graphics import (
     build_tilemap_payload_for_rom,
     compute_graphics_rom_span,
     decode_graphics_anchor_to_png,
+    effective_ucp8_palette_hex_suffix,
     decode_palette_to_png_pal,
     decode_gba_palette32_to_rgb888,
     decode_sprite_at_pointer,
@@ -43,13 +45,13 @@ from editors.common.gba_graphics import (
     parse_graphics_table_format,
     parse_sprite_field_spec,
     parse_tilemap_dimension_spec,
+    palette_byte_count_for_spec,
     prepare_palette_rom_body_from_import,
     raw_gba_palette_to_rgb888_list,
     read_sprite_preview_palette_at_rom_offset,
     resolve_gba_pointer,
     rewrite_standalone_sprite_format_dimensions,
     rewrite_standalone_tilemap_format_dimensions,
-    suggest_sprite_grid_for_tile_count,
     sprite_bytes_per_tile,
     sprite_import_png,
     sprite_import_png_manual,
@@ -87,6 +89,17 @@ def _try_import_tomli_w() -> bool:
 
 
 _try_import_tomli_w()
+
+_LOG_TILEMAP = logging.getLogger("channeler.tilemap_import")
+
+
+def _tilemap_import_debug(logs: Optional[List[str]], label: str, **fields: Any) -> None:
+    """Emit tilemap/palette import diagnostics to the logger and optionally the graphics decode log."""
+    parts = " ".join(f"{k}={fields[k]!r}" for k in sorted(fields))
+    msg = f"[debug] {label}: {parts}"
+    _LOG_TILEMAP.debug(msg)
+    if logs is not None:
+        logs.append(msg + "\n")
 
 
 def _tomli_w_missing_message() -> str:
@@ -175,6 +188,37 @@ def _toml_palette_format_for_tilemap_bpp(bpp: int, rom_colors_8bpp: Optional[int
         return f"`ucp8:{UCP8_PALETTE_4_CHUNK_HEX_DIGITS}`"
     nc = rom_colors_8bpp if rom_colors_8bpp is not None else 256
     return toml_format_ucp8_from_8bpp_rom_colors(nc)
+
+
+_GFX_COMBO_DISPLAY_SEP = "  —  "
+
+
+def _graphics_anchor_combo_display(info: Dict[str, Any]) -> str:
+    """Tools → Graphics combobox label; table anchors show row count + [[List]] index table."""
+    name = str(info.get("name", ""))
+    if not info.get("graphics_table"):
+        return name
+    ref = str(info.get("table_count_ref") or "").strip()
+    n = int(info.get("table_num_entries") or 0)
+    spec = info.get("spec")
+    if spec is not None and getattr(spec, "kind", None) == "palette":
+        if ref:
+            return (
+                f"{name}{_GFX_COMBO_DISPLAY_SEP}"
+                f"{n} palette rows (each [ucp8…] blob), index from [[List]] {ref}"
+            )
+        return f"{name}{_GFX_COMBO_DISPLAY_SEP}palette table ({n} rows)"
+    if ref:
+        return f"{name}{_GFX_COMBO_DISPLAY_SEP}{n} rows via {ref}"
+    return f"{name}{_GFX_COMBO_DISPLAY_SEP}graphics table ({n} rows)"
+
+
+def _graphics_combo_entry_to_anchor_name(entry: str) -> str:
+    """Strip combobox description suffix so lookups use the real NamedAnchor Name."""
+    t = (entry or "").strip()
+    if _GFX_COMBO_DISPLAY_SEP in t:
+        return t.split(_GFX_COMBO_DISPLAY_SEP, 1)[0].strip()
+    return t
 
 
 def _sign_extend_uint(v: int, bits: int) -> int:
@@ -884,6 +928,7 @@ class _SpriteImportOptionsDialog:
         self._dlg.wait_window()
 
     def _sync_bpp(self, *_a: Any) -> None:
+        old_b = getattr(self, "_bpp_prev", None)
         b = int(self._bpp.get())
         if b == 4:
             self._pal_n.set("16")
@@ -896,11 +941,21 @@ class _SpriteImportOptionsDialog:
             self._pal_entry.configure(state="disabled")
             self._rom_clip_row.grid_remove()
         else:
-            if self._pal_entry.cget("state") == "disabled":
+            if old_b in (4, 6):
                 self._pal_n.set("256")
+            elif self._pal_entry.cget("state") == "disabled":
+                self._pal_n.set("256")
+            else:
+                try:
+                    pv = int(self._pal_n.get().strip(), 0)
+                except ValueError:
+                    pv = -1
+                if pv in (16, 64):
+                    self._pal_n.set("256")
             self._pal_entry.configure(state="normal")
             self._pal_hint.configure(text="16–256, step 16")
             self._rom_clip_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self._bpp_prev = b
 
     def _on_ok(self) -> None:
         bpp = int(self._bpp.get())
@@ -1213,6 +1268,7 @@ class _TilemapPngDimsDialog:
         self._dlg.wait_window()
 
     def _sync_bpp(self, *_a: Any) -> None:
+        old_b = getattr(self, "_bpp_prev", None)
         b = int(self._bpp.get())
         if b == 4:
             self._pal_n.set("16")
@@ -1225,11 +1281,21 @@ class _TilemapPngDimsDialog:
             self._pal_entry.configure(state="disabled")
             self._rom_clip_row_tm.grid_remove()
         else:
-            if self._pal_entry.cget("state") == "disabled":
+            if old_b in (4, 6):
                 self._pal_n.set("256")
+            elif self._pal_entry.cget("state") == "disabled":
+                self._pal_n.set("256")
+            else:
+                try:
+                    pv = int(self._pal_n.get().strip(), 0)
+                except ValueError:
+                    pv = -1
+                if pv in (16, 64):
+                    self._pal_n.set("256")
             self._pal_entry.configure(state="normal")
             self._pal_hint.configure(text="16–256, step 16")
             self._rom_clip_row_tm.grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        self._bpp_prev = b
 
     def _on_ok(self) -> None:
         try:
@@ -1617,6 +1683,10 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._gfx_decode_anchor_name: Optional[str] = None
         # (file_off, palette_bpp 4|6|8, lz77: read palette from LZ-compressed blob at offset)
         self._sprite_palette_override: Optional[Tuple[int, int, bool]] = None
+        # If set, prepended once to the next graphics decode log (import traces must survive _decode_selected).
+        self._gfx_decode_log_prefix: str = ""
+        # Tilemap PNG import: default preserves exact RGBs from the image; enable to MedianCut-quantize.
+        self._tilemap_quantize_palette_var = tk.BooleanVar(value=False)
         self._build()
 
     def _build(self) -> None:
@@ -1633,6 +1703,11 @@ class GraphicsPreviewFrame(ttk.Frame):
         gfx_btn_row.grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 0))
         ttk.Button(gfx_btn_row, text="Decode", command=self._decode_selected).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(gfx_btn_row, text="Import graphic…", command=self._on_import_graphic).pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            gfx_btn_row,
+            text="Quantize tilemap palette",
+            variable=self._tilemap_quantize_palette_var,
+        ).pack(side=tk.LEFT, padx=(12, 0))
         srow = ttk.Frame(top)
         srow.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(2, 0))
         srow.columnconfigure(1, weight=1)
@@ -1766,11 +1841,32 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._pal8_title = ttk.Label(self._pal8_row, text="8bpp palette:", font=("Consolas", 8))
         self._pal8_title.grid(row=0, column=0, sticky="w", padx=(0, 4))
 
+        self._pal8_outer = ttk.Frame(self)
+        self._pal8_outer.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+        self._pal8_outer.columnconfigure(0, weight=1)
+        self._pal8_outer.rowconfigure(0, weight=1)
         self._pal8_canvas = tk.Canvas(
-            self, height=44, bg="#1e1e1e", highlightthickness=1, highlightbackground="#555555"
+            self._pal8_outer,
+            height=200,
+            width=400,
+            bg="#1e1e1e",
+            highlightthickness=1,
+            highlightbackground="#555555",
         )
-        self._pal8_canvas.grid(row=2, column=0, sticky="ew", pady=(0, 4))
-        self._pal8_canvas.grid_remove()
+        self._pal8_scroll = tk.Scrollbar(self._pal8_outer, orient=tk.VERTICAL, command=self._pal8_canvas.yview)
+        self._pal8_canvas.configure(yscrollcommand=self._pal8_scroll.set)
+        self._pal8_canvas.grid(row=0, column=0, sticky="nsew")
+        self._pal8_scroll.grid(row=0, column=1, sticky="ns")
+
+        def _pal8_wheel(ev: tk.Event) -> str:
+            self._pal8_canvas.yview_scroll(int(-1 * (getattr(ev, "delta", 0) / 120)), "units")
+            return "break"
+
+        self._pal8_canvas.bind("<MouseWheel>", _pal8_wheel)
+        self._pal8_canvas.bind("<Button-4>", lambda _e: self._pal8_canvas.yview_scroll(-2, "units"))
+        self._pal8_canvas.bind("<Button-5>", lambda _e: self._pal8_canvas.yview_scroll(2, "units"))
+
+        self._pal8_outer.grid_remove()
 
         ttk.Label(self, text="Decode log:", font=("Consolas", 8)).grid(row=3, column=0, sticky="w")
         self._log = tk.Text(self, height=5, font=("Consolas", 8), wrap=tk.WORD, state=tk.DISABLED)
@@ -1784,6 +1880,12 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._log.insert("1.0", text or "")
         self._log.configure(state=tk.DISABLED)
 
+    def _emit_gfx_decode_log(self, text: str) -> None:
+        """Replace decode log, optionally prefixing with a one-shot string (e.g. tilemap import [debug] lines)."""
+        pfx = getattr(self, "_gfx_decode_log_prefix", "") or ""
+        self._gfx_decode_log_prefix = ""
+        self._set_log(pfx + text)
+
     def _clear_image(self, msg: str = "(no preview)") -> None:
         self._photo = None
         self._img_label.configure(image="", text=msg)
@@ -1796,7 +1898,7 @@ class GraphicsPreviewFrame(ttk.Frame):
 
     def _hide_palette_8_ui(self) -> None:
         self._pal8_row.grid_remove()
-        self._pal8_canvas.grid_remove()
+        self._pal8_outer.grid_remove()
         self._pal8_colors = None
 
     def _refresh_palette_8_swatches(self) -> None:
@@ -1811,13 +1913,14 @@ class GraphicsPreviewFrame(ttk.Frame):
         nrow = (n + cols - 1) // cols
         total_w = pad * 2 + cols * cell_w + max(0, cols - 1) * gap
         total_h = pad * 2 + nrow * cell_h + max(0, nrow - 1) * gap
-        c.configure(width=total_w, height=total_h)
+        c.configure(width=min(total_w + 24, 420), scrollregion=(0, 0, total_w, total_h))
         for i, rgb in enumerate(rgbs):
             row, col = divmod(i, cols)
             x0 = pad + col * (cell_w + gap)
             y0 = pad + row * (cell_h + gap)
             fill = "#%02x%02x%02x" % rgb
             c.create_rectangle(x0, y0, x0 + cell_w, y0 + cell_h, fill=fill, outline="#666666")
+        c.yview_moveto(0)
 
     def _refresh_palette_4_swatches(self) -> None:
         if not self._pal4_state:
@@ -1883,11 +1986,16 @@ class GraphicsPreviewFrame(ttk.Frame):
         self.refresh_anchors()
         want = anchor_name.strip()
         vals = list(self._combo["values"])
-        if want not in vals:
+        match = None
+        for v in vals:
+            if _graphics_combo_entry_to_anchor_name(str(v)) == want:
+                match = v
+                break
+        if match is None:
             self._set_log(f"Graphics anchor not found: {anchor_name!r}")
             return
-        self._combo.set(want)
-        self._combo.current(vals.index(want))
+        self._combo.set(match)
+        self._combo.current(vals.index(match))
         self._decode_selected()
 
     def _update_table_nav_for_info(self, info: Dict[str, Any]) -> None:
@@ -2020,15 +2128,23 @@ class GraphicsPreviewFrame(ttk.Frame):
     def _apply_gfx_combo_filter(self) -> None:
         self._gfx_filter_job = None
         anchors = self._hex.get_graphics_anchors()
-        names = [str(a["name"]) for a in anchors]
+        display_entries = [_graphics_anchor_combo_display(a) for a in anchors]
         q = self._combo_search_var.get().strip().lower()
-        filt = [n for n in names if q in n.lower()] if q else list(names)
+        filt = [d for d in display_entries if q in d.lower()] if q else list(display_entries)
         cur = self._combo.get().strip()
+        cur_key = _graphics_combo_entry_to_anchor_name(cur)
         self._combo.configure(values=filt)
         if filt:
-            if cur in filt:
-                self._combo.current(filt.index(cur))
-            elif cur:
+            cur_ok = cur in filt or (
+                cur_key and any(_graphics_combo_entry_to_anchor_name(x) == cur_key for x in filt)
+            )
+            if cur_ok:
+                pick = cur if cur in filt else next(
+                    x for x in filt if _graphics_combo_entry_to_anchor_name(x) == cur_key
+                )
+                self._combo.set(pick)
+                self._combo.current(filt.index(pick))
+            elif cur_key:
                 self._combo.set(filt[0])
                 self._combo.current(0)
                 self._decode_selected()
@@ -2039,11 +2155,13 @@ class GraphicsPreviewFrame(ttk.Frame):
             self._clear_image()
 
     def _decode_selected(self, event: Optional[tk.Event] = None) -> None:
-        name = self._combo.get().strip()
+        name = _graphics_combo_entry_to_anchor_name(self._combo.get().strip())
         if not name:
+            self._gfx_decode_log_prefix = ""
             return
         rom = self._hex.get_data()
         if not rom:
+            self._gfx_decode_log_prefix = ""
             return
         if self._gfx_decode_anchor_name is not None and name != self._gfx_decode_anchor_name:
             self._sprite_palette_override = None
@@ -2051,7 +2169,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._gfx_decode_anchor_name = name
         info = next((a for a in self._hex.get_graphics_anchors() if str(a["name"]) == name), None)
         if not info:
-            self._set_log("Anchor missing.")
+            self._emit_gfx_decode_log("Anchor missing.")
             return
         self._update_table_nav_for_info(info)
         spec = info["spec"]
@@ -2114,7 +2232,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                 try:
                     pal_bytes = extract_palette_bytes(spec, raw)
                 except ValueError as e:
-                    self._set_log(f"Palette extract error: {e}")
+                    self._emit_gfx_decode_log(f"Palette extract error: {e}")
                     self._clear_image()
                     return
                 self._pal4_state = (spec, pal_bytes)
@@ -2140,7 +2258,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                 try:
                     pal_bytes = extract_palette_bytes(spec, raw)
                 except ValueError as e:
-                    self._set_log(f"Palette extract error: {e}")
+                    self._emit_gfx_decode_log(f"Palette extract error: {e}")
                     self._clear_image()
                     return
                 pal_bytes = palette_bytes_for_gbagfx(spec, pal_bytes)
@@ -2148,11 +2266,11 @@ class GraphicsPreviewFrame(ttk.Frame):
                 n8 = len(self._pal8_colors)
                 self._pal8_title.configure(text=f"8bpp palette ({n8} colors):")
                 self._pal8_row.grid()
-                self._pal8_canvas.grid()
+                self._pal8_outer.grid()
                 self._refresh_palette_8_swatches()
             pal_path, log = decode_palette_to_png_pal(bytes(rom), blob_off, spec)
             logs.append(log)
-            self._set_log("\n".join(logs))
+            self._emit_gfx_decode_log("\n".join(logs))
             if pal_path:
                 self._try_show_image(pal_path)
             else:
@@ -2170,7 +2288,7 @@ class GraphicsPreviewFrame(ttk.Frame):
             tsn = getattr(spec, "tileset_anchor_name", None) or ""
             ga_ts = self._hex.find_graphics_anchor_by_name(tsn.strip()) if tsn.strip() else None
             if ga_ts is None or ga_ts["spec"].kind != "sprite":
-                self._set_log(
+                self._emit_gfx_decode_log(
                     log_pre
                     + (
                         f"Tilemap needs a tile sheet NamedAnchor (uct/lzt/ucs/lzs…); "
@@ -2206,7 +2324,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                 external_tileset_base_off=ext_ts_off,
             )
             logs.append(log_pre + log)
-            self._set_log("\n".join(logs))
+            self._emit_gfx_decode_log("\n".join(logs))
             if png_path:
                 self._try_show_image(png_path)
             else:
@@ -2256,14 +2374,14 @@ class GraphicsPreviewFrame(ttk.Frame):
             override_sprite_palette_bytes=override_pal_bytes,
         )
         logs.append(log_pre + log)
-        self._set_log("\n".join(logs))
+        self._emit_gfx_decode_log("\n".join(logs))
         if png_path:
             self._try_show_image(png_path)
         else:
             self._clear_image("(sprite PNG not produced)")
 
     def _on_sprite_preview_palette_load(self) -> None:
-        name = self._combo.get().strip()
+        name = _graphics_combo_entry_to_anchor_name(self._combo.get().strip())
         if not name:
             messagebox.showinfo("Preview palette", "Select a graphics NamedAnchor first.")
             return
@@ -2407,7 +2525,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         return True, log
 
     def _on_import_graphic(self) -> None:
-        name = self._combo.get().strip()
+        name = _graphics_combo_entry_to_anchor_name(self._combo.get().strip())
         if not name:
             messagebox.showinfo("Import graphic", "Select a graphics NamedAnchor first.")
             return
@@ -2569,6 +2687,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     return
                 pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
                 pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                pal_cap = max(pal_cap, len(pal_payload))
                 ok_p, log_p = self._gfx_import_write_blob(
                     "Palette",
                     ext_pb,
@@ -2612,6 +2731,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     return
                 pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
                 pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                pal_cap = max(pal_cap, len(pal_payload))
                 pal_anchor_name = pan.strip() if ga_p and ga_p["spec"].kind == "palette" else None
                 if pal_anchor_name and pal_is_table:
                     pal_anchor_name = None
@@ -2645,6 +2765,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     return
                 pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
                 pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                pal_cap = max(pal_cap, len(pal_payload))
                 ok_p, log_p = self._gfx_import_write_blob(
                     "Palette",
                     ext_pb,
@@ -2688,6 +2809,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     return
                 pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
                 pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                pal_cap = max(pal_cap, len(pal_payload))
                 pal_anchor_name = pan.strip() if ga_p and ga_p["spec"].kind == "palette" else None
                 if pal_anchor_name and pal_is_table:
                     pal_anchor_name = None
@@ -2721,6 +2843,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     return
                 pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
                 pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                pal_cap = max(pal_cap, len(pal_payload))
                 ok_p, log_p = self._gfx_import_write_blob(
                     "Palette",
                     ext_pb,
@@ -2755,6 +2878,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                         return
                     pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
                     pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                    pal_cap = max(pal_cap, len(pal_payload))
                     pal_anchor_name = pan.strip() if ga_p and ga_p["spec"].kind == "palette" else None
                     if pal_anchor_name and pal_is_table:
                         pal_anchor_name = None
@@ -2779,7 +2903,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     "No |palette anchor on this sprite: tiles imported; preview uses default grayscale palette.\n"
                 )
 
-        self._set_log("".join(logs) + "\nRe-decoding preview…\n")
+        self._gfx_decode_log_prefix = "".join(logs) + "\nRe-decoding preview…\n\n"
         self._decode_selected()
 
     def _import_tilemap_from_png(self, name: str, info: Dict[str, Any], spec: Any) -> None:
@@ -2867,12 +2991,17 @@ class GraphicsPreviewFrame(ttk.Frame):
             return
 
         mw, mh = int(spec.map_w_tiles), int(spec.map_h_tiles)
-        raw_map, tile_body, pal_flat, n_unique, err = tilemap_png_to_tileset_map_palette(
-            path,
-            map_w_tiles=mw,
-            map_h_tiles=mh,
-            bpp=spec.bpp,
-        )
+        tm_kw: Dict[str, Any] = {
+            "map_w_tiles": mw,
+            "map_h_tiles": mh,
+            "bpp": spec.bpp,
+        }
+        if int(spec.bpp) == 8:
+            tm_kw["palette_color_count"] = 256
+        qpal = bool(self._tilemap_quantize_palette_var.get())
+        tm_kw["preserve_exact_palette"] = not qpal
+        tm_kw["reduce_palette"] = qpal
+        raw_map, tile_body, pal_flat, n_unique, err = tilemap_png_to_tileset_map_palette(path, **tm_kw)
         if err:
             messagebox.showerror("Import tilemap", err)
             return
@@ -2883,6 +3012,19 @@ class GraphicsPreviewFrame(ttk.Frame):
             "see https://github.com/Rangi42/tilemap-studio ).\n",
             f"  Unique tiles after dedupe (incl. flips): {n_unique} (hardware limit 1024).\n",
         ]
+        _tilemap_import_debug(
+            logs,
+            "png_decode",
+            bpp=int(spec.bpp),
+            map_tiles=f"{mw}x{mh}",
+            palette_color_count=tm_kw.get("palette_color_count"),
+            len_pal_flat=len(pal_flat),
+            len_tile_body=len(tile_body),
+            len_raw_map=len(raw_map),
+            n_unique=n_unique,
+            pan_key=pan_key or "",
+            tileset_anchor=tsn.strip(),
+        )
 
         try:
             map_payload = build_tilemap_payload_for_rom(raw_map, spec)
@@ -2949,8 +3091,36 @@ class GraphicsPreviewFrame(ttk.Frame):
                     self._set_log("".join(logs))
                     messagebox.showerror("Import tilemap", str(e))
                     return
+                need_before = palette_byte_count_for_spec(ext_ps)
+                u8_sfx = ""
+                if ext_ps.kind == "palette" and ext_ps.bpp == 8:
+                    try:
+                        u8_sfx = effective_ucp8_palette_hex_suffix(ext_ps)
+                    except ValueError:
+                        u8_sfx = "(error)"
+                _tilemap_import_debug(
+                    logs,
+                    "palette_before_prepare",
+                    anchor=pan_key,
+                    bpp=int(ext_ps.bpp),
+                    kind=str(ext_ps.kind),
+                    lz=bool(ext_ps.lz),
+                    palette_hex_digit=getattr(ext_ps, "palette_hex_digit", None),
+                    effective_ucp8_suffix=u8_sfx,
+                    need_bytes_spec=need_before,
+                    len_pal_flat=len(pal_flat),
+                    pal_cap_measure=pal_cap,
+                )
                 pal_body = prepare_palette_rom_body_from_import(ext_ps, pal_flat)
                 pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                pal_cap = max(pal_cap, len(pal_payload))
+                _tilemap_import_debug(
+                    logs,
+                    "palette_after_pack",
+                    len_pal_body=len(pal_body),
+                    len_pal_payload=len(pal_payload),
+                    pal_cap_final=pal_cap,
+                )
                 pal_anchor_name = pan_key if ga_p and ga_p["spec"].kind == "palette" else None
                 if pal_anchor_name and pal_is_table:
                     pal_anchor_name = None
@@ -2973,12 +3143,8 @@ class GraphicsPreviewFrame(ttk.Frame):
         else:
             logs.append("No |palette anchor: tileset + map written; palette bytes not written.\n")
 
-        # Resize tileset TOML WxH so preview matches unique tile count (packed grid).
-        try:
-            tw, th = suggest_sprite_grid_for_tile_count(n_unique)
-        except ValueError as e:
-            logs.append(f"TOML: {e}\n")
-            tw, th = 1, 1
+        # Tileset TOML: single strip (W×1) so tools resolve dimensions from unique tile count.
+        tw, th = max(1, int(n_unique)), 1
 
         def _should_rewrite_tileset_grid(sp: Any, w: int, h: int) -> bool:
             if getattr(sp, "kind", None) != "sprite":
@@ -3007,7 +3173,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     "TOML: could not auto-rewrite tileset Format; adjust WxH manually if preview is wrong.\n"
                 )
 
-        self._set_log("".join(logs) + "\nRe-decoding preview…\n")
+        self._gfx_decode_log_prefix = "".join(logs) + "\nRe-decoding preview…\n\n"
         self._decode_selected()
 
 
@@ -5685,6 +5851,7 @@ class HexEditorFrame(ttk.Frame):
         self._hackmew_asm_end: Optional[int] = None
         self._pseudo_c_pane_visible = False
         self._anchor_browser_pane_visible = False
+        self._anchor_tools_pane_layout: bool = False  # True when Anchors + Tools share a horizontal PanedWindow
         self._anchor_browser_path: List[str] = []
         self._ldr_pc_targets: Optional[Set[int]] = None
         self._ldr_pc_targets_valid = False
@@ -5758,7 +5925,7 @@ class HexEditorFrame(ttk.Frame):
         body.columnconfigure(2, weight=0)
         body.columnconfigure(3, weight=0)
         body.columnconfigure(4, weight=0)
-        body.columnconfigure(5, weight=0)
+        body.columnconfigure(5, weight=1)
         body.columnconfigure(6, weight=1)
         body.rowconfigure(0, weight=0)
         body.rowconfigure(1, weight=1)
@@ -5848,20 +6015,27 @@ class HexEditorFrame(ttk.Frame):
             w.bind("<Button-4>", lambda e: _pseudo_c_scroll(3))
             w.bind("<Button-5>", lambda e: _pseudo_c_scroll(-3))
 
+        # Horizontal sash between Anchors and Tools (user-adjustable width); Ctrl+M toggles Anchors pane.
+        self._anchor_tools_pane = ttk.PanedWindow(body, orient=tk.HORIZONTAL)
+
         # Function/NamedAnchor browser: hierarchical nav (1st -> 2nd -> 3rd order), Ctrl+M
         self._anchor_frame = ttk.LabelFrame(body, text=" Anchors ", padding=2)
-        self._anchor_frame.grid(row=1, column=5, sticky="nsew", padx=(4, 0))
         self._anchor_frame.columnconfigure(0, weight=1)
         self._anchor_frame.rowconfigure(0, weight=1)
         self._scroll_anchor = tk.Scrollbar(self._anchor_frame)
+        self._scroll_anchor_h = tk.Scrollbar(self._anchor_frame, orient=tk.HORIZONTAL)
         self._listbox_anchor = tk.Listbox(
             self._anchor_frame, font=("Consolas", 9), width=36, height=20,
             activestyle="dotbox", selectmode=tk.SINGLE,
             yscrollcommand=self._scroll_anchor.set,
+            xscrollcommand=self._scroll_anchor_h.set,
         )
+        self._scroll_anchor.configure(command=self._listbox_anchor.yview)
+        self._scroll_anchor_h.configure(command=self._listbox_anchor.xview)
         self._listbox_anchor.grid(row=0, column=0, sticky="nsew")
         self._scroll_anchor.grid(row=0, column=1, sticky="ns")
-        self._scroll_anchor.configure(command=self._listbox_anchor.yview)
+        self._scroll_anchor_h.grid(row=1, column=0, sticky="ew")
+        ttk.Frame(self._anchor_frame, width=12).grid(row=1, column=1, sticky="se")
         self._listbox_anchor.bind("<Double-Button-1>", self._on_anchor_browser_double_click)
 
         def _anchor_scroll(delta: int) -> None:
@@ -6348,11 +6522,39 @@ class HexEditorFrame(ttk.Frame):
         self._text.focus_set()
         self._anchor_browser_pane_visible = not self._anchor_browser_pane_visible
         if self._anchor_browser_pane_visible:
-            self._anchor_frame.grid(row=1, column=5, sticky="nsew", padx=(4, 0))
+            if not self._anchor_tools_pane_layout:
+                self._tools_frame.grid_remove()
+                self._anchor_tools_pane.add(self._anchor_frame, weight=1)
+                self._anchor_tools_pane.add(self._tools_frame, weight=1)
+                self._anchor_tools_pane.grid(row=1, column=5, columnspan=2, sticky="nsew", padx=(4, 0))
+                self._anchor_tools_pane_layout = True
+
+                def _apply_anchor_sash() -> None:
+                    try:
+                        self._anchor_tools_pane.sashpos(0, 320)
+                    except tk.TclError:
+                        pass
+
+                self.after_idle(_apply_anchor_sash)
+            else:
+                self._anchor_tools_pane.grid(row=1, column=5, columnspan=2, sticky="nsew", padx=(4, 0))
             self._anchor_browser_path = []
             self._refresh_anchor_browser()
         else:
-            self._anchor_frame.grid_remove()
+            if self._anchor_tools_pane_layout:
+                self._anchor_tools_pane.grid_remove()
+                try:
+                    self._anchor_tools_pane.remove(self._anchor_frame)
+                except tk.TclError:
+                    pass
+                try:
+                    self._anchor_tools_pane.remove(self._tools_frame)
+                except tk.TclError:
+                    pass
+                self._tools_frame.grid(row=1, column=6, sticky="nsew", padx=(4, 0))
+                self._anchor_tools_pane_layout = False
+            else:
+                self._anchor_frame.grid_remove()
         self.after_idle(self._refresh_visible)
         return "break"
 
@@ -8746,7 +8948,19 @@ Format = "`f|u8`[u8 arg0]"
             if err:
                 messagebox.showerror("Import palette", err)
                 return
-        pal_spec = GraphicsAnchorSpec(kind="palette", bpp=bpp, lz=lz)
+        if bpp == 4:
+            pal_spec = GraphicsAnchorSpec(kind="palette", bpp=4, lz=lz, palette_4_indices=None)
+        else:
+            syn = synthetic_palette_spec_for_sprite_import_write(
+                8,
+                rom_palette_colors_8bpp=n_colors_8,
+            )
+            pal_spec = GraphicsAnchorSpec(
+                kind="palette",
+                bpp=8,
+                lz=lz,
+                palette_hex_digit=syn.palette_hex_digit,
+            )
         try:
             payload = palette_payload_for_rom(pal_body, pal_spec, lz=lz)
         except ValueError as e:
@@ -8881,7 +9095,7 @@ Format = "`f|u8`[u8 arg0]"
                 msg += f"\nPalette: {len(pal_payload)} byte(s) at file 0x{pal_off:X} (GBA 0x{gba_p:08X})."
             link_pal = bool(write_pal and pal_off is not None and normalize_named_anchor_lookup_key(tom_pal_name))
             fmt_sprite = _toml_sprite_format_token_with_palette(
-                lz, bpp, tw, th, tom_pal_name if link_pal else ""
+                lz, bpp, tw * th, 1, tom_pal_name if link_pal else ""
             )
             did_reload = False
             if upd and tom_name:
@@ -8932,6 +9146,18 @@ Format = "`f|u8`[u8 arg0]"
         if err:
             messagebox.showerror("Import tilemap", err)
             return
+        _tilemap_import_debug(
+            None,
+            "file_static_png_map_after_decode",
+            bpp=bpp,
+            burner=True,
+            len_pal_flat=len(pal_flat),
+            len_raw_map=len(raw_map),
+            len_tile_body=len(tile_body),
+            map_tiles=f"{mw}x{mh}",
+            n_unique=n_u,
+            palette_color_count=pal_n,
+        )
         dest_map = _StaticRomOffsetDialog(
             parent,
             self,
@@ -8998,7 +9224,7 @@ Format = "`f|u8`[u8 arg0]"
         if not skip_pal and pal_off is not None:
             msg += f"\nPalette: {len(pal_payload)} byte(s) at 0x{pal_off:X}."
         if upd:
-            tw_g, th_g = suggest_sprite_grid_for_tile_count(n_u)
+            tw_g, th_g = max(1, int(n_u)), 1
             fmt_ts = _toml_sprite_format_token(False, bpp, tw_g, th_g)
             fmt_pal = _toml_palette_format_for_tilemap_bpp(bpp, rom_clip_8 if bpp == 8 else None)
             gba_m = dest_map.result + GBA_ROM_BASE
