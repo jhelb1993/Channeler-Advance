@@ -17,7 +17,7 @@ import threading
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from editors.common.channeler_script_api import format_run_header, run_user_script
 from editors.common.gba_graphics import (
@@ -340,7 +340,7 @@ CHANNELER_SCRIPT_TEMPLATE = """# In-tool script (Ctrl+Shift+Enter). API: ch / ch
 #  Why here: ch reads/writes the ROM open in this window (+ TOML); a .py on disk must reopen the .gba.
 #  ch.log("msg")          — append to output pane
 #  ch.toml                — copy of loaded TOML dict (FunctionAnchors / NamedAnchors / …)
-#  ch.resolve("name")      — (file_offset|None, err) for Goto-style / NamedAnchor names
+#  ch.resolve("name")      — (file_offset|None, err) for Goto / NamedAnchor / ]count [[List]] name
 #  ch.read_u32_le(off)     ch.write_bytes(off, bytes)
 #  ch.label_for_gba(0x08001234)  — merged pokefirered.sym + TOML name, or None
 #  ch.label_for_rom_pointer_word(w)  — word as symbol or hex
@@ -597,6 +597,15 @@ def _strip_outer_backticks(s: str) -> str:
     while len(t) >= 2 and t[0] == "`" and t[-1] == "`":
         t = t[1:-1].strip()
     return t
+
+
+def _struct_count_ref_base_name(count_ref: str) -> str:
+    """Strip a single trailing ``±N`` from a ``]count`` token (same base step as :meth:`HexEditorFrame._resolve_struct_count`)."""
+    s = str(count_ref).strip()
+    m = re.match(r"^(.+?)([+-]\d+)$", s)
+    if m:
+        return m.group(1).strip()
+    return s
 
 
 def normalize_named_anchor_lookup_key(s: str) -> str:
@@ -3510,14 +3519,16 @@ def _split_enum_field_ref(enum_ref: Optional[str]) -> Tuple[str, int]:
     Parse ``listname`` or ``listname+3`` / ``foo.bar-2`` (trailing ``±`` integer only; base is ``[\\w.]+``).
 
     ROM stores ``idx``; labels / PCS rows use ``idx + delta`` (forward with ``+``, backward with ``-``).
+    Leading ``.`` on the base is stripped so Format paths like ``.attributes`` match TOML ``Name = "attributes"``.
     """
     if not enum_ref:
         return "", 0
     s = str(enum_ref).strip()
     m = re.match(r"^([\w.]+)([+-]\d+)$", s)
     if m:
-        return m.group(1).strip(), int(m.group(2))
-    return s, 0
+        base = m.group(1).strip().lstrip(".")
+        return base, int(m.group(2))
+    return s.lstrip("."), 0
 
 
 def parse_struct_tree_iid(iid: str) -> Tuple[int, Any]:
@@ -3567,34 +3578,42 @@ def _normalize_bitfield_token_spacing(token: str) -> str:
     return t
 
 
-def _parse_bitfield_segment_spec(seg: str) -> Optional[Tuple[str, int]]:
-    """Parse one ``name`` + ``[.:]+`` width segment; optional trailing ``.table.path`` enum label (not bits).
+def _parse_bitfield_segment_spec(seg: str) -> Optional[Tuple[str, int, Optional[str]]]:
+    """Parse one bitfield subfield: ``name`` + ``[.:]+`` width run + optional enum identifier.
 
-    Example: ``color:::.bodycolors`` → 6 bits for ``color`` (``:::``), ``.bodycolors`` is the [[List]] path only."""
+    **Every** ``.`` and ``:`` between the field name and the enum name is a width character
+    (``.`` = 1 bit, ``:`` = 2 bits). The first ``\\w`` character after the width run starts the enum ref.
+
+    Examples (name, bits, enum):
+      ``stars::``                          → (stars, 4, None)
+      ``defn::::.``                        → (defn, 9, None)
+      ``type:types``                       → (type, 2, types)
+      ``race::.races``                     → (race, 5, races)       — the ``.`` before ``races`` is 1 width bit
+      ``attribute:.attributes``            → (attribute, 3, attributes)
+      ``color:::.bodycolors``              → (color, 7, bodycolors)
+      ``move::::.data.pokemon.moves.names`` → (move, 9, data.pokemon.moves.names)
+
+    Third tuple element is the enum ref for :meth:`StructEditorFrame._resolve_enum`, or None."""
     seg = seg.strip()
     if not seg:
         return None
-    body = seg
-    mtail = re.search(r"(\.[\w.]+)$", seg)
-    if mtail:
-        cand = seg[: mtail.start()]
-        if re.match(r"^(\w+)([.:]+)$", cand):
-            body = cand
-    sm = re.match(r"^(\w+)([.:]+)$", body)
-    if not sm:
+    m = re.match(r"^(\w+)([.:]+)(\w[\w.]*(?:[+-]\d+)?)?$", seg)
+    if not m:
         return None
-    sub_name = sm.group(1)
-    sch = sm.group(2)
+    sub_name = m.group(1)
+    sch = m.group(2)
     nbits = sum(1 if c == "." else 2 for c in sch)
     if nbits <= 0:
         return None
-    return (sub_name, nbits)
+    enum_ref = m.group(3) if m.group(3) else None
+    return (sub_name, nbits, enum_ref)
 
 
 def _parse_bitfield_token(token: str) -> Optional[Dict[str, Any]]:
     """Parse bitfield tokens. Storage width before ``|t|`` matches uints: ``.`` = 1 byte, ``:`` = 2 bytes per colon
     (e.g. ``field.|t|`` = 1 byte, ``field:|t|`` = 2 bytes, ``field::|t|`` = 4 bytes). After ``|t|``, subfields are
-    ``|``-separated; in each subfield, ``.`` = 1 bit and ``:`` = 2 bits per run.
+    ``|``-separated; every ``.`` = 1 bit and every ``:`` = 2 bits in the width run between name and enum identifier
+    (e.g. ``race::.races`` = 5 bits + enum ``races``; ``color:::.bodycolors`` = 7 bits + enum ``bodycolors``).
     Subfields may sum to fewer bits than the storage size; the rest is implicit padding (kept on write).
 
     If the head uses a single ``.`` (1 byte) but subfields need 9–16 bits, storage is promoted to **2 bytes**
@@ -3618,13 +3637,13 @@ def _parse_bitfield_token(token: str) -> Optional[Dict[str, Any]]:
     segments = [x.strip() for x in tail.split("|") if x.strip()]
     if not segments:
         return None
-    part_specs: List[Tuple[str, int]] = []
+    part_specs: List[Tuple[str, int, Optional[str]]] = []
     for seg in segments:
         parsed_seg = _parse_bitfield_segment_spec(seg)
         if parsed_seg is None:
             return None
         part_specs.append(parsed_seg)
-    sum_bits = sum(n for _, n in part_specs)
+    sum_bits = sum(n for _, n, _e in part_specs)
     if sum_bits <= 0:
         return None
 
@@ -3638,8 +3657,11 @@ def _parse_bitfield_token(token: str) -> Optional[Dict[str, Any]]:
 
     parts: List[Dict[str, Any]] = []
     shift = 0
-    for sub_name, nbits in part_specs:
-        parts.append({"name": sub_name, "bits": nbits, "shift": shift})
+    for sub_name, nbits, sub_enum in part_specs:
+        pd: Dict[str, Any] = {"name": sub_name, "bits": nbits, "shift": shift}
+        if sub_enum:
+            pd["enum"] = sub_enum
+        parts.append(pd)
         shift += nbits
     padding_bits = total_bits - shift
     return {
@@ -4333,12 +4355,12 @@ def _find_pcs_table_for_struct_suffix(
 
 
 def _load_toml_lists(toml_data: Dict[str, Any]) -> Dict[str, Dict[int, str]]:
-    """Load [[List]] entries into {name: {index: label}}."""
+    """Load [[List]] entries into {name: {index: label}} (names normalized like NamedAnchors)."""
     lists: Dict[str, Dict[int, str]] = {}
     for lst in toml_data.get("List", []):
         if not isinstance(lst, dict):
             continue
-        name = str(lst.get("Name", "")).strip().strip("'\"")
+        name = normalize_named_anchor_lookup_key(str(lst.get("Name", "")))
         if not name:
             continue
         enum_map: Dict[int, str] = {}
@@ -4398,8 +4420,44 @@ class StructEditorFrame(ttk.Frame):
         self._edit_entry: Optional[tk.Entry] = None
         self._edit_iid: Optional[str] = None
         self._entry_index_context_pcs: Optional[Dict[str, Any]] = None
+        self._entry_index_context_list: Optional[str] = None
         self._struct_filter_job: Optional[str] = None
         self._build()
+
+    def _entry_pcs_row_for_struct_index(self, struct_idx: int) -> Optional[int]:
+        """PCS row for ``]pcsTable±N…`` struct count: ``pcs_row = struct_idx - (struct_count - pcs_count)``.
+
+        When the Format suffix only changes the struct table length (e.g. ``data.pokemon.names+1``), the
+        linked PCS table row count differs by the same amount; map struct indices so lookup matches that offset.
+        """
+        pcs = self._entry_index_context_pcs
+        if not pcs:
+            return None
+        pcs_n = int(pcs.get("count") or 0)
+        if pcs_n <= 0:
+            return None
+        delta = int(self._entry_count) - pcs_n
+        row = int(struct_idx) - delta
+        if 0 <= row < pcs_n:
+            return row
+        return None
+
+    def _entry_list_row_for_struct_index(self, struct_idx: int, list_name: str) -> Optional[int]:
+        """Map struct row index to flat ``[[List]]`` index (same delta rule as :meth:`_entry_pcs_row_for_struct_index`)."""
+        lm = self._hex.get_lists().get(list_name)
+        if not lm:
+            return None
+        list_n = self._hex._resolve_list_entry_span_end(list_name)
+        if list_n is None or list_n <= 0:
+            mk = [k for k in lm.keys() if isinstance(k, int)]
+            list_n = max(mk) + 1 if mk else 0
+        if list_n <= 0:
+            return None
+        delta = int(self._entry_count) - int(list_n)
+        row = int(struct_idx) - delta
+        if 0 <= row < list_n:
+            return row
+        return None
 
     def _entry_file_offset(self, entry_idx: int) -> int:
         """ROM file offset of struct row ``entry_idx`` (packed ``!HEX`` tables scan previous rows)."""
@@ -4737,6 +4795,7 @@ class StructEditorFrame(ttk.Frame):
         self._list_enum_pcs_block.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 2))
         self._list_enum_pcs_block.grid_remove()
         self._list_enum_fi: Optional[int] = None
+        self._list_enum_ctx: Optional[Dict[str, Any]] = None
         self._list_enum_frame.grid(row=3, column=0, sticky="ew", pady=(0, 2))
         self._list_enum_frame.grid_remove()
 
@@ -5395,8 +5454,9 @@ class StructEditorFrame(ttk.Frame):
         ref = base.strip()
         if not ref:
             return None
+        nk = normalize_named_anchor_lookup_key(ref)
         for info in self._hex.get_pcs_table_anchors():
-            if info["name"] == ref:
+            if normalize_named_anchor_lookup_key(str(info["name"])) == nk:
                 return info
         return None
 
@@ -5404,13 +5464,13 @@ class StructEditorFrame(ttk.Frame):
         if fd.get("type") != "uint" or not fd.get("enum"):
             return False
         base, _ = _split_enum_field_ref(fd["enum"])
-        return bool(base) and base in self._lists
+        return bool(base) and normalize_named_anchor_lookup_key(base) in self._lists
 
     def _is_pcs_table_enum_field(self, fd: Dict[str, Any]) -> bool:
         if fd.get("type") != "uint" or not fd.get("enum"):
             return False
         base, _ = _split_enum_field_ref(fd["enum"])
-        if not base or base in self._lists:
+        if not base or normalize_named_anchor_lookup_key(base) in self._lists:
             return False
         return self._find_pcs_anchor_info_for_enum(fd["enum"]) is not None
 
@@ -5418,54 +5478,60 @@ class StructEditorFrame(ttk.Frame):
         return self._is_toml_list_enum_field(fd) or self._is_pcs_table_enum_field(fd)
 
     def _update_list_enum_panel(self) -> None:
-        """Show ROM index combobox + [[List]] TOML editor or PCS table string editor."""
+        """Show ROM index combobox + [[List]] TOML editor or PCS table string editor (uint or bitfield subfield)."""
         sel = self._tree.selection()
         if not sel or not sel[0].startswith("sf_"):
             self._list_enum_frame.grid_remove()
             self._list_enum_fi = None
+            self._list_enum_ctx = None
             self._list_enum_active_pcs = None
             return
-        fi, sp = parse_struct_tree_iid(sel[0])
-        if _struct_tree_spec_is_nested(sp):
+        ctx = self._struct_resolve_enum_field_context(sel[0])
+        self._list_enum_ctx = ctx
+        if ctx is None:
             self._list_enum_frame.grid_remove()
             self._list_enum_fi = None
             self._list_enum_active_pcs = None
             return
-        if fi >= len(self._fields):
-            self._list_enum_frame.grid_remove()
-            self._list_enum_fi = None
-            self._list_enum_active_pcs = None
-            return
-        fd = self._fields[fi]
-        if not self._is_enum_panel_field(fd):
-            self._list_enum_frame.grid_remove()
-            self._list_enum_fi = None
-            self._list_enum_active_pcs = None
-            return
-        self._list_enum_fi = fi
+        fd = ctx["fd"]
+        self._list_enum_fi = int(ctx["fi"])
         self._list_enum_frame.grid(row=3, column=0, sticky="ew", pady=(0, 2))
         data = self._hex.get_data()
         if not data:
             return
-        try:
-            entry_idx = int(self._idx_var.get())
-        except ValueError:
-            return
-        foff = self._entry_file_offset(entry_idx) + fd["offset"]
-        if foff + fd["size"] > len(data):
-            return
-        cur = int.from_bytes(data[foff:foff + fd["size"]], "little")
+        foff = int(ctx["foff"])
+        kind = ctx["kind"]
+        er = ctx["enum_ref"]
+        if kind in ("uint", "nested_uint"):
+            if foff + int(fd["size"]) > len(data):
+                return
+            cur = int.from_bytes(data[foff : foff + int(fd["size"])], "little")
+        else:
+            if foff + int(fd["size"]) > len(data):
+                return
+            val = int.from_bytes(data[foff : foff + int(fd["size"])], "little")
+            part = ctx["part"]
+            cur = (val >> part["shift"]) & ((1 << part["bits"]) - 1)
+
         self._list_enum_idx_by_combo = []
         display_vals: List[str] = []
+        list_base, delta = _split_enum_field_ref(er)
+        list_key = normalize_named_anchor_lookup_key(list_base)
+        list_row = cur + delta
 
-        if self._is_toml_list_enum_field(fd):
+        if list_key in self._lists:
             self._list_enum_active_pcs = None
             self._list_enum_toml_block.grid()
             self._list_enum_pcs_block.grid_remove()
-            list_base, delta = _split_enum_field_ref(fd["enum"])
-            lm = self._lists.get(list_base, {})
-            list_row = cur + delta
+            lm = self._lists.get(list_key, {})
+            mx_bf: Optional[int] = None
+            if kind not in ("uint", "nested_uint"):
+                mx_bf = (1 << int(ctx["part"]["bits"])) - 1
             for idx in sorted(lm.keys()):
+                if mx_bf is not None:
+                    rom_try = idx - delta
+                    if rom_try < 0 or rom_try > mx_bf:
+                        continue
                 lab = lm[idx]
                 self._list_enum_idx_by_combo.append(idx)
                 short = lab.replace("\n", " ")
@@ -5476,20 +5542,33 @@ class StructEditorFrame(ttk.Frame):
             try:
                 pos = self._list_enum_idx_by_combo.index(list_row)
             except ValueError:
-                self._list_enum_rom_combo.set(
-                    f"(ROM {cur} → list row {list_row} — not in [[List]] {list_base!r})"
-                )
+                if mx_bf is not None and list_row in lm:
+                    self._list_enum_rom_combo.set(
+                        f"(list row {list_row} needs ROM {list_row - delta}; "
+                        f"subfield allows 0–{mx_bf} — widen Format or trim [[List]])"
+                    )
+                else:
+                    self._list_enum_rom_combo.set(
+                        f"(ROM {cur} → list row {list_row} — not in [[List]] {list_base!r})"
+                    )
             else:
                 self._list_enum_rom_combo.current(pos)
             self._list_enum_toml_var.set(lm.get(list_row, ""))
             return
 
-        pcs_info = self._find_pcs_anchor_info_for_enum(fd["enum"])
+        pcs_info = self._find_pcs_anchor_info_for_enum(er)
         self._list_enum_active_pcs = pcs_info
         self._list_enum_toml_block.grid_remove()
         self._list_enum_pcs_block.grid()
         count = int(pcs_info.get("count") or 0) if pcs_info else 0
+        mx_bf_pcs: Optional[int] = None
+        if kind not in ("uint", "nested_uint"):
+            mx_bf_pcs = (1 << int(ctx["part"]["bits"])) - 1
         for idx in range(count):
+            if mx_bf_pcs is not None:
+                rom_try = idx - delta
+                if rom_try < 0 or rom_try > mx_bf_pcs:
+                    continue
             lab = self._pcs_decode_table_row(pcs_info, idx) if pcs_info else ""
             self._list_enum_idx_by_combo.append(idx)
             short = lab.replace("\n", " ")
@@ -5497,69 +5576,93 @@ class StructEditorFrame(ttk.Frame):
                 short = short[:49] + "…"
             display_vals.append(f"{idx}: {short}")
         self._list_enum_rom_combo["values"] = tuple(display_vals)
-        _, delta = _split_enum_field_ref(fd["enum"])
-        list_row = cur + delta
-        if 0 <= list_row < count:
-            self._list_enum_rom_combo.current(list_row)
+        try:
+            pos = self._list_enum_idx_by_combo.index(list_row)
+        except ValueError:
+            if mx_bf_pcs is not None and 0 <= list_row < count:
+                self._list_enum_rom_combo.set(
+                    f"(PCS row {list_row} needs ROM {list_row - delta}; "
+                    f"subfield allows 0–{mx_bf_pcs} — widen Format or trim PCS table)"
+                )
+            else:
+                self._list_enum_rom_combo.set(
+                    f"(ROM {cur} → PCS row {list_row} — past table or negative)"
+                )
         else:
-            self._list_enum_rom_combo.set(
-                f"(ROM {cur} → PCS row {list_row} — past table or negative)"
-            )
+            self._list_enum_rom_combo.current(pos)
         if pcs_info and 0 <= list_row < count:
             self._list_enum_pcs_var.set(self._pcs_decode_table_row(pcs_info, list_row))
         else:
             self._list_enum_pcs_var.set("")
 
     def _on_list_enum_rom_combo(self, event: Optional[tk.Event] = None) -> None:
-        fi = self._list_enum_fi
-        if fi is None or fi >= len(self._fields):
+        ctx = self._list_enum_ctx
+        if ctx is None:
             return
-        fd = self._fields[fi]
-        if not self._is_enum_panel_field(fd):
-            return
+        fd = ctx["fd"]
         pos = self._list_enum_rom_combo.current()
         if pos < 0 or pos >= len(self._list_enum_idx_by_combo):
             return
         new_idx = self._list_enum_idx_by_combo[pos]
-        _, delta = _split_enum_field_ref(fd.get("enum"))
+        _, delta = _split_enum_field_ref(ctx["enum_ref"])
         rom_val = new_idx - delta
         if rom_val < 0:
             messagebox.showwarning("Struct", f"Selection would need ROM index {rom_val} (negative).")
             return
-        max_u = (1 << (8 * fd["size"])) - 1 if fd["size"] <= 8 else (1 << 32) - 1
-        if rom_val > max_u:
-            messagebox.showwarning("Struct", f"ROM index {rom_val} does not fit field size.")
-            return
-        data = self._hex.get_data()
-        if not data:
-            return
+        kind = ctx["kind"]
+        if kind in ("uint", "nested_uint"):
+            max_u = (1 << (8 * int(fd["size"]))) - 1 if int(fd["size"]) <= 8 else (1 << 32) - 1
+            if rom_val > max_u:
+                messagebox.showwarning("Struct", f"ROM index {rom_val} does not fit field size.")
+                return
+        else:
+            part = ctx["part"]
+            mx = (1 << part["bits"]) - 1
+            if rom_val > mx or rom_val < 0:
+                messagebox.showwarning(
+                    "Struct",
+                    f"ROM value {rom_val} does not fit this subfield ({part.get('bits', '?')} bits, "
+                    f"allowed 0–{mx}). Widen the segment in the Format string or remove list rows "
+                    f"that need a larger stored value.",
+                )
+                return
         try:
             entry_idx = int(self._idx_var.get())
         except ValueError:
             return
-        foff = self._entry_file_offset(entry_idx) + fd["offset"]
-        if foff + fd["size"] > len(data):
+        entry_base = self._entry_file_offset(entry_idx)
+        foff = int(ctx["foff"])
+        data = self._hex.get_data()
+        if not data or foff + int(fd["size"]) > len(data):
             return
-        self._hex.write_bytes_at(foff, rom_val.to_bytes(fd["size"], "little"))
-        iid = f"sf_{fi}"
-        data2 = self._hex.get_data()
-        if data2 and self._tree.exists(iid):
-            raw = bytes(data2[foff:foff + fd["size"]])
-            entry_base = self._entry_file_offset(entry_idx)
-            self._tree.set(iid, "val", self._format_value(raw, fd, entry_base=entry_base))
+        if kind in ("uint", "nested_uint"):
+            self._hex.write_bytes_at(foff, rom_val.to_bytes(int(fd["size"]), "little"))
+            data2 = self._hex.get_data()
+            if data2:
+                raw = bytes(data2[foff : foff + int(fd["size"])])
+                tiid = ctx.get("tree_iid") or f"sf_{ctx['fi']}"
+                if self._tree.exists(tiid):
+                    self._tree.set(tiid, "val", self._format_value(raw, fd, entry_base=entry_base))
             self._refresh_helper_field_rows(entry_base)
-        if self._is_toml_list_enum_field(fd):
-            list_base, _ = _split_enum_field_ref(fd["enum"])
-            self._list_enum_toml_var.set(self._lists.get(list_base, {}).get(new_idx, ""))
+        else:
+            if not self._write_bitfield_subvalue_merge(foff, fd, int(ctx["part_idx"]), rom_val):
+                return
+            self._refresh_bitfield_tree_rows_from_ctx(ctx)
+            self._refresh_helper_field_rows(entry_base)
+
+        lk = normalize_named_anchor_lookup_key(_split_enum_field_ref(ctx["enum_ref"])[0])
+        if lk in self._lists:
+            self._list_enum_toml_var.set(self._lists.get(lk, {}).get(new_idx, ""))
         elif self._list_enum_active_pcs:
             self._list_enum_pcs_var.set(self._pcs_decode_table_row(self._list_enum_active_pcs, new_idx))
 
     def _on_list_enum_toml_apply(self) -> None:
-        fi = self._list_enum_fi
-        if fi is None or fi >= len(self._fields):
+        ctx = self._list_enum_ctx
+        if ctx is None:
             return
-        fd = self._fields[fi]
-        if not self._is_toml_list_enum_field(fd):
+        fd = ctx["fd"]
+        lk = normalize_named_anchor_lookup_key(_split_enum_field_ref(ctx["enum_ref"])[0])
+        if lk not in self._lists:
             return
         data = self._hex.get_data()
         if not data:
@@ -5568,32 +5671,41 @@ class StructEditorFrame(ttk.Frame):
             entry_idx = int(self._idx_var.get())
         except ValueError:
             return
-        foff = self._entry_file_offset(entry_idx) + fd["offset"]
-        if foff + fd["size"] > len(data):
+        foff = int(ctx["foff"])
+        if foff + int(fd["size"]) > len(data):
             return
-        cur = int.from_bytes(data[foff:foff + fd["size"]], "little")
-        list_name, delta = _split_enum_field_ref(fd["enum"])
+        kind = ctx["kind"]
+        if kind in ("uint", "nested_uint"):
+            cur = int.from_bytes(data[foff : foff + int(fd["size"])], "little")
+        else:
+            val = int.from_bytes(data[foff : foff + int(fd["size"])], "little")
+            part = ctx["part"]
+            cur = (val >> part["shift"]) & ((1 << part["bits"]) - 1)
+        _, delta = _split_enum_field_ref(ctx["enum_ref"])
         list_row = cur + delta
         new_s = self._list_enum_toml_var.get()
-        if not self._hex.update_toml_list_string_at_index(list_name, list_row, new_s):
+        if not self._hex.update_toml_list_string_at_index(lk, list_row, new_s):
             return
         self._reload_lists()
         self._update_list_enum_panel()
-        iid = f"sf_{fi}"
+        entry_base = self._entry_file_offset(entry_idx)
         data2 = self._hex.get_data()
-        if data2 and self._tree.exists(iid):
-            raw = bytes(data2[foff:foff + fd["size"]])
-            entry_base = self._entry_file_offset(entry_idx)
-            self._tree.set(iid, "val", self._format_value(raw, fd, entry_base=entry_base))
-            self._refresh_helper_field_rows(entry_base)
+        if not data2:
+            return
+        if kind in ("uint", "nested_uint"):
+            raw = bytes(data2[foff : foff + int(fd["size"])])
+            tiid = ctx.get("tree_iid") or f"sf_{ctx['fi']}"
+            if self._tree.exists(tiid):
+                self._tree.set(tiid, "val", self._format_value(raw, fd, entry_base=entry_base))
+        else:
+            self._refresh_bitfield_tree_rows_from_ctx(ctx)
+        self._refresh_helper_field_rows(entry_base)
 
     def _on_list_enum_pcs_apply(self) -> None:
-        fi = self._list_enum_fi
-        if fi is None or fi >= len(self._fields):
+        ctx = self._list_enum_ctx
+        if ctx is None or not self._list_enum_active_pcs:
             return
-        fd = self._fields[fi]
-        if not self._is_pcs_table_enum_field(fd) or not self._list_enum_active_pcs:
-            return
+        fd = ctx["fd"]
         data = self._hex.get_data()
         if not data:
             return
@@ -5601,13 +5713,19 @@ class StructEditorFrame(ttk.Frame):
             entry_idx = int(self._idx_var.get())
         except ValueError:
             return
-        foff = self._entry_file_offset(entry_idx) + fd["offset"]
-        if foff + fd["size"] > len(data):
+        foff = int(ctx["foff"])
+        if foff + int(fd["size"]) > len(data):
             return
-        cur = int.from_bytes(data[foff:foff + fd["size"]], "little")
+        kind = ctx["kind"]
+        if kind in ("uint", "nested_uint"):
+            cur = int.from_bytes(data[foff : foff + int(fd["size"])], "little")
+        else:
+            val = int.from_bytes(data[foff : foff + int(fd["size"])], "little")
+            part = ctx["part"]
+            cur = (val >> part["shift"]) & ((1 << part["bits"]) - 1)
         pcs_info = self._list_enum_active_pcs
         count = int(pcs_info.get("count") or 0)
-        _, delta = _split_enum_field_ref(fd.get("enum"))
+        _, delta = _split_enum_field_ref(ctx["enum_ref"])
         list_row = cur + delta
         if list_row < 0 or list_row >= count:
             messagebox.showwarning(
@@ -5620,13 +5738,18 @@ class StructEditorFrame(ttk.Frame):
             messagebox.showerror("Struct", "Could not write PCS string (bad address or ROM bounds).")
             return
         self._update_list_enum_panel()
-        iid = f"sf_{fi}"
+        entry_base = self._entry_file_offset(entry_idx)
         data2 = self._hex.get_data()
-        if data2 and self._tree.exists(iid):
-            raw = bytes(data2[foff:foff + fd["size"]])
-            entry_base = self._entry_file_offset(entry_idx)
-            self._tree.set(iid, "val", self._format_value(raw, fd, entry_base=entry_base))
-            self._refresh_helper_field_rows(entry_base)
+        if not data2:
+            return
+        if kind in ("uint", "nested_uint"):
+            tiid = ctx.get("tree_iid") or f"sf_{ctx['fi']}"
+            if self._tree.exists(tiid):
+                raw = bytes(data2[foff : foff + int(fd["size"])])
+                self._tree.set(tiid, "val", self._format_value(raw, fd, entry_base=entry_base))
+        else:
+            self._refresh_bitfield_tree_rows_from_ctx(ctx)
+        self._refresh_helper_field_rows(entry_base)
 
     def _pcs_table_row_file_offset(self, pcs_info: Dict[str, Any], row_idx: int) -> Optional[int]:
         """File offset of one row in a PCS table anchor, or None."""
@@ -5673,12 +5796,21 @@ class StructEditorFrame(ttk.Frame):
         except ValueError:
             return
         idx = max(0, min(idx, self._entry_count - 1))
-        pcs_count = int(self._entry_index_context_pcs.get("count") or 0)
-        if idx >= pcs_count:
-            messagebox.showwarning("Struct", "Current index is past the PCS table length.")
+        pcs_row = self._entry_pcs_row_for_struct_index(idx)
+        if pcs_row is None:
+            pcs_count = int(self._entry_index_context_pcs.get("count") or 0)
+            delta = int(self._entry_count) - pcs_count
+            raw = idx - delta
+            if raw < 0:
+                messagebox.showwarning(
+                    "Struct",
+                    "This struct index maps before the first PCS row (check Format ]count ±N vs table size).",
+                )
+            else:
+                messagebox.showwarning("Struct", "Current index maps past the PCS table length.")
             return
         text = self._entry_label_pcs_var.get()
-        if not self._write_pcs_table_row(self._entry_index_context_pcs, idx, text):
+        if not self._write_pcs_table_row(self._entry_index_context_pcs, pcs_row, text):
             messagebox.showerror("Struct", "Could not write PCS string (bad address or ROM bounds).")
             return
         self._update_entry_index_name_label()
@@ -5734,6 +5866,7 @@ class StructEditorFrame(ttk.Frame):
         self._struct_packed_terminator = bool(info.get("packed_terminator"))
         self._packed_terminator_fd = info.get("packed_terminator_fd")
         self._entry_index_context_pcs = info.get("entry_label_pcs")
+        self._entry_index_context_list = info.get("entry_label_list")
         self._idx_spin.configure(to=max(0, self._entry_count - 1))
         self._idx_var.set("0")
         self._entry_label.config(text=f"/ {self._entry_count}")
@@ -5784,11 +5917,7 @@ class StructEditorFrame(ttk.Frame):
         return "".join(chars)
 
     def _update_entry_index_name_label(self) -> None:
-        """Show PCS text from the Format ]suffix table at the current entry index, if applicable."""
-        if not self._entry_index_context_pcs:
-            self._entry_index_name_label.grid_remove()
-            self._entry_label_pcs_frame.grid_remove()
-            return
+        """Show PCS or ``[[List]]`` label for the current entry when ``]count`` matches a PCS table or List name."""
         try:
             idx = int(self._idx_var.get())
         except ValueError:
@@ -5796,20 +5925,50 @@ class StructEditorFrame(ttk.Frame):
             self._entry_label_pcs_frame.grid_remove()
             return
         idx = max(0, min(idx, self._entry_count - 1))
-        pcs_count = int(self._entry_index_context_pcs.get("count") or 0)
-        if idx >= pcs_count:
-            self._entry_index_name_label.config(text="→ (past PCS table)")
+
+        if self._entry_index_context_pcs:
+            pcs_row = self._entry_pcs_row_for_struct_index(idx)
+            if pcs_row is None:
+                pcs_count = int(self._entry_index_context_pcs.get("count") or 0)
+                delta = int(self._entry_count) - pcs_count
+                raw = idx - delta
+                if raw < 0:
+                    self._entry_index_name_label.config(text="→ (before PCS table)")
+                else:
+                    self._entry_index_name_label.config(text="→ (past PCS table)")
+                self._entry_index_name_label.grid()
+                self._entry_label_pcs_frame.grid_remove()
+                return
+            txt = self._pcs_decode_table_row(self._entry_index_context_pcs, pcs_row)
+            if txt:
+                self._entry_index_name_label.config(text=f"→ {txt}")
+            else:
+                self._entry_index_name_label.config(text="→ (empty)")
+            self._entry_index_name_label.grid()
+            self._entry_label_pcs_var.set(txt)
+            self._entry_label_pcs_frame.grid()
+            return
+
+        if self._entry_index_context_list:
+            ln = self._entry_index_context_list
+            row = self._entry_list_row_for_struct_index(idx, ln)
+            lm = self._hex.get_lists().get(ln) or {}
+            if row is None:
+                self._entry_index_name_label.config(text="→ (outside [[List]] range)")
+                self._entry_index_name_label.grid()
+                self._entry_label_pcs_frame.grid_remove()
+                return
+            txt = lm.get(row, "")
+            if txt:
+                self._entry_index_name_label.config(text=f"→ {txt}")
+            else:
+                self._entry_index_name_label.config(text="→ (empty)")
             self._entry_index_name_label.grid()
             self._entry_label_pcs_frame.grid_remove()
             return
-        txt = self._pcs_decode_table_row(self._entry_index_context_pcs, idx)
-        if txt:
-            self._entry_index_name_label.config(text=f"→ {txt}")
-        else:
-            self._entry_index_name_label.config(text="→ (empty)")
-        self._entry_index_name_label.grid()
-        self._entry_label_pcs_var.set(txt)
-        self._entry_label_pcs_frame.grid()
+
+        self._entry_index_name_label.grid_remove()
+        self._entry_label_pcs_frame.grid_remove()
 
     def _reload_lists(self) -> None:
         self._lists = self._hex.get_lists()
@@ -5818,6 +5977,8 @@ class StructEditorFrame(ttk.Frame):
         self._anchors = self._hex.get_struct_anchors()
         self._reload_lists()
         self._entry_index_context_pcs = None
+        self._entry_index_context_list = None
+        self._list_enum_ctx = None
         self._entry_index_name_label.grid_remove()
         self._entry_label_pcs_frame.grid_remove()
         self._list_enum_frame.grid_remove()
@@ -5945,6 +6106,7 @@ class StructEditorFrame(ttk.Frame):
         self._ptr_text_fi = None
         self._list_enum_frame.grid_remove()
         self._list_enum_fi = None
+        self._list_enum_ctx = None
         self._gfx_sprite_frame.grid_remove()
         self._gfx_tilemap_frame.grid_remove()
         self._gfx_fi = None
@@ -5990,10 +6152,11 @@ class StructEditorFrame(ttk.Frame):
                                 for j, p in enumerate(ifd["parts"]):
                                     subv = (val >> p["shift"]) & ((1 << p["bits"]) - 1)
                                     label = f"{fd['name']}[{ai}].{p['name']}"
+                                    disp = self._format_bitfield_part_display(subv, p)
                                     self._tree.insert(
                                         "",
                                         tk.END,
-                                        values=(label, str(subv)),
+                                        values=(label, disp),
                                         iid=f"sf_nab_{fi}_{ai}_{ij}_{j}",
                                     )
                             else:
@@ -6015,10 +6178,11 @@ class StructEditorFrame(ttk.Frame):
                     val = int.from_bytes(raw, "little")
                     for j, p in enumerate(fd["parts"]):
                         subv = (val >> p["shift"]) & ((1 << p["bits"]) - 1)
+                        disp = self._format_bitfield_part_display(subv, p)
                         self._tree.insert(
                             "",
                             tk.END,
-                            values=(p["name"], str(subv)),
+                            values=(p["name"], disp),
                             iid=f"sf_{fi}_b{j}",
                         )
                     continue
@@ -6032,6 +6196,170 @@ class StructEditorFrame(ttk.Frame):
         finally:
             self._update_entry_index_name_label()
             self._sync_field_aux_panels()
+
+    def _format_bitfield_part_display(self, subv: int, part: Dict[str, Any]) -> str:
+        """Pretty-print one bitfield subfield; use [[List]] / PCS like uint :enum when ``part['enum']`` is set."""
+        er = part.get("enum")
+        if er:
+            label = self._resolve_enum(subv, str(er))
+            if label is not None:
+                return label
+        return str(subv)
+
+    def _struct_resolve_enum_field_context(self, iid: str) -> Optional[Dict[str, Any]]:
+        """Map tree row id to enum panel context: top-level uint, top-level bitfield part, nested uint, nested bitfield part."""
+        if not iid.startswith("sf_"):
+            return None
+        fi, sp = parse_struct_tree_iid(iid)
+        if fi < 0 or fi >= len(self._fields):
+            return None
+        try:
+            entry_idx = int(self._idx_var.get())
+        except ValueError:
+            return None
+        entry_base = self._entry_file_offset(entry_idx)
+
+        if isinstance(sp, tuple) and sp[0] == "na":
+            _, ai, ij = sp
+            na_fd = self._fields[fi]
+            if na_fd.get("type") != "nested_array":
+                return None
+            inner = na_fd.get("inner_fields") or []
+            if ij >= len(inner):
+                return None
+            ifd = inner[ij]
+            if ifd.get("type") == "bitfield":
+                return None
+            if not ifd.get("enum"):
+                return None
+            foff = self._nested_element_file_off(entry_base, na_fd, ai, ij)
+            if foff is None:
+                return None
+            return {
+                "kind": "nested_uint",
+                "enum_ref": str(ifd["enum"]),
+                "foff": foff,
+                "fd": ifd,
+                "fi": fi,
+                "na_fd": na_fd,
+                "ai": ai,
+                "ij": ij,
+                "tree_iid": iid,
+            }
+
+        if isinstance(sp, tuple) and sp[0] == "nab":
+            _, ai, ij, bk = sp
+            na_fd = self._fields[fi]
+            if na_fd.get("type") != "nested_array":
+                return None
+            inner = na_fd.get("inner_fields") or []
+            if ij >= len(inner):
+                return None
+            ifd = inner[ij]
+            if ifd.get("type") != "bitfield":
+                return None
+            parts = ifd.get("parts") or []
+            if bk < 0 or bk >= len(parts):
+                return None
+            part = parts[bk]
+            er = part.get("enum")
+            if not er:
+                return None
+            foff = self._nested_element_file_off(entry_base, na_fd, ai, ij)
+            if foff is None:
+                return None
+            return {
+                "kind": "nested_bitfield",
+                "enum_ref": str(er),
+                "foff": foff,
+                "fd": ifd,
+                "part_idx": bk,
+                "part": part,
+                "fi": fi,
+                "na_fd": na_fd,
+                "ai": ai,
+                "ij": ij,
+                "tree_iid": iid,
+            }
+
+        fd = self._fields[fi]
+        if isinstance(sp, int):
+            if fd.get("type") != "bitfield":
+                return None
+            parts = fd.get("parts") or []
+            if sp < 0 or sp >= len(parts):
+                return None
+            part = parts[sp]
+            er = part.get("enum")
+            if not er:
+                return None
+            return {
+                "kind": "bitfield",
+                "enum_ref": str(er),
+                "foff": entry_base + int(fd["offset"]),
+                "fd": fd,
+                "part_idx": sp,
+                "part": part,
+                "fi": fi,
+                "tree_iid": iid,
+            }
+
+        if sp is not None:
+            return None
+        if fd.get("type") != "uint" or not fd.get("enum"):
+            return None
+        return {
+            "kind": "uint",
+            "enum_ref": str(fd["enum"]),
+            "foff": entry_base + int(fd["offset"]),
+            "fd": fd,
+            "fi": fi,
+            "tree_iid": iid,
+        }
+
+    def _bitfield_row_iid_from_ctx(self, ctx: Dict[str, Any], j: int) -> str:
+        k = ctx["kind"]
+        if k == "bitfield":
+            return f"sf_{ctx['fi']}_b{j}"
+        if k == "nested_bitfield":
+            return f"sf_nab_{ctx['fi']}_{ctx['ai']}_{ctx['ij']}_{j}"
+        raise ValueError(k)
+
+    def _refresh_bitfield_tree_rows_from_ctx(self, ctx: Dict[str, Any]) -> None:
+        data = self._hex.get_data()
+        if not data or not self._tree:
+            return
+        fd = ctx["fd"]
+        foff = int(ctx["foff"])
+        sz = int(fd["size"])
+        if foff + sz > len(data):
+            return
+        val = int.from_bytes(data[foff : foff + sz], "little")
+        for j, pp in enumerate(fd.get("parts") or []):
+            subv = (val >> pp["shift"]) & ((1 << pp["bits"]) - 1)
+            disp = self._format_bitfield_part_display(subv, pp)
+            rid = self._bitfield_row_iid_from_ctx(ctx, j)
+            if self._tree.exists(rid):
+                self._tree.set(rid, "val", disp)
+
+    def _write_bitfield_subvalue_merge(self, foff: int, fd: Dict[str, Any], part_idx: int, new_subv: int) -> bool:
+        data = self._hex.get_data()
+        if not data:
+            return False
+        parts = fd.get("parts") or []
+        if part_idx < 0 or part_idx >= len(parts):
+            return False
+        part = parts[part_idx]
+        mx = (1 << part["bits"]) - 1
+        if new_subv < 0 or new_subv > mx:
+            return False
+        if foff + int(fd["size"]) > len(data):
+            return False
+        cur = int.from_bytes(data[foff : foff + int(fd["size"])], "little")
+        m = ((1 << part["bits"]) - 1) << part["shift"]
+        cur = (cur & ~m) | ((new_subv & mx) << part["shift"])
+        self._hex.write_bytes_at(foff, cur.to_bytes(int(fd["size"]), "little"))
+        return True
 
     def _format_helper_value(self, fd: Dict[str, Any], data: Any, entry_base: int) -> str:
         """Sum ROM uint values for fields named in ``helper_refs`` (same struct row)."""
@@ -6152,13 +6480,14 @@ class StructEditorFrame(ttk.Frame):
     def _resolve_enum(self, value: int, enum_ref: str) -> Optional[str]:
         base, delta = _split_enum_field_ref(enum_ref)
         idx = value + delta
-        lm = self._lists.get(base)
+        base_key = normalize_named_anchor_lookup_key(base)
+        lm = self._lists.get(base_key)
         if lm is not None:
             label = lm.get(idx)
             if label is not None:
                 return f"{value} ({label})"
         for info in self._hex.get_pcs_table_anchors():
-            if info["name"] == base:
+            if normalize_named_anchor_lookup_key(str(info["name"])) == base_key:
                 anchor = info["anchor"]
                 addr = anchor.get("Address")
                 if addr is None:
@@ -6208,6 +6537,11 @@ class StructEditorFrame(ttk.Frame):
             return
         entry_base = self._entry_file_offset(entry_idx)
 
+        if self._struct_resolve_enum_field_context(iid) is not None:
+            self._sync_field_aux_panels()
+            self._list_enum_rom_combo.focus_set()
+            return
+
         fd: Dict[str, Any]
         foff: Optional[int] = None
 
@@ -6239,10 +6573,6 @@ class StructEditorFrame(ttk.Frame):
             foff = self._nested_element_file_off(entry_base, na_fd, ai, ij)
         else:
             fd = self._fields[fi]
-            if self._is_enum_panel_field(fd):
-                self._sync_field_aux_panels()
-                self._list_enum_rom_combo.focus_set()
-                return
             if fd.get("type") == "helper":
                 return
             foff = entry_base + int(fd["offset"])
@@ -6265,7 +6595,19 @@ class StructEditorFrame(ttk.Frame):
         self._edit_entry.place(x=tw.winfo_x() + x, y=tw.winfo_y() + y, width=max(w, 80), height=h)
         raw_val = vals[1]
         if fd.get("enum"):
-            raw_val = raw_val.split(" (")[0] if " (" in raw_val else raw_val
+            raw_val = raw_val.split(" (", 1)[0] if " (" in raw_val else raw_val
+        elif fd.get("type") == "bitfield":
+            pidx: Optional[int] = None
+            if isinstance(spec, int):
+                pidx = spec
+            elif isinstance(spec, tuple) and spec[0] == "nab" and len(spec) >= 4:
+                pidx = spec[3]
+            if (
+                pidx is not None
+                and 0 <= pidx < len(fd.get("parts") or [])
+                and fd["parts"][pidx].get("enum")
+            ):
+                raw_val = raw_val.split(" (", 1)[0] if " (" in raw_val else raw_val
         elif fd["type"] == "pcs_ptr":
             rom = self._hex.get_data()
             if rom and foff + 4 <= len(rom):
@@ -6344,7 +6686,8 @@ class StructEditorFrame(ttk.Frame):
             self._hex.write_bytes_at(foff, cur.to_bytes(fd["size"], "little"))
             for j, pp in enumerate(fd["parts"]):
                 subv = (cur >> pp["shift"]) & ((1 << pp["bits"]) - 1)
-                self._tree.set(f"sf_nab_{fi}_{ai}_{ij}_{j}", "val", str(subv))
+                disp = self._format_bitfield_part_display(subv, pp)
+                self._tree.set(f"sf_nab_{fi}_{ai}_{ij}_{j}", "val", disp)
             self._refresh_helper_field_rows(entry_base)
             self._cancel_inline_edit()
             self._sync_field_aux_panels()
@@ -6453,7 +6796,8 @@ class StructEditorFrame(ttk.Frame):
             self._hex.write_bytes_at(foff, cur.to_bytes(fd["size"], "little"))
             for j, pp in enumerate(fd["parts"]):
                 subv = (cur >> pp["shift"]) & ((1 << pp["bits"]) - 1)
-                self._tree.set(f"sf_{fi}_b{j}", "val", str(subv))
+                disp = self._format_bitfield_part_display(subv, pp)
+                self._tree.set(f"sf_{fi}_b{j}", "val", disp)
             self._refresh_helper_field_rows(entry_base)
             self._cancel_inline_edit()
             self._sync_field_aux_panels()
@@ -8377,8 +8721,27 @@ class HexEditorFrame(ttk.Frame):
         """Set callback(anchor_info) for NamedAnchor navigation (pointer follow or direct offset match)."""
         self._on_pointer_to_named_anchor_cb = cb
 
+    def _struct_anchor_for_list_count_name(self, list_name: str) -> Optional[Dict[str, Any]]:
+        """Return the first struct table whose ``]count`` is driven by this ``[[List]]`` ``Name`` (``entry_label_list``)."""
+        want = normalize_named_anchor_lookup_key(list_name)
+        if not want:
+            return None
+        lm = _load_toml_lists(self._toml_data) if getattr(self, "_toml_data", None) else {}
+        if want not in lm:
+            return None
+        for info in self.get_struct_anchors():
+            elk = info.get("entry_label_list")
+            if not elk:
+                continue
+            if normalize_named_anchor_lookup_key(str(elk)) == want:
+                return dict(info)
+        return None
+
     def _named_anchor_info_for_tools(self, anchor_name: str) -> Optional[Dict[str, Any]]:
         """If ``anchor_name`` is a PCS table or struct NamedAnchor, return info with ``type`` ``pcs`` or ``struct``.
+
+        Also resolves a ``[[List]]`` **Name** when that list is the ``]count`` for a struct table (row index source),
+        so Goto can jump to the struct ROM block by typing the list name (e.g. ``cardnumbers``).
 
         Shape matches :meth:`_find_named_anchor_at_offset` results for use with
         ``set_on_pointer_to_named_anchor`` (e.g. FireRed tools pane).
@@ -8393,6 +8756,9 @@ class HexEditorFrame(ttk.Frame):
         for info in self.get_graphics_anchors():
             if str(info["name"]).strip().lower() == want:
                 return {**info, "type": "graphics"}
+        si = self._struct_anchor_for_list_count_name(anchor_name)
+        if si is not None:
+            return {**si, "type": "struct"}
         return None
 
     def _find_named_anchor_at_offset(self, file_off: int, exact: bool = False) -> Optional[Dict[str, Any]]:
@@ -8839,8 +9205,8 @@ class HexEditorFrame(ttk.Frame):
 
     # ── Find / Replace ───────────────────────────────────────────────
 
-    def _parse_find_hex(self, text: str) -> Optional[bytearray]:
-        """Parse find string as hex (DE AD BE EF or DEADBEEF)."""
+    def _parse_find_hex_literal(self, text: str) -> Optional[bytearray]:
+        """Parse hex to bytes only (no ``xx`` wildcards). Used for replace fill pattern."""
         digits = "".join(c for c in text if c in HEX_DIGITS)
         if len(digits) < 2:
             return None
@@ -8848,6 +9214,51 @@ class HexEditorFrame(ttk.Frame):
         for i in range(0, len(digits) - 1, 2):
             out.append(int(digits[i : i + 2], 16))
         return out if out else None
+
+    def _parse_find_hex(self, text: str) -> Optional[List[Optional[int]]]:
+        """Parse find string as hex.
+
+        **Wildcard:** whitespace-separated token ``xx`` or ``XX`` matches any byte.
+
+        **Multi-token:** each token is ``xx``/``XX`` or an even-length hex run (e.g. ``00 11`` or ``00 DEAD``).
+
+        **Single token, no wildcard:** legacy parse — all hex digits are paired (``DEADBEEF``), spaces ignored.
+
+        Result is ``List[Optional[int]]`` where ``None`` = wildcard byte.
+        """
+        t = (text or "").strip()
+        if not t:
+            return None
+        tokens = t.split()
+        has_wild = any(len(tok) == 2 and tok.lower() == "xx" for tok in tokens)
+
+        def push_hex_token(tok: str, buf: List[Optional[int]]) -> bool:
+            if len(tok) < 2 or len(tok) % 2 != 0:
+                return False
+            if not all(c in HEX_DIGITS for c in tok):
+                return False
+            for i in range(0, len(tok), 2):
+                buf.append(int(tok[i : i + 2], 16))
+            return True
+
+        if has_wild or len(tokens) > 1:
+            out: List[Optional[int]] = []
+            for tok in tokens:
+                if len(tok) == 2 and tok.lower() == "xx":
+                    out.append(None)
+                elif push_hex_token(tok, out):
+                    pass
+                else:
+                    return None
+            return out if out else None
+
+        digits = "".join(c for c in t if c in HEX_DIGITS)
+        if len(digits) < 2:
+            return None
+        out2: List[Optional[int]] = []
+        for i in range(0, len(digits) - 1, 2):
+            out2.append(int(digits[i : i + 2], 16))
+        return out2 if out2 else None
 
     def _parse_find_ascii(self, text: str) -> Optional[bytearray]:
         """Parse find string as ASCII/PCS text."""
@@ -8866,11 +9277,82 @@ class HexEditorFrame(ttk.Frame):
                     out.append(ord(c))
         return out if out else None
 
-    def _find_next(self, needle: bytes, forward: bool) -> Optional[int]:
-        """Find needle in _data. Forward: from cursor+1; backward: from cursor-1. Returns offset or None."""
-        if not self._data or not needle:
+    def _pattern_match_at(self, offset: int, pattern: List[Optional[int]]) -> bool:
+        """True if ``pattern`` matches ``_data`` at ``offset`` (``None`` = any byte)."""
+        if not self._data or offset < 0:
+            return False
+        n = len(pattern)
+        if offset + n > len(self._data):
+            return False
+        for i, p in enumerate(pattern):
+            if p is not None and self._data[offset + i] != p:
+                return False
+        return True
+
+    def _hex_find_pattern_to_bytes(self, pattern: List[Optional[int]]) -> Optional[bytes]:
+        """If ``pattern`` has no wildcards, return fixed bytes; else ``None``."""
+        if any(p is None for p in pattern):
+            return None
+        return bytes(pattern)
+
+    def _find_next_hex_pattern(self, pattern: List[Optional[int]], forward: bool) -> Optional[int]:
+        """Find with ``xx``/``XX`` wildcards; same wrap rules as :meth:`_find_next`."""
+        if not self._data or not pattern:
             return None
         data = self._data
+        n = len(pattern)
+        start = self._cursor_byte_offset
+        last_start = len(data) - n
+        if last_start < 0:
+            return None
+        if forward:
+            for i in range(start + 1, last_start + 1):
+                if self._pattern_match_at(i, pattern):
+                    return i
+            for i in range(0, min(start, last_start + 1)):
+                if self._pattern_match_at(i, pattern):
+                    return i
+            return None
+        for i in range(min(start - 1, last_start), -1, -1):
+            if self._pattern_match_at(i, pattern):
+                return i
+        for i in range(last_start, start, -1):
+            if self._pattern_match_at(i, pattern):
+                return i
+        return None
+
+    def _find_bytes_or_pattern_from(self, pos: int, needle: Union[bytes, bytearray, List[Optional[int]]]) -> int:
+        """First match at index ``>= pos``, or -1. Fixed patterns use fast ``find``."""
+        if not self._data or not needle:
+            return -1
+        if not isinstance(needle, list):
+            i = self._data.find(needle, pos)
+            return i if i >= 0 else -1
+        b = self._hex_find_pattern_to_bytes(needle)
+        if b is not None:
+            i = self._data.find(b, pos)
+            return i if i >= 0 else -1
+        n = len(needle)
+        for i in range(pos, len(self._data) - n + 1):
+            if self._pattern_match_at(i, needle):
+                return i
+        return -1
+
+    def _find_next(self, needle: Union[bytes, bytearray, List[Optional[int]]], forward: bool) -> Optional[int]:
+        """Find needle in _data. Forward: from cursor+1; backward: from cursor-1. Returns offset or None.
+
+        ``needle`` may be a hex pattern list with ``None`` entries (wildcard bytes from ``xx``/``XX`` tokens).
+        """
+        if not self._data or not needle:
+            return None
+        if isinstance(needle, list):
+            b = self._hex_find_pattern_to_bytes(needle)
+            if b is not None:
+                needle = b
+            else:
+                return self._find_next_hex_pattern(needle, forward)
+        data = self._data
+        needle = bytes(needle) if isinstance(needle, bytearray) else needle
         start = self._cursor_byte_offset
         if forward:
             idx = data.find(needle, start + 1)
@@ -8902,7 +9384,7 @@ class HexEditorFrame(ttk.Frame):
         d.title("Find")
         d.transient(self.winfo_toplevel())
         d.grab_set()
-        d.geometry("420x140")
+        d.geometry("420x168")
         d.resizable(True, False)
         focus = self.winfo_toplevel().focus_get()
         default_hex = focus == self._text
@@ -8913,12 +9395,18 @@ class HexEditorFrame(ttk.Frame):
         find_entry = ttk.Entry(frm, textvariable=find_var, width=36)
         find_entry.grid(row=0, column=1, sticky="ew", pady=2)
         frm.columnconfigure(1, weight=1)
+        ttk.Label(
+            frm,
+            text="Hex: token xx or XX = any byte (e.g. 00 xx 08 XX 09 xx 10)",
+            font=("Consolas", 8),
+            foreground="#666",
+        ).grid(row=1, column=1, sticky="w", pady=(0, 2))
         mode_var = tk.StringVar(value="hex" if default_hex else "ascii")
         ttk.Radiobutton(frm, text="Hex", variable=mode_var, value="hex").grid(
-            row=1, column=1, sticky="w", pady=2
+            row=2, column=1, sticky="w", pady=2
         )
         ttk.Radiobutton(frm, text="ASCII", variable=mode_var, value="ascii").grid(
-            row=2, column=1, sticky="w", pady=2
+            row=3, column=1, sticky="w", pady=2
         )
 
         def do_find(forward: bool) -> None:
@@ -8934,7 +9422,7 @@ class HexEditorFrame(ttk.Frame):
                 messagebox.showinfo("Find", "No further matches found.", parent=d)
 
         btn_frm = ttk.Frame(frm)
-        btn_frm.grid(row=3, column=1, sticky="w", pady=8)
+        btn_frm.grid(row=4, column=1, sticky="w", pady=8)
         ttk.Button(btn_frm, text="Find Next", command=lambda: do_find(True)).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(btn_frm, text="Find Previous", command=lambda: do_find(False)).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(btn_frm, text="Close", command=d.destroy).pack(side=tk.LEFT, padx=(0, 4))
@@ -8952,7 +9440,7 @@ class HexEditorFrame(ttk.Frame):
         d.title("Find & Replace")
         d.transient(self.winfo_toplevel())
         d.grab_set()
-        d.geometry("440x280")
+        d.geometry("440x300")
         d.resizable(True, False)
         focus = self.winfo_toplevel().focus_get()
         default_hex = focus == self._text
@@ -8962,33 +9450,39 @@ class HexEditorFrame(ttk.Frame):
         find_var = tk.StringVar()
         find_entry = ttk.Entry(frm, textvariable=find_var, width=36)
         find_entry.grid(row=0, column=1, sticky="ew", pady=2)
-        ttk.Label(frm, text="Replace:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=2)
+        ttk.Label(
+            frm,
+            text="Hex: token xx or XX = any byte (e.g. 00 xx 08 XX 09 xx 10)",
+            font=("Consolas", 8),
+            foreground="#666",
+        ).grid(row=1, column=1, sticky="w", pady=(0, 2))
+        ttk.Label(frm, text="Replace:").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=2)
         repl_var = tk.StringVar()
         repl_entry = ttk.Entry(frm, textvariable=repl_var, width=36)
-        repl_entry.grid(row=1, column=1, sticky="ew", pady=2)
+        repl_entry.grid(row=2, column=1, sticky="ew", pady=2)
         frm.columnconfigure(1, weight=1)
         mode_var = tk.StringVar(value="hex" if default_hex else "ascii")
         ttk.Radiobutton(frm, text="Hex", variable=mode_var, value="hex").grid(
-            row=2, column=1, sticky="w", pady=2
+            row=3, column=1, sticky="w", pady=2
         )
         ttk.Radiobutton(frm, text="ASCII", variable=mode_var, value="ascii").grid(
-            row=3, column=1, sticky="w", pady=2
+            row=4, column=1, sticky="w", pady=2
         )
         fill_pad_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             frm,
             text="Pad shorter replacement to match length (tile fill pattern)",
             variable=fill_pad_var,
-        ).grid(row=4, column=1, sticky="w", pady=(4, 0))
-        ttk.Label(frm, text="Fill pattern:").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=2)
+        ).grid(row=5, column=1, sticky="w", pady=(4, 0))
+        ttk.Label(frm, text="Fill pattern:").grid(row=6, column=0, sticky="w", padx=(0, 8), pady=2)
         fill_pattern_var = tk.StringVar(value="FF")
         fill_entry = ttk.Entry(frm, textvariable=fill_pattern_var, width=36)
-        fill_entry.grid(row=5, column=1, sticky="ew", pady=2)
+        fill_entry.grid(row=6, column=1, sticky="ew", pady=2)
         ttk.Label(
             frm,
             text="(Hex e.g. FF or 00; ASCII text; repeats as needed; default 0xFF if empty)",
             font=("Consolas", 7),
-        ).grid(row=6, column=1, sticky="w")
+        ).grid(row=7, column=1, sticky="w")
         status_var = tk.StringVar(value="")
 
         def get_needle() -> Optional[bytearray]:
@@ -9008,7 +9502,7 @@ class HexEditorFrame(ttk.Frame):
             if not fill_pad_var.get():
                 return repl
             raw = fill_pattern_var.get().strip()
-            pad = self._parse_find_hex(raw) if mode_var.get() == "hex" else self._parse_find_ascii(raw)
+            pad = self._parse_find_hex_literal(raw) if mode_var.get() == "hex" else self._parse_find_ascii(raw)
             if pad is None or len(pad) == 0:
                 pad = bytearray([0xFF])
             out = bytearray(repl)
@@ -9018,12 +9512,14 @@ class HexEditorFrame(ttk.Frame):
                 i += 1
             return out
 
-        def selection_matches(needle: bytes) -> bool:
+        def selection_matches(needle: Union[bytes, bytearray, List[Optional[int]]]) -> bool:
             s = min(self._selection_start or 0, self._selection_end or 0)
             e = max(self._selection_start or 0, self._selection_end or 0) + 1
-            return (e - s == len(needle) and
-                    s >= 0 and e <= len(self._data) and
-                    bytes(self._data[s:e]) == needle)
+            if s < 0 or e > len(self._data):
+                return False
+            if isinstance(needle, list):
+                return e - s == len(needle) and self._pattern_match_at(s, needle)
+            return e - s == len(needle) and bytes(self._data[s:e]) == needle
 
         def do_replace_one() -> None:
             needle = get_needle()
@@ -9077,7 +9573,7 @@ class HexEditorFrame(ttk.Frame):
             count = 0
             pos = 0
             while True:
-                idx = self._data.find(needle, pos)
+                idx = self._find_bytes_or_pattern_from(pos, needle)
                 if idx < 0:
                     break
                 eff = effective_replacement(repl, len(needle))
@@ -9115,13 +9611,13 @@ class HexEditorFrame(ttk.Frame):
                 messagebox.showinfo("Replace", "No matches found.", parent=d)
 
         btn_frm = ttk.Frame(frm)
-        btn_frm.grid(row=7, column=1, sticky="w", pady=8)
+        btn_frm.grid(row=8, column=1, sticky="w", pady=8)
         ttk.Button(btn_frm, text="Find Next", command=do_find_next).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(btn_frm, text="Replace", command=do_replace_one).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(btn_frm, text="Replace All", command=do_replace_all).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(btn_frm, text="Close", command=d.destroy).pack(side=tk.LEFT, padx=(0, 4))
         lbl = ttk.Label(frm, textvariable=status_var)
-        lbl.grid(row=8, column=1, sticky="w", pady=2)
+        lbl.grid(row=9, column=1, sticky="w", pady=2)
         find_entry.focus_set()
         d.bind("<Return>", lambda e: do_replace_one())
         d.bind("<Escape>", lambda e: d.destroy())
@@ -9326,11 +9822,11 @@ class HexEditorFrame(ttk.Frame):
         For ``0 = [ a, b, c ]`` returns ``3``. For ``4007 = [ x, y ]`` returns ``4009``.
         Matches how :func:`_load_toml_lists` assigns indices.
         """
-        want = list_name.strip()
+        want = normalize_named_anchor_lookup_key(list_name.strip())
         for lst in self._toml_data.get("List", []):
             if not isinstance(lst, dict):
                 continue
-            name = str(lst.get("Name", "")).strip().strip("'\"")
+            name = normalize_named_anchor_lookup_key(str(lst.get("Name", "")))
             if name != want:
                 continue
             hi = 0
@@ -9507,7 +10003,8 @@ Format = "`f|u8`[u8 arg0]"
         return None
 
     def resolve_file_offset_or_named_anchor(self, s: str) -> Tuple[Optional[int], str]:
-        """Parse a ROM **file** offset (or GBA ``0x08…``), or resolve a ``[[NamedAnchors]]`` **Name** to file offset."""
+        """Parse a ROM **file** offset (or GBA ``0x08…``), resolve a ``[[NamedAnchors]]`` **Name**, or a ``[[List]]``
+        **Name** when that list is the ``]count`` source for a struct table (same as Goto)."""
         off, err = parse_rom_file_offset(s)
         if off is not None:
             return off, ""
@@ -9531,7 +10028,10 @@ Format = "`f|u8`[u8 arg0]"
             if val < GBA_ROM_BASE:
                 val += GBA_ROM_BASE
             return val - GBA_ROM_BASE, ""
-        return None, f"No [[NamedAnchors]] row named {key!r}."
+        si = self._struct_anchor_for_list_count_name(key)
+        if si is not None and si.get("base_off") is not None:
+            return int(si["base_off"]), ""
+        return None, f"No [[NamedAnchors]] row named {key!r}, and no struct table uses {key!r} as its ]count list."
 
     def _anchor_address_matches_gba(self, anchor: Dict[str, Any], gba_addr: int) -> bool:
         """True if anchor ``Address`` matches ``gba_addr`` (Thumb-aware)."""
@@ -10269,14 +10769,21 @@ Format = "`f|u8`[u8 arg0]"
                 if struct_size <= 0:
                     continue
             entry_label_pcs: Optional[Dict[str, Any]] = None
+            entry_label_list: Optional[str] = None
             if isinstance(count_raw, str):
                 entry_label_pcs = _find_pcs_table_for_struct_suffix(
                     self._get_pcs_table_anchors(), count_raw
                 )
+                if entry_label_pcs is None:
+                    cref = _struct_count_ref_base_name(str(count_raw))
+                    lk = normalize_named_anchor_lookup_key(cref)
+                    if lk and lk in _load_toml_lists(self._toml_data):
+                        entry_label_list = lk
             result.append({
                 "name": name, "anchor": anchor, "fields": fields,
                 "count": count, "struct_size": struct_size, "base_off": base_off,
                 "entry_label_pcs": entry_label_pcs,
+                "entry_label_list": entry_label_list,
                 "packed_terminator": packed,
                 "packed_terminator_fd": packed_fd,
             })
@@ -10330,11 +10837,11 @@ Format = "`f|u8`[u8 arg0]"
             messagebox.showerror("Struct", "TOML has no [[List]] section.")
             return False
         target: Optional[Dict[str, Any]] = None
-        want = list_name.strip()
+        want = normalize_named_anchor_lookup_key(list_name.strip())
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            name = str(row.get("Name", "")).strip().strip("'\"")
+            name = normalize_named_anchor_lookup_key(str(row.get("Name", "")))
             if name == want:
                 target = row
                 break
@@ -10371,19 +10878,23 @@ Format = "`f|u8`[u8 arg0]"
 
     def get_list_entry_label(self, list_name: str, flat_index: int) -> Optional[str]:
         """Return the string at ``flat_index`` in ``[[List]]`` with this Name, or None.
-        ``list_name`` may include a trailing ``+N`` / ``-N`` (struct-style); only the base name is used for [[List]].
+
+        ``list_name`` may include a trailing ``+N`` / ``-N`` (same convention as ``]pcsName±N`` struct/graphics
+        counts). The base name selects the [[List]] row; the index passed here is a **table row** (0..N-1), so the
+        list key used is ``flat_index - N`` when the suffix is ``+N`` (same mapping as Entry PCS vs PCS row count).
         """
-        base, _ = _split_enum_field_ref(list_name)
-        want = base.strip()
+        base, delta = _split_enum_field_ref(list_name)
+        want = normalize_named_anchor_lookup_key(base.strip())
         if not want:
             return None
+        list_idx = flat_index - delta
         for row in self._toml_data.get("List", []) or []:
             if not isinstance(row, dict):
                 continue
-            name = str(row.get("Name", "")).strip().strip("'\"")
+            name = normalize_named_anchor_lookup_key(str(row.get("Name", "")))
             if name != want:
                 continue
-            coords = _list_row_key_and_offset(row, flat_index)
+            coords = _list_row_key_and_offset(row, list_idx)
             if coords is None:
                 return None
             key, off = coords

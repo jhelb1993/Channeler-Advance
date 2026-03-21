@@ -150,8 +150,8 @@ These apply when the main hex view (or the overall window, for global toggles) h
 | Shortcut | Action |
 | -------- | ------ |
 | **Ctrl+G** | Focus the **Goto** (file offset) field |
-| **Ctrl+F** | Open **Find** |
-| **Ctrl+R** | Open **Replace** |
+| **Ctrl+F** | Open **Find** (hex mode: space-separated token **`xx`** or **`XX`** matches any byte, e.g. `00 xx 08 XX 09 xx 10`) |
+| **Ctrl+R** | Open **Replace** (same hex wildcards in **Find**; replacement uses fixed hex only) |
 | **Ctrl+A** | **Select all** in the focused pane (hex/ASCII = whole ROM; disassembly / pseudo-C / hooks text = all text) |
 | **Ctrl+C** / **Copy** | Copy selection (hex + ASCII) |
 | **Ctrl+V** / **Paste** | Paste — **insert** bytes at cursor (insert mode) |

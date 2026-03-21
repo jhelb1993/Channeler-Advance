@@ -4,9 +4,7 @@ split hex_editor.py up into separate files
 addresses should be in hex (tomli-w)
 get rid of second scrollbar (tools)
 undo (ctrl + z)
-port firered editor code to hex_editor.py
 generate toml (other option)
-palette replacement
 trainer team editing
 overworld sprite editing
 egg moves
