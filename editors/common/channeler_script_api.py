@@ -162,10 +162,8 @@ class ChannelerScriptAPI:
         return "other"
 
     def sym_name_to_addr(self) -> Dict[str, int]:
-        """Full ``pokefirered.sym`` name → address map (lazy load from repo root)."""
-        from editors.common.hex_editor import load_pokefirered_sym_name_to_addr
-
-        return load_pokefirered_sym_name_to_addr()
+        """Full ``pokefirered.sym`` name → address map when the open ROM is FireRed (``BPRE``); else empty."""
+        return self._hex.get_pokefirered_sym_name_to_addr()
 
 
 def run_user_script(

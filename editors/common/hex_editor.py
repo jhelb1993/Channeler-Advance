@@ -66,11 +66,18 @@ from editors.common.gba_graphics import (
 )
 
 _TOML_AVAILABLE = False
+tomli = None  # type: ignore
 try:
-    import tomli
+    import tomllib as _tomllib  # Python 3.11+
+    tomli = _tomllib  # type: ignore
     _TOML_AVAILABLE = True
 except ImportError:
-    pass
+    try:
+        import tomli as _tomli
+        tomli = _tomli  # type: ignore
+        _TOML_AVAILABLE = True
+    except ImportError:
+        pass
 
 _TOMLI_W_AVAILABLE = False
 tomli_w = None  # type: ignore
@@ -144,6 +151,15 @@ except ImportError:
 
 GBA_ROM_BASE = 0x08000000
 GBA_ROM_MAX = 0x09FFFFFF  # addresses > this are not ROM code pointers; treat as code, not .word
+# GBA cartridge header: 4-byte game code at 0xAC (e.g. ``BPRE`` = Pokémon FireRed US).
+GBA_GAME_CODE_OFFSET = 0xAC
+
+
+def rom_bytes_use_pokefirered_sym(data: Optional[bytes]) -> bool:
+    """True when this ROM is Pokémon FireRed US (``BPRE``) — matches ``pokefirered.sym``."""
+    if not data or len(data) < GBA_GAME_CODE_OFFSET + 4:
+        return False
+    return bytes(data[GBA_GAME_CODE_OFFSET : GBA_GAME_CODE_OFFSET + 4]) == b"BPRE"
 
 
 def _channeler_repo_root() -> str:
@@ -606,6 +622,31 @@ def _struct_count_ref_base_name(count_ref: str) -> str:
     if m:
         return m.group(1).strip()
     return s
+
+
+def _struct_anchor_search_blob(a: Dict[str, Any], lists_map: Dict[str, Dict[int, str]]) -> str:
+    """Lowercase text used to filter struct anchors by search query (name, ``]count`` ref, ``[[List]]`` rows, PCS name)."""
+    parts: List[str] = [str(a.get("name", ""))]
+    cr = a.get("count_ref")
+    if cr:
+        parts.append(str(cr))
+    list_keys: List[str] = []
+    elk = normalize_named_anchor_lookup_key(str(a.get("entry_label_list") or ""))
+    if elk:
+        list_keys.append(elk)
+    if cr:
+        cref = normalize_named_anchor_lookup_key(_struct_count_ref_base_name(str(cr)))
+        if cref and cref not in list_keys:
+            list_keys.append(cref)
+    for lk in list_keys:
+        parts.append(lk)
+        lm = lists_map.get(lk) or {}
+        for idx in sorted(lm.keys()):
+            parts.append(str(lm[idx]))
+    pcs = a.get("entry_label_pcs")
+    if pcs:
+        parts.append(str(pcs.get("name", "")))
+    return "\n".join(parts).lower()
 
 
 def normalize_named_anchor_lookup_key(s: str) -> str:
@@ -1768,6 +1809,11 @@ class PcsStringTableFrame(ttk.Frame):
         self._combo_search_entry = ttk.Entry(sf, textvariable=self._combo_search_var, font=("Consolas", 8))
         self._combo_search_entry.grid(row=0, column=1, sticky="ew")
         self._combo_search_var.trace_add("write", lambda *_: self._schedule_pcs_combo_filter())
+        ttk.Label(sf, text="Matches:", font=("Consolas", 8)).grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(2, 0))
+        self._pcs_match_combo = ttk.Combobox(sf, font=("Consolas", 8), state="readonly")
+        self._pcs_match_combo.grid(row=1, column=1, sticky="ew", pady=(2, 0))
+        self._pcs_match_combo.bind("<<ComboboxSelected>>", self._on_pcs_match_combo_select)
+        self._pcs_match_suppress = False
         tree_f = ttk.Frame(self)
         tree_f.grid(row=2, column=0, sticky="nsew")
         tree_f.columnconfigure(0, weight=1)
@@ -1797,31 +1843,81 @@ class PcsStringTableFrame(ttk.Frame):
                 pass
         self._pcs_filter_job = self.after(100, self._apply_pcs_combo_filter)
 
+    def _on_pcs_match_combo_select(self, event: Optional[tk.Event] = None) -> None:
+        if self._pcs_match_suppress:
+            return
+        v = self._pcs_match_combo.get().strip()
+        if not v:
+            return
+        if self._combo.get().strip() == v:
+            return
+        self._combo.set(v)
+        vals = list(self._combo["values"])
+        if v in vals:
+            self._combo.current(vals.index(v))
+        self._load_table()
+
     def _apply_pcs_combo_filter(self) -> None:
         self._pcs_filter_job = None
         if not self._anchors:
             self._combo.configure(values=[])
             self._combo.set("")
+            self._pcs_match_suppress = True
+            self._pcs_match_combo.configure(values=[])
+            self._pcs_match_combo.set("")
+            self._pcs_match_suppress = False
             self._tree.delete(*self._tree.get_children())
             return
         names = [str(a["name"]) for a in self._anchors]
-        q = self._combo_search_var.get().strip().lower()
+        q_raw = self._combo_search_var.get().strip()
+        q = q_raw.lower()
         filt = [n for n in names if q in n.lower()] if q else list(names)
         cur = self._combo.get().strip()
         self._combo.configure(values=filt)
+        self._pcs_match_suppress = True
+        self._pcs_match_combo.configure(values=filt)
+        self._pcs_match_suppress = False
+        if q:
+            for n in names:
+                if n.lower() == q:
+                    if cur != n:
+                        self._combo.set(n)
+                        if n in filt:
+                            self._combo.current(filt.index(n))
+                        self._pcs_match_suppress = True
+                        self._pcs_match_combo.set(n)
+                        self._pcs_match_suppress = False
+                        self._load_table()
+                    else:
+                        self._pcs_match_suppress = True
+                        self._pcs_match_combo.set(n)
+                        self._pcs_match_suppress = False
+                    return
         if filt:
             if cur in filt:
                 self._combo.current(filt.index(cur))
+                self._pcs_match_suppress = True
+                self._pcs_match_combo.set(cur)
+                self._pcs_match_suppress = False
                 self._load_table()
             elif cur:
                 self._combo.set(filt[0])
                 self._combo.current(0)
+                self._pcs_match_suppress = True
+                self._pcs_match_combo.set(filt[0])
+                self._pcs_match_suppress = False
                 self._load_table()
             else:
                 self._combo.set("")
+                self._pcs_match_suppress = True
+                self._pcs_match_combo.set("")
+                self._pcs_match_suppress = False
                 self._tree.delete(*self._tree.get_children())
         else:
             self._combo.set("")
+            self._pcs_match_suppress = True
+            self._pcs_match_combo.set("")
+            self._pcs_match_suppress = False
             self._tree.delete(*self._tree.get_children())
 
     def _selected_pcs_anchor(self) -> Optional[Dict[str, Any]]:
@@ -2052,6 +2148,11 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._combo_search_var = tk.StringVar()
         ttk.Entry(srow, textvariable=self._combo_search_var, font=("Consolas", 8)).grid(row=0, column=1, sticky="ew")
         self._combo_search_var.trace_add("write", lambda *_: self._schedule_gfx_combo_filter())
+        ttk.Label(srow, text="Matches:", font=("Consolas", 8)).grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(2, 0))
+        self._gfx_match_combo = ttk.Combobox(srow, font=("Consolas", 8), state="readonly")
+        self._gfx_match_combo.grid(row=1, column=1, sticky="ew", pady=(2, 0))
+        self._gfx_match_combo.bind("<<ComboboxSelected>>", self._on_gfx_match_combo_select)
+        self._gfx_match_suppress = False
 
         self._table_nav = ttk.Frame(top)
         self._table_nav.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(2, 0))
@@ -2070,6 +2171,32 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._table_idx_spin.bind("<Return>", lambda _e: self._decode_selected())
         self._table_row_label = ttk.Label(self._table_nav, text="", font=("Consolas", 8), foreground="#666")
         self._table_row_label.grid(row=0, column=2, sticky="w")
+
+        self._gfx_table_list_frame = ttk.Frame(self._table_nav)
+        self._gfx_table_list_frame.columnconfigure(1, weight=1)
+        self._gfx_table_list_label = ttk.Label(self._gfx_table_list_frame, text="", font=("Consolas", 8))
+        self._gfx_table_list_label.grid(row=0, column=0, sticky="nw", padx=(0, 4))
+        self._gfx_table_list_search_var = tk.StringVar()
+        self._gfx_table_list_search_entry = ttk.Entry(
+            self._gfx_table_list_frame, textvariable=self._gfx_table_list_search_var, font=("Consolas", 8)
+        )
+        self._gfx_table_list_search_entry.grid(row=0, column=1, sticky="ew")
+        self._gfx_table_list_search_var.trace_add("write", lambda *_: self._schedule_gfx_table_list_filter())
+        self._gfx_table_list_search_entry.bind("<Return>", lambda _e: self._apply_gfx_table_list_filter())
+        ttk.Label(self._gfx_table_list_frame, text="Matches:", font=("Consolas", 8)).grid(
+            row=1, column=0, sticky="w", padx=(0, 4), pady=(2, 0)
+        )
+        self._gfx_table_list_combo = ttk.Combobox(
+            self._gfx_table_list_frame, font=("Consolas", 8), state="readonly"
+        )
+        self._gfx_table_list_combo.grid(row=1, column=1, sticky="ew", pady=(2, 0))
+        self._gfx_table_list_combo.bind("<<ComboboxSelected>>", self._on_gfx_table_list_combo_select)
+        self._gfx_table_list_frame.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(2, 0))
+        self._gfx_table_list_frame.grid_remove()
+        self._gfx_table_list_job: Optional[str] = None
+        self._gfx_table_list_all_rows: List[Tuple[int, str]] = []
+        self._gfx_table_list_suppress = False
+        self._gfx_table_list_anchor_name: Optional[str] = None
 
         self._sprite_layout_row = ttk.Frame(top)
         self._sprite_layout_row.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
@@ -2310,6 +2437,8 @@ class GraphicsPreviewFrame(ttk.Frame):
             self._hide_palette_4_ui()
             self._hide_palette_8_ui()
             self._table_nav.grid_remove()
+            self._gfx_table_list_frame.grid_remove()
+            self._gfx_table_list_anchor_name = None
             self._sprite_layout_row.grid_remove()
             self._sprite_pal_override_row.grid_remove()
             self._gfx_sprite_anchor_name = None
@@ -2363,9 +2492,11 @@ class GraphicsPreviewFrame(ttk.Frame):
             _, eff, _ = self._effective_table_state(info)
             self._table_idx_spin.configure(from_=0, to=max(0, eff - 1))
             self._table_nav.grid()
+            self._prepare_gfx_table_list_panel(info)
         else:
             self._table_nav.grid_remove()
             self._table_row_label.configure(text="")
+            self._gfx_table_list_frame.grid_remove()
 
     def _effective_table_state(self, info: Dict[str, Any]) -> Tuple[int, int, str]:
         """Clamp shared row index; return (index, effective_row_count, warnings)."""
@@ -2462,15 +2593,51 @@ class GraphicsPreviewFrame(ttk.Frame):
                 pass
         self._gfx_filter_job = self.after(100, self._apply_gfx_combo_filter)
 
+    def _on_gfx_match_combo_select(self, event: Optional[tk.Event] = None) -> None:
+        if self._gfx_match_suppress:
+            return
+        v = self._gfx_match_combo.get().strip()
+        if not v:
+            return
+        if self._combo.get().strip() == v:
+            return
+        self._combo.set(v)
+        vals = list(self._combo["values"])
+        if v in vals:
+            self._combo.current(vals.index(v))
+        self._decode_selected()
+
     def _apply_gfx_combo_filter(self) -> None:
         self._gfx_filter_job = None
         anchors = self._hex.get_graphics_anchors()
         display_entries = [_graphics_anchor_combo_display(a) for a in anchors]
-        q = self._combo_search_var.get().strip().lower()
+        q_raw = self._combo_search_var.get().strip()
+        q = q_raw.lower()
         filt = [d for d in display_entries if q in d.lower()] if q else list(display_entries)
         cur = self._combo.get().strip()
         cur_key = _graphics_combo_entry_to_anchor_name(cur)
         self._combo.configure(values=filt)
+        self._gfx_match_suppress = True
+        self._gfx_match_combo.configure(values=filt)
+        self._gfx_match_suppress = False
+        if q:
+            for d in display_entries:
+                an = _graphics_combo_entry_to_anchor_name(d)
+                if an.lower() == q or d.lower() == q_raw.lower():
+                    pick = d
+                    if cur_key != an or cur not in filt:
+                        self._combo.set(pick)
+                        if pick in filt:
+                            self._combo.current(filt.index(pick))
+                        self._gfx_match_suppress = True
+                        self._gfx_match_combo.set(pick)
+                        self._gfx_match_suppress = False
+                        self._decode_selected()
+                    else:
+                        self._gfx_match_suppress = True
+                        self._gfx_match_combo.set(pick if pick in filt else cur)
+                        self._gfx_match_suppress = False
+                    return
         if filt:
             cur_ok = cur in filt or (
                 cur_key and any(_graphics_combo_entry_to_anchor_name(x) == cur_key for x in filt)
@@ -2481,15 +2648,128 @@ class GraphicsPreviewFrame(ttk.Frame):
                 )
                 self._combo.set(pick)
                 self._combo.current(filt.index(pick))
+                self._gfx_match_suppress = True
+                self._gfx_match_combo.set(pick)
+                self._gfx_match_suppress = False
             elif cur_key:
                 self._combo.set(filt[0])
                 self._combo.current(0)
+                self._gfx_match_suppress = True
+                self._gfx_match_combo.set(filt[0])
+                self._gfx_match_suppress = False
                 self._decode_selected()
             else:
                 self._combo.set("")
+                self._gfx_match_suppress = True
+                self._gfx_match_combo.set("")
+                self._gfx_match_suppress = False
         else:
             self._combo.set("")
+            self._gfx_match_suppress = True
+            self._gfx_match_combo.set("")
+            self._gfx_match_suppress = False
             self._clear_image()
+
+    def _schedule_gfx_table_list_filter(self, event: Optional[tk.Event] = None) -> None:
+        if self._gfx_table_list_job is not None:
+            try:
+                self.after_cancel(self._gfx_table_list_job)
+            except (ValueError, tk.TclError):
+                pass
+        self._gfx_table_list_job = self.after(100, lambda: self._apply_gfx_table_list_filter(initial=False))
+
+    def _apply_gfx_table_list_filter(self, initial: bool = False) -> None:
+        self._gfx_table_list_job = None
+        rows = self._gfx_table_list_all_rows
+        if not rows:
+            return
+        sep = " \u2014 "
+        q_raw = self._gfx_table_list_search_var.get().strip()
+        q = q_raw.lower()
+        filt_rows = [(i, lbl) for i, lbl in rows if not q or q in str(i) or q in lbl.lower()]
+        disp = [f"{i}{sep}{lbl}" for i, lbl in filt_rows]
+        self._gfx_table_list_suppress = True
+        self._gfx_table_list_combo.configure(values=disp)
+        if not initial and q:
+            for i, lbl in rows:
+                if lbl.strip().lower() == q:
+                    try:
+                        cur_r = int(self._hex.graphics_table_row_var.get())
+                    except (ValueError, tk.TclError):
+                        cur_r = -1
+                    if cur_r != i:
+                        self._hex.graphics_table_row_var.set(i)
+                        self._gfx_table_list_suppress = False
+                        self._decode_selected()
+                    else:
+                        pick = f"{i}{sep}{lbl}"
+                        self._gfx_table_list_combo.set(pick if pick in disp else (disp[0] if disp else ""))
+                        self._gfx_table_list_suppress = False
+                    return
+        try:
+            tbl_idx = int(self._hex.graphics_table_row_var.get())
+        except (ValueError, tk.TclError):
+            tbl_idx = 0
+        lbl_cur = ""
+        for i, lb in rows:
+            if i == tbl_idx:
+                lbl_cur = lb
+                break
+        pick_cur = f"{tbl_idx}{sep}{lbl_cur}"
+        if pick_cur in disp:
+            self._gfx_table_list_combo.set(pick_cur)
+        elif disp:
+            self._gfx_table_list_combo.set(disp[0])
+        else:
+            self._gfx_table_list_combo.set("")
+        self._gfx_table_list_suppress = False
+
+    def _on_gfx_table_list_combo_select(self, event: Optional[tk.Event] = None) -> None:
+        if self._gfx_table_list_suppress:
+            return
+        s = self._gfx_table_list_combo.get().strip()
+        sep = " \u2014 "
+        if sep not in s:
+            return
+        part = s.split(sep, 1)[0]
+        try:
+            idx = int(part.strip())
+        except ValueError:
+            return
+        try:
+            cur = int(self._hex.graphics_table_row_var.get())
+        except (ValueError, tk.TclError):
+            cur = -1
+        if cur == idx:
+            return
+        self._hex.graphics_table_row_var.set(idx)
+        self._decode_selected()
+
+    def _prepare_gfx_table_list_panel(self, info: Dict[str, Any]) -> None:
+        self._gfx_table_list_frame.grid_remove()
+        list_ref = self._table_label_ref_name(info)
+        aname = str(info.get("name", ""))
+        if not list_ref:
+            self._gfx_table_list_anchor_name = None
+            return
+        base, _delta = _split_enum_field_ref(list_ref)
+        lk = normalize_named_anchor_lookup_key(base.strip())
+        if lk not in self._hex.get_lists():
+            self._gfx_table_list_anchor_name = None
+            return
+        _, eff, _ = self._effective_table_state(info)
+        self._gfx_table_list_all_rows = []
+        for i in range(eff):
+            lbl = self._hex.get_list_entry_label(list_ref, i) or ""
+            self._gfx_table_list_all_rows.append((i, lbl))
+        self._gfx_table_list_label.configure(text=f"[[List]] {list_ref}:", font=("Consolas", 8))
+        if self._gfx_table_list_anchor_name != aname:
+            self._gfx_table_list_suppress = True
+            self._gfx_table_list_search_var.set("")
+            self._gfx_table_list_suppress = False
+        self._gfx_table_list_anchor_name = aname
+        self._apply_gfx_table_list_filter(initial=True)
+        self._gfx_table_list_frame.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(2, 0))
 
     def _decode_selected(self, event: Optional[tk.Event] = None) -> None:
         name = _graphics_combo_entry_to_anchor_name(self._combo.get().strip())
@@ -4422,6 +4702,7 @@ class StructEditorFrame(ttk.Frame):
         self._entry_index_context_pcs: Optional[Dict[str, Any]] = None
         self._entry_index_context_list: Optional[str] = None
         self._struct_filter_job: Optional[str] = None
+        self._struct_match_entries: List[Tuple[str, str, Optional[int]]] = []
         self._build()
 
     def _entry_pcs_row_for_struct_index(self, struct_idx: int) -> Optional[int]:
@@ -4524,7 +4805,11 @@ class StructEditorFrame(ttk.Frame):
         ttk.Label(srow, text="Search:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w", padx=(0, 4))
         self._struct_search_var = tk.StringVar()
         ttk.Entry(srow, textvariable=self._struct_search_var, font=("Consolas", 8)).grid(row=0, column=1, sticky="ew")
-        self._struct_search_var.trace_add("write", lambda *_: self._schedule_struct_combo_filter())
+        ttk.Label(srow, text="Matches:", font=("Consolas", 8)).grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(2, 0))
+        self._struct_match_combo = ttk.Combobox(srow, font=("Consolas", 8), state="readonly", width=56)
+        self._struct_match_combo.grid(row=1, column=1, sticky="ew", pady=(2, 0))
+        self._struct_match_combo.bind("<<ComboboxSelected>>", self._on_struct_match_combo_select)
+        self._struct_match_suppress = False
 
         nav = ttk.Frame(self)
         nav.grid(row=1, column=0, sticky="ew", pady=(0, 2))
@@ -4553,6 +4838,7 @@ class StructEditorFrame(ttk.Frame):
             self._entry_search_frame, textvariable=self._entry_search_var, font=("Consolas", 8)
         )
         self._entry_search_entry.grid(row=0, column=1, sticky="ew")
+        self._entry_search_var.trace_add("write", lambda *_: self._schedule_struct_combo_filter())
         self._entry_search_entry.bind("<Return>", lambda e: self._on_entry_search_next())
         self._entry_search_result_label = ttk.Label(
             self._entry_search_frame, text="", font=("Consolas", 8)
@@ -5881,18 +6167,133 @@ class StructEditorFrame(ttk.Frame):
                 pass
         self._struct_filter_job = self.after(100, self._apply_struct_combo_filter)
 
+    def _on_struct_match_combo_select(self, event: Optional[tk.Event] = None) -> None:
+        if self._struct_match_suppress:
+            return
+        v = self._struct_match_combo.get().strip()
+        if not v:
+            return
+        ent = next((e for e in self._struct_match_entries if e[0] == v), None)
+        if not ent:
+            return
+        _disp, nm, list_idx = ent
+        cur_nm = self._combo.get().strip()
+        if nm != cur_nm:
+            self._combo.set(nm)
+            vals = list(self._combo["values"])
+            if nm in vals:
+                self._combo.current(vals.index(nm))
+            self._on_combo_select()
+        if list_idx is not None:
+            try:
+                cur_i = int(self._idx_var.get())
+            except ValueError:
+                cur_i = -1
+            if cur_i != list_idx:
+                self._idx_var.set(str(list_idx))
+                self._on_spin_change()
+
     def _apply_struct_combo_filter(self) -> None:
         self._struct_filter_job = None
+        # Rebuild from live TOML each time so Search/Matches never uses stale cache.
+        self._anchors = self._hex.get_struct_anchors()
+        cur = self._combo.get().strip()
         if not self._anchors:
             self._combo.configure(values=[])
             self._combo.set("")
+            self._struct_match_entries = []
+            self._struct_match_suppress = True
+            self._struct_match_combo.configure(values=[])
+            self._struct_match_combo.set("")
+            self._struct_match_suppress = False
             self._tree.delete(*self._tree.get_children())
             return
-        names = [str(a["name"]) for a in self._anchors]
-        q = self._struct_search_var.get().strip().lower()
-        filt = [n for n in names if q in n.lower()] if q else list(names)
-        cur = self._combo.get().strip()
+        lists_map = self._hex.get_lists()
+        q_raw = self._entry_search_var.get().strip()
+        q = q_raw.lower()
+
+        # Build result rows from list labels driven by ]count and/or entry_label_list.
+        label_entries: List[Tuple[str, str, Optional[int]]] = []
+        fallback_entries: List[Tuple[str, str, Optional[int]]] = []
+        label_anchor_names_hit: Set[str] = set()
+        fallback_anchor_names_hit: Set[str] = set()
+        for a in self._anchors:
+            nm = str(a["name"])
+            nm_l = nm.lower()
+            count_ref_raw = str(a.get("count_ref") or "")
+            cr = count_ref_raw.lower()
+            elk = normalize_named_anchor_lookup_key(str(a.get("entry_label_list") or ""))
+            elk_l = elk.lower()
+            cr_list_key = normalize_named_anchor_lookup_key(_struct_count_ref_base_name(count_ref_raw)) if count_ref_raw else ""
+            pcs = a.get("entry_label_pcs")
+            pcs_name_l = str((pcs or {}).get("name", "")).lower()
+
+            if q and q not in _struct_anchor_search_blob(a, lists_map):
+                continue
+
+            list_keys: List[str] = []
+            if elk:
+                list_keys.append(elk)
+            if cr_list_key and cr_list_key not in list_keys:
+                list_keys.append(cr_list_key)
+
+            found_label = False
+            if q:
+                for lk in list_keys:
+                    lm = lists_map.get(lk) or {}
+                    for idx in sorted(lm.keys()):
+                        lbl = str(lm[idx])
+                        if q in lbl.lower():
+                            label_entries.append((lbl, nm, idx))
+                            label_anchor_names_hit.add(nm)
+                            found_label = True
+
+            if found_label:
+                continue
+
+            # Keep anchor fallback results only for non-label matches, or when query is empty.
+            if (not q) or (q in nm_l) or (q in cr) or (q in elk_l) or (q in pcs_name_l):
+                fallback_entries.append((nm, nm, None))
+                fallback_anchor_names_hit.add(nm)
+
+        if q and label_entries:
+            match_entries = label_entries
+            anchor_names_hit = label_anchor_names_hit
+        else:
+            match_entries = label_entries + fallback_entries
+            anchor_names_hit = label_anchor_names_hit | fallback_anchor_names_hit
+
+        # De-duplicate repeated label hits coming from different anchors that
+        # share the same ]count list. Prefer current struct if available.
+        dedup: Dict[Tuple[str, Optional[int]], Tuple[str, str, Optional[int]]] = {}
+        for disp, nm, idx in match_entries:
+            k = (disp.lower(), idx)
+            prev = dedup.get(k)
+            if prev is None or (cur and nm == cur and prev[1] != cur):
+                dedup[k] = (disp, nm, idx)
+        match_entries = list(dedup.values())
+        self._struct_match_entries = match_entries
+
+        filt = [str(a["name"]) for a in self._anchors if str(a["name"]) in anchor_names_hit]
         self._combo.configure(values=filt)
+        self._struct_match_suppress = True
+        match_values = [d for d, _, _ in match_entries]
+        self._struct_match_combo.configure(values=match_values)
+        if match_values:
+            if q:
+                picked_idx = 0
+                for i, (disp, _nm, _idx) in enumerate(match_entries):
+                    if disp.lower() == q:
+                        picked_idx = i
+                        break
+                self._struct_match_combo.current(picked_idx)
+            else:
+                self._struct_match_combo.set("")
+        else:
+            self._struct_match_combo.set("")
+        self._struct_match_suppress = False
+
+        # Select an anchor when Struct dropdown is empty or current is not in filtered set.
         if filt:
             if cur in filt:
                 self._combo.current(filt.index(cur))
@@ -5924,13 +6325,16 @@ class StructEditorFrame(ttk.Frame):
         self._packed_terminator_fd = info.get("packed_terminator_fd")
         self._entry_index_context_pcs = info.get("entry_label_pcs")
         self._entry_index_context_list = info.get("entry_label_list")
+        if not self._entry_index_context_list:
+            count_ref_raw = str(info.get("count_ref") or "")
+            if count_ref_raw:
+                lk = normalize_named_anchor_lookup_key(_struct_count_ref_base_name(count_ref_raw))
+                if lk and lk in self._hex.get_lists():
+                    self._entry_index_context_list = lk
         self._idx_spin.configure(to=max(0, self._entry_count - 1))
         self._idx_var.set("0")
         self._entry_label.config(text=f"/ {self._entry_count}")
-        self._entry_search_var.set("")
-        self._entry_search_result_label.config(text="")
-        self._entry_search_matches.clear()
-        self._entry_search_match_pos = 0
+        # Keep Find text while switching structs; it now drives Struct Search/Matches filtering.
         if self._entry_index_context_pcs or self._entry_index_context_list:
             self._entry_search_frame.grid()
         else:
@@ -7038,6 +7442,7 @@ class HexEditorFrame(ttk.Frame):
         self._c_inject_region: Optional[Tuple[int, int]] = None  # [start, end) file offsets for repoint-all skip
         self._c_inject_elf_symbols: Dict[str, int] = {}  # last successful link: nm .text symbol -> ROM file offset
         self._pokefirered_sym_norm_to_name: Optional[Dict[int, str]] = None
+        self._rom_use_pokefirered_sym: bool = False
         self._anchor_browser_pane_visible = False
         self._anchor_tools_pane_layout: bool = False  # True when Anchors + Tools share a horizontal PanedWindow
         self._anchor_browser_path: List[str] = []
@@ -8183,7 +8588,7 @@ class HexEditorFrame(ttk.Frame):
         fo_elf = self._c_inject_elf_symbols.get(s)
         if fo_elf is not None:
             return fo_elf & ~1, ""
-        addr = load_pokefirered_sym_name_to_addr().get(s)
+        addr = self.get_pokefirered_sym_name_to_addr().get(s)
         if addr is None:
             return None, f"{sym!r} not in pokefirered.sym"
         if not (GBA_ROM_BASE <= addr <= GBA_ROM_MAX):
@@ -8398,7 +8803,7 @@ class HexEditorFrame(ttk.Frame):
             )
             return "break"
         link_addr = GBA_ROM_BASE + (file_off & ~1)
-        sym_by_name = load_pokefirered_sym_name_to_addr()
+        sym_by_name = self.get_pokefirered_sym_name_to_addr()
         rom_data_names = load_channeler_c_inject_rom_data_symbol_names()
         with tempfile.TemporaryDirectory(prefix="ch_c_inj_") as tmp:
             c_path = os.path.join(tmp, "inject.c")
@@ -8597,7 +9002,10 @@ class HexEditorFrame(ttk.Frame):
         """Build sorted (name, file_off) list for ROM symbols from ``pokefirered.sym`` (cached)."""
         if self._sym_browser_rom_list is not None:
             return
-        sym = load_pokefirered_sym_name_to_addr()
+        if not getattr(self, "_rom_use_pokefirered_sym", False):
+            self._sym_browser_rom_list = []
+            return
+        sym = self.get_pokefirered_sym_name_to_addr()
         lst: List[Tuple[str, int]] = []
         for name, addr in sym.items():
             if GBA_ROM_BASE <= addr <= GBA_ROM_MAX:
@@ -8607,6 +9015,8 @@ class HexEditorFrame(ttk.Frame):
 
     def _get_pokefirered_sym_browser_items(self) -> List[Tuple[str, Optional[int]]]:
         """List ROM symbols from ``pokefirered.sym`` with optional substring filter."""
+        if not getattr(self, "_rom_use_pokefirered_sym", False):
+            return [("(pokefirered.sym only when ROM game code is BPRE — FireRed US)", -2)]
         self._ensure_sym_browser_rom_list()
         filt = (self._anchor_sym_filter_var.get() or "").strip().lower()
         if not os.path.isfile(_pokefirered_sym_default_path()):
@@ -8676,7 +9086,7 @@ class HexEditorFrame(ttk.Frame):
                             leaves.append((name, 0))
                 else:
                     branches.add(parts[0])
-        if not path:
+        if not path and getattr(self, "_rom_use_pokefirered_sym", False):
             branches.add(ANCHOR_SYM_BROWSER_LABEL)
         result: List[Tuple[str, Optional[int]]] = []
         for b in sorted(branches):
@@ -9780,6 +10190,9 @@ class HexEditorFrame(ttk.Frame):
             messagebox.showerror("Open Failed", str(e))
             return False
         self._file_path = path
+        self._pokefirered_sym_norm_to_name = None
+        self._sym_browser_rom_list = None
+        self._rom_use_pokefirered_sym = rom_bytes_use_pokefirered_sym(bytes(self._data))
         self._modified = False
         self._ldr_pc_targets_valid = False
         self._cursor_byte_offset = 0
@@ -10252,8 +10665,16 @@ Format = "`f|u8`[u8 arg0]"
 
         return re.sub(r"\bsub_([0-9a-fA-F]+)\b", repl, text)
 
+    def get_pokefirered_sym_name_to_addr(self) -> Dict[str, int]:
+        """``pokefirered.sym`` name → address when the loaded ROM is FireRed (``BPRE``); else empty."""
+        if not getattr(self, "_rom_use_pokefirered_sym", False):
+            return {}
+        return load_pokefirered_sym_name_to_addr()
+
     def _get_pokefirered_sym_norm_map(self) -> Dict[int, str]:
         """Lazy-loaded ``pokefirered.sym`` (repo root): normalized GBA address -> symbol name."""
+        if not getattr(self, "_rom_use_pokefirered_sym", False):
+            return {}
         if self._pokefirered_sym_norm_to_name is None:
             self._pokefirered_sym_norm_to_name = load_pokefirered_sym_norm_to_name()
         return self._pokefirered_sym_norm_to_name
@@ -10891,14 +11312,18 @@ Format = "`f|u8`[u8 arg0]"
                 entry_label_pcs = _find_pcs_table_for_struct_suffix(
                     self._get_pcs_table_anchors(), count_raw
                 )
-                if entry_label_pcs is None:
-                    cref = _struct_count_ref_base_name(str(count_raw))
-                    lk = normalize_named_anchor_lookup_key(cref)
-                    if lk and lk in _load_toml_lists(self._toml_data):
-                        entry_label_list = lk
+                # Keep [[List]] label lookup independent from PCS detection so
+                # Struct "Find/Matches" can search list contents even when a
+                # same-named PCS table exists.
+                cref = _struct_count_ref_base_name(str(count_raw))
+                lk = normalize_named_anchor_lookup_key(cref)
+                if lk and lk in _load_toml_lists(self._toml_data):
+                    entry_label_list = lk
+            count_ref_str: Optional[str] = str(count_raw).strip() if isinstance(count_raw, str) else None
             result.append({
                 "name": name, "anchor": anchor, "fields": fields,
                 "count": count, "struct_size": struct_size, "base_off": base_off,
+                "count_ref": count_ref_str,
                 "entry_label_pcs": entry_label_pcs,
                 "entry_label_list": entry_label_list,
                 "packed_terminator": packed,
