@@ -5,10 +5,11 @@ Uses the ygowct06 disassembly (in ./ygowct06) for ARM7TDMI ASM reference.
 
 import os
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import filedialog, messagebox
+from tkinter import ttk
 from typing import Optional
 
-from editors.common.hex_editor import HexEditorFrame
+from editors.common.hex_editor import HexEditorFrame, RomToolsShell
 
 # Path to ygowct06 submodule for ASM reference
 YGOWCT06_PATH = os.path.join(os.path.dirname(__file__), "ygowct06")
@@ -25,12 +26,11 @@ class WCT06Editor:
 
         self._hex_editor: Optional[HexEditorFrame] = None
         self._main_paned: Optional[ttk.PanedWindow] = None
-        self._placeholder_frame: Optional[ttk.Frame] = None
+        self._tools_shell: Optional[RomToolsShell] = None
         self._build_ui()
 
     def _build_ui(self) -> None:
-        """Build the editor interface."""
-        # Menu bar
+        """Build the editor interface (same tools shell as the FireRed editor)."""
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
 
@@ -61,20 +61,13 @@ class WCT06Editor:
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="About", command=self._on_about)
 
-        # Main content: paned window with hex editor and room for tools
         self._main_paned = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
         self._main_paned.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
-        # Top: hex editor (takes most space)
-        self._hex_editor = HexEditorFrame(self._main_paned)
+        self._hex_editor = HexEditorFrame(self._main_paned, default_encoding="ascii")
         self._main_paned.add(self._hex_editor)
 
-        # Bottom: placeholder for future tools (resizable)
-        self._placeholder_frame = ttk.LabelFrame(
-            self._main_paned,
-            text="Tools",
-        )
-        self._main_paned.add(self._placeholder_frame)
+        self._tools_shell = RomToolsShell(self.root, self._main_paned, self._hex_editor)
 
         self._update_file_menu_state()
         self.root.bind("<Control-s>", lambda e: self._on_save())
@@ -92,6 +85,8 @@ class WCT06Editor:
         )
         for _imp in ("Import Sprite...", "Import Tilemap/Tileset...", "Import Palette..."):
             self._file_menu.entryconfig(_imp, state=state)
+        if has_file and self._tools_shell:
+            self._tools_shell.refresh_anchors()
 
     def _on_file_import_sprite(self) -> None:
         if self._hex_editor:
@@ -113,6 +108,8 @@ class WCT06Editor:
             filetypes=[("TOML", "*.toml"), ("All files", "*.*")],
         )
         if path and self._hex_editor.load_toml_manual(path):
+            if self._tools_shell:
+                self._tools_shell.refresh_anchors()
             self._update_file_menu_state()
             messagebox.showinfo("TOML", f"Using structure file:\n{path}")
 
@@ -120,6 +117,8 @@ class WCT06Editor:
         if not self._hex_editor or not self._hex_editor.has_toml_manual_override():
             return
         self._hex_editor.clear_toml_manual_override()
+        if self._tools_shell:
+            self._tools_shell.refresh_anchors()
         self._update_file_menu_state()
         paired = self._hex_editor.get_toml_path() or "(none)"
         messagebox.showinfo("TOML", f"Reloaded ROM-paired structure file:\n{paired}")
@@ -154,5 +153,9 @@ class WCT06Editor:
         messagebox.showinfo(
             "About",
             "Channeler Advance - Yu-Gi-Oh! WCT 2006 Editor\n\n"
-            "Uses Soul-8691/ygowct06 for ARM7TDMI ASM reference.",
+            "Uses Soul-8691/ygowct06 for ARM7TDMI ASM reference.\n\n"
+            "Ctrl+T — show/hide tools pane\n"
+            "Ctrl+Shift+1/2/3 — toggle Table / Struct / Graphics slot\n"
+            "Ctrl+M — Anchors browser: double-click a table/struct leaf to open it in Tools\n"
+            "Goto box: NamedAnchor name, file offset, or 0x08… address opens the matching tool when valid",
         )

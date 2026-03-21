@@ -12413,3 +12413,205 @@ Format = "`f|u8`[u8 arg0]"
     def tools_container(self) -> ttk.Frame:
         """Return the frame for embedding additional tools (right of hex/ASCII)."""
         return self._tools_frame
+
+
+class RomToolsShell:
+    """PCS string table, struct editor, and graphics preview in a bottom pane.
+
+    FireRed-parity behavior: **Ctrl+T** toggles the tools strip; **Ctrl+Shift+1/2/3**
+    toggles Table / Struct / Graphics slots. Double-clicking pointers in the hex view
+    can open the matching tool when :meth:`HexEditorFrame.set_on_pointer_to_named_anchor`
+    is wired (done in :meth:`RomToolsShell.__init__`).
+    """
+
+    def __init__(
+        self,
+        root: tk.Misc,
+        main_paned: ttk.PanedWindow,
+        hex_editor: "HexEditorFrame",
+        *,
+        bind_hotkeys: bool = True,
+    ) -> None:
+        self._root = root
+        self._main_paned = main_paned
+        self._hex = hex_editor
+        self._tools_visible = False
+        self._slot_active: List[bool] = [False, False, False]
+
+        self._tools_frame = ttk.LabelFrame(self._main_paned, text=" Tools ", padding=2)
+        self._tools_frame.rowconfigure(0, weight=1)
+
+        self._pcs_canvas, self._pcs_inner = self._make_scroll_slot()
+        self.pcs_table = PcsStringTableFrame(self._pcs_inner, self._hex)
+        self.pcs_table.pack(fill=tk.BOTH, expand=True)
+
+        self._struct_canvas, self._struct_inner = self._make_scroll_slot()
+        self.struct_editor = StructEditorFrame(self._struct_inner, self._hex)
+        self.struct_editor.pack(fill=tk.BOTH, expand=True)
+
+        self._tool3_canvas, self._tool3_inner = self._make_scroll_slot()
+        self.graphics_preview = GraphicsPreviewFrame(self._tool3_inner, self._hex)
+        self.graphics_preview.pack(fill=tk.BOTH, expand=True)
+
+        self._hex.set_on_pointer_to_named_anchor(self._on_pointer_to_named_anchor)
+
+        if bind_hotkeys:
+            self._root.bind_all("<Control-KeyPress-t>", self._on_ctrl_t)
+            self._root.bind_all("<Control-KeyPress-T>", self._on_ctrl_t)
+            self._root.bind_all("<Control-Shift-Key-exclam>", lambda e: self._hotkey_slot(0))
+            self._root.bind_all("<Control-Shift-Key-at>", lambda e: self._hotkey_slot(1))
+            self._root.bind_all("<Control-Shift-Key-numbersign>", lambda e: self._hotkey_slot(2))
+            self._root.bind_all("<Control-Shift-Key-1>", lambda e: self._hotkey_slot(0))
+            self._root.bind_all("<Control-Shift-Key-2>", lambda e: self._hotkey_slot(1))
+            self._root.bind_all("<Control-Shift-Key-3>", lambda e: self._hotkey_slot(2))
+
+    def refresh_anchors(self) -> None:
+        """Reload NamedAnchor lists in all three tools (call after ROM / TOML changes)."""
+        self.pcs_table.refresh_anchors()
+        self.struct_editor.refresh_anchors()
+        self.graphics_preview.refresh_anchors()
+
+    def _focus_in_text_entry(self) -> bool:
+        w = self._root.focus_get()
+        if w is None:
+            return False
+        try:
+            cls = w.winfo_class()
+        except tk.TclError:
+            return False
+        return cls in ("TEntry", "Entry", "TSpinbox", "Spinbox", "TCombobox")
+
+    def _make_scroll_slot(self) -> Tuple[ttk.Frame, ttk.Frame]:
+        """Canvas + horizontal scrollbar; inner frame scrolls (~1/3 screen width)."""
+        third = max(200, self._root.winfo_screenwidth() // 3)
+        outer = ttk.Frame(self._tools_frame, width=third)
+        outer.grid_propagate(False)
+        outer.rowconfigure(0, weight=1)
+        outer.columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+        try:
+            bg = ttk.Style().lookup("TFrame", "background") or "#f0f0f0"
+        except tk.TclError:
+            bg = "#f0f0f0"
+        canvas.configure(background=bg)
+
+        hsb = ttk.Scrollbar(outer, orient=tk.HORIZONTAL, command=canvas.xview)
+        canvas.configure(xscrollcommand=hsb.set)
+
+        inner = ttk.Frame(canvas)
+        wid = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _sync_inner(_e: tk.Event) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _sync_canvas(e: tk.Event) -> None:
+            try:
+                req_w = inner.winfo_reqwidth()
+                req_h = inner.winfo_reqheight()
+            except tk.TclError:
+                req_w, req_h = 0, 0
+            w = max(e.width, req_w)
+            h = max(e.height, req_h)
+            canvas.itemconfigure(wid, width=w, height=h)
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        inner.bind("<Configure>", _sync_inner)
+        canvas.bind("<Configure>", _sync_canvas)
+
+        canvas.grid(row=0, column=0, sticky="nsew")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        outer._canvas = canvas  # type: ignore[attr-defined]
+        return outer, inner
+
+    def _slot_frames(self) -> List[ttk.Frame]:
+        return [self._pcs_canvas, self._struct_canvas, self._tool3_canvas]
+
+    def _layout_tool_slots(self) -> None:
+        frames = self._slot_frames()
+        for fr in frames:
+            fr.grid_remove()
+
+        active = [(i, frames[i]) for i in range(3) if self._slot_active[i]]
+        third = max(200, self._root.winfo_screenwidth() // 3)
+
+        for col in range(4):
+            self._tools_frame.columnconfigure(col, weight=0, minsize=0)
+        self._tools_frame.columnconfigure(3, weight=1)
+
+        for col, (_, fr) in enumerate(active):
+            padx = (0, 2) if col < len(active) - 1 else (0, 0)
+            fr.grid(row=0, column=col, sticky="nsew", padx=padx)
+            c = getattr(fr, "_canvas", None)
+            if c is not None:
+                try:
+                    c.configure(width=third)
+                except tk.TclError:
+                    pass
+
+    def _on_ctrl_t(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        if self._tools_visible:
+            self._tools_visible = False
+            self._main_paned.forget(self._tools_frame)
+            return "break"
+        if self._focus_in_text_entry():
+            return None
+        self._tools_visible = not self._tools_visible
+        if self._tools_visible:
+            self._slot_active[0] = True
+            self._slot_active[1] = True
+            self._slot_active[2] = True
+            self._main_paned.add(self._tools_frame)
+            self.refresh_anchors()
+            self._layout_tool_slots()
+        return "break"
+
+    def _hotkey_slot(self, index: int) -> Optional[str]:
+        others_on = any(self._slot_active[j] for j in range(3) if j != index)
+        hiding_last_slot = self._tools_visible and self._slot_active[index] and not others_on
+        if self._focus_in_text_entry() and not hiding_last_slot:
+            return None
+        self._slot_active[index] = not self._slot_active[index]
+
+        if not any(self._slot_active):
+            if self._tools_visible:
+                self._tools_visible = False
+                self._main_paned.forget(self._tools_frame)
+            return "break"
+
+        if not self._tools_visible:
+            self._tools_visible = True
+            self._main_paned.add(self._tools_frame)
+            self.refresh_anchors()
+
+        self._layout_tool_slots()
+        return "break"
+
+    def _on_pointer_to_named_anchor(self, anchor_info: dict) -> None:
+        t = anchor_info.get("type")
+        if t == "graphics":
+            self._slot_active[2] = True
+        elif t == "struct":
+            self._slot_active[1] = True
+        else:
+            self._slot_active[0] = True
+
+        if not self._tools_visible:
+            self._tools_visible = True
+            self._main_paned.add(self._tools_frame)
+
+        self._layout_tool_slots()
+        name = anchor_info.get("name", "")
+        if t == "graphics":
+            self.graphics_preview.refresh_anchors()
+            self.graphics_preview.show_anchor(name)
+            self._root.after(50, lambda: self.graphics_preview._combo.focus_set())
+        elif t == "struct":
+            self.struct_editor.refresh_anchors()
+            self.struct_editor.show_struct(name)
+            self._root.after(50, lambda: self.struct_editor._tree.focus_set())
+        else:
+            self.pcs_table.refresh_anchors()
+            self.pcs_table.show_table(name)
+            self._root.after(50, lambda: self.pcs_table._tree.focus_set())
