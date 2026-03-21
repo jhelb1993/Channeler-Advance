@@ -187,7 +187,7 @@ High-level capabilities include:
 
 **Rough roadmap / not implemented yet** (non-exhaustive): auto-generated TOML on ROM open, Python scripting interface, complete pret→TOML function/struct/constant conversion, undo, some FireRed-specific editors (trainer teams, overworld sprites, egg moves).
 
-**Not currently planned:** C injection, mapping, event scripting, battle/animation/trainer-AI scripting.
+**Not currently planned:** songs, mapping, event scripting, battle/animation/trainer-AI scripting.
 
 ## Credits
 

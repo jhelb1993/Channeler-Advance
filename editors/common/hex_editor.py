@@ -307,6 +307,134 @@ def collect_nm_undefined_symbols(nm_exe: str, obj_path: str) -> Tuple[List[str],
     return names, ""
 
 
+# Offsets insert.py skips when scanning for repoint-all (vanilla CFRU compatibility).
+_CFRU_REALPOINT_IGNORE_FILE_OFFS = {0x3986C0, 0x3986EC, 0xDABDF0}
+
+C_INJECT_PATCHES_TEMPLATE = """### hooks
+# Each line: function_name  hook_location  register
+# function_name = injected symbol: channeler_inject / inject, any T/t symbol from last compile (nm on ELF), or pokefirered.sym name
+# hook_location = GBA 0x08…… or file offset; register = 0–7 (ldr rN, [pc] / bx chain)
+# Example (aligned hook site, 8 bytes):
+# channeler_inject  0x08040000  0
+
+### repointall
+# Each line: target_symbol  sample_word_location
+# Reads the 4-byte pointer at sample_word_location, then replaces every matching word in ROM with a pointer to target_symbol.
+# sample_word_location: GBA or file offset of the word to read (not the value being matched).
+
+### repoints
+# Each line: target_symbol  word_location_to_overwrite
+# Writes a 32-bit pointer (no +1) to the ROM word at word_location_to_overwrite.
+
+### routinepointers
+# Same as repoints, but the written pointer uses Thumb (+1) for a function address.
+"""
+
+
+def _gba_thumb_hook_write(data: bytearray, hook_file_off: int, dest_code_file_off: int, register: int) -> None:
+    """Thumb ``ldr rN,[pc]; bx`` + pool word; matches CFRU ``Hook()`` (aligned hook uses 8 bytes)."""
+    hook_at = hook_file_off
+    if hook_at & 1:
+        hook_at -= 1
+    register &= 7
+    if hook_at % 4:
+        ins = bytes([0x01, 0x48 | register, 0x00 | (register << 3), 0x47, 0x0, 0x0])
+    else:
+        ins = bytes([0x00, 0x48 | register, 0x00 | (register << 3), 0x47])
+    space = dest_code_file_off + 0x08000001
+    ins += space.to_bytes(4, "little")
+    for i, b in enumerate(ins):
+        data[hook_at + i] = b
+
+
+def _gba_repoint_word_write(
+    data: bytearray, target_file_off: int, word_file_off: int, slide: int
+) -> None:
+    """``slide`` 0 = data pointer; 1 = Thumb function pointer (+1), CFRU ``Repoint(..., slide)``."""
+    val = target_file_off + GBA_ROM_BASE + slide
+    data[word_file_off : word_file_off + 4] = val.to_bytes(4, "little")
+
+
+def _gba_real_repoint_all_scan(
+    data: bytearray,
+    sample_word_file_off: int,
+    new_target_file_off: int,
+    slide: int,
+    skip_region: Optional[Tuple[int, int]],
+) -> int:
+    """Replace every word equal to the sample pointer; optional skip_region is [start,end) insert blob."""
+    old = int.from_bytes(data[sample_word_file_off : sample_word_file_off + 4], "little")
+    new_val = new_target_file_off + GBA_ROM_BASE + slide
+    n = 0
+    end_insert = skip_region[1] if skip_region else -1
+    start_insert = skip_region[0] if skip_region else -1
+    offset = 0
+    lim = len(data) - 3
+    while offset < lim:
+        if offset in _CFRU_REALPOINT_IGNORE_FILE_OFFS:
+            offset += 4
+            continue
+        if (
+            skip_region
+            and start_insert <= offset < end_insert
+        ):
+            offset = end_insert
+            while offset % 4:
+                offset += 1
+            continue
+        w = int.from_bytes(data[offset : offset + 4], "little")
+        if w == old:
+            data[offset : offset + 4] = new_val.to_bytes(4, "little")
+            n += 1
+        offset += 4
+    return n
+
+
+def parse_c_inject_patches_sections(text: str) -> Dict[str, List[str]]:
+    """Split ``### hooks`` / ``### repointall`` / ``### repoints`` / ``### routinepointers`` blocks."""
+    sections: Dict[str, List[str]] = {
+        "hooks": [],
+        "repointall": [],
+        "repoints": [],
+        "routinepointers": [],
+    }
+    current: Optional[str] = None
+    for raw in text.splitlines():
+        m = re.match(r"^\s*###\s*(\S+)\s*$", raw)
+        if m:
+            key = m.group(1).lower()
+            current = key if key in sections else None
+            continue
+        if current is None:
+            continue
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        sections[current].append(line)
+    return sections
+
+
+def parse_nm_elf_rom_text_symbols_to_file_offsets(nm_text: str) -> Dict[str, int]:
+    """Parse ``arm-none-eabi-nm`` output on a linked ELF: map .text symbol names to ROM file offsets."""
+    out: Dict[str, int] = {}
+    for line in nm_text.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        sym_type = parts[-2]
+        if sym_type not in ("T", "t", "W", "w"):
+            continue
+        try:
+            vma = int(parts[0], 16)
+        except ValueError:
+            continue
+        name = parts[-1]
+        if not (GBA_ROM_BASE <= vma <= GBA_ROM_MAX):
+            continue
+        out[name] = (vma - GBA_ROM_BASE) & ~1
+    return out
+
+
 GBA_EWRAM_START = 0x02000000
 GBA_EWRAM_END = 0x0203FFFF
 GBA_IWRAM_START = 0x03000000
@@ -6277,6 +6405,8 @@ class HexEditorFrame(ttk.Frame):
         self._hackmew_asm_end: Optional[int] = None
         self._pseudo_c_pane_visible = False
         self._c_inject_mode = False
+        self._c_inject_region: Optional[Tuple[int, int]] = None  # [start, end) file offsets for repoint-all skip
+        self._c_inject_elf_symbols: Dict[str, int] = {}  # last successful link: nm .text symbol -> ROM file offset
         self._pokefirered_sym_norm_to_name: Optional[Dict[int, str]] = None
         self._anchor_browser_pane_visible = False
         self._anchor_tools_pane_layout: bool = False  # True when Anchors + Tools share a horizontal PanedWindow
@@ -6417,7 +6547,8 @@ class HexEditorFrame(ttk.Frame):
         # Pseudo-C pane: to the right of ASM, hidden by default, toggleable with Ctrl+D
         self._pseudo_c_frame = ttk.LabelFrame(body, text=" Pseudo-C ", padding=2)
         self._pseudo_c_frame.grid(row=1, column=4, sticky="nsew", padx=(4, 0))
-        self._pseudo_c_frame.columnconfigure(0, weight=1)
+        self._pseudo_c_frame.columnconfigure(0, weight=3)
+        self._pseudo_c_frame.columnconfigure(1, weight=5)
         self._pseudo_c_frame.rowconfigure(1, weight=1)
         self._c_inject_offset_var = tk.StringVar(value="")
         self._c_inject_size_var = tk.StringVar(value="—")
@@ -6430,13 +6561,19 @@ class HexEditorFrame(ttk.Frame):
         self._c_inject_offset_entry.pack(side=tk.LEFT, padx=(0, 8))
         ttk.Label(pc_toolbar, text="Compiled:", font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 2))
         ttk.Label(pc_toolbar, textvariable=self._c_inject_size_var, font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Label(pc_toolbar, text="Ctrl+Shift+4 edit · 5 compile", font=("Consolas", 8), foreground="#555").pack(
+        ttk.Label(pc_toolbar, text="Ctrl+Shift+4 edit · 5 compile · 6 apply patches", font=("Consolas", 8), foreground="#555").pack(
             side=tk.LEFT
         )
-        self._scroll_pseudo_c = tk.Scrollbar(self._pseudo_c_frame)
-        self._scroll_pseudo_c_h = tk.Scrollbar(self._pseudo_c_frame, orient=tk.HORIZONTAL)
+
+        self._pseudo_c_left = ttk.Frame(self._pseudo_c_frame)
+        self._pseudo_c_left.grid(row=1, column=0, sticky="nsew", padx=(0, 4))
+        self._pseudo_c_left.columnconfigure(0, weight=1)
+        self._pseudo_c_left.rowconfigure(0, weight=1)
+
+        self._scroll_pseudo_c = tk.Scrollbar(self._pseudo_c_left)
+        self._scroll_pseudo_c_h = tk.Scrollbar(self._pseudo_c_left, orient=tk.HORIZONTAL)
         self._text_pseudo_c = tk.Text(
-            self._pseudo_c_frame, font=("Consolas", 10), wrap=tk.NONE, width=64,
+            self._pseudo_c_left, font=("Consolas", 10), wrap=tk.NONE, width=42,
             borderwidth=1, relief=tk.SOLID, padx=4, pady=2,
             state=tk.DISABLED,
             background="#fafaf8",
@@ -6445,17 +6582,61 @@ class HexEditorFrame(ttk.Frame):
         self._text_pseudo_c.configure(yscrollcommand=self._scroll_pseudo_c.set, xscrollcommand=self._scroll_pseudo_c_h.set)
         self._scroll_pseudo_c.configure(command=self._text_pseudo_c.yview)
         self._scroll_pseudo_c_h.configure(command=self._text_pseudo_c.xview)
-        self._text_pseudo_c.grid(row=1, column=0, sticky="nsew")
-        self._scroll_pseudo_c.grid(row=1, column=1, sticky="ns")
-        self._scroll_pseudo_c_h.grid(row=2, column=0, sticky="ew")
+        self._text_pseudo_c.grid(row=0, column=0, sticky="nsew")
+        self._scroll_pseudo_c.grid(row=0, column=1, sticky="ns")
+        self._scroll_pseudo_c_h.grid(row=1, column=0, columnspan=2, sticky="ew")
+
+        self._pseudo_c_right = ttk.Frame(self._pseudo_c_frame)
+        self._pseudo_c_right.columnconfigure(0, weight=1)
+        self._pseudo_c_right.rowconfigure(1, weight=1)
+
+        self._c_inject_patches_label = ttk.Label(
+            self._pseudo_c_right,
+            text=" ROM hooks & repoints — ### hooks / repointall / repoints / routinepointers ",
+            font=("Consolas", 8),
+        )
+        self._scroll_c_inject_patches = tk.Scrollbar(self._pseudo_c_right)
+        self._scroll_c_inject_patches_h = tk.Scrollbar(self._pseudo_c_right, orient=tk.HORIZONTAL)
+        self._text_c_inject_patches = tk.Text(
+            self._pseudo_c_right,
+            font=("Consolas", 9),
+            wrap=tk.NONE,
+            width=52,
+            height=16,
+            borderwidth=1,
+            relief=tk.SOLID,
+            padx=4,
+            pady=2,
+            state=tk.NORMAL,
+            background="#f5f8ff",
+            insertbackground="black",
+        )
+        self._text_c_inject_patches.configure(
+            yscrollcommand=self._scroll_c_inject_patches.set,
+            xscrollcommand=self._scroll_c_inject_patches_h.set,
+        )
+        self._scroll_c_inject_patches.configure(command=self._text_c_inject_patches.yview)
+        self._scroll_c_inject_patches_h.configure(command=self._text_c_inject_patches.xview)
+        self._c_inject_patches_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 2))
+        self._text_c_inject_patches.grid(row=1, column=0, sticky="nsew")
+        self._scroll_c_inject_patches.grid(row=1, column=1, sticky="ns")
+        self._scroll_c_inject_patches_h.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self._pseudo_c_right.grid_remove()
 
         def _pseudo_c_scroll(delta: int) -> None:
             self._text_pseudo_c.yview_scroll(-delta, "units")
 
-        for w in (self._text_pseudo_c, self._pseudo_c_frame):
+        def _c_inject_patches_scroll(delta: int) -> None:
+            self._text_c_inject_patches.yview_scroll(-delta, "units")
+
+        for w in (self._text_pseudo_c, self._pseudo_c_left, self._pseudo_c_frame):
             w.bind("<MouseWheel>", lambda e: _pseudo_c_scroll(int((e.delta or 0) / 120)))
             w.bind("<Button-4>", lambda e: _pseudo_c_scroll(3))
             w.bind("<Button-5>", lambda e: _pseudo_c_scroll(-3))
+        for w in (self._text_c_inject_patches, self._c_inject_patches_label, self._pseudo_c_right):
+            w.bind("<MouseWheel>", lambda e: _c_inject_patches_scroll(int((e.delta or 0) / 120)))
+            w.bind("<Button-4>", lambda e: _c_inject_patches_scroll(3))
+            w.bind("<Button-5>", lambda e: _c_inject_patches_scroll(-3))
 
         # Horizontal sash between Anchors and Tools (user-adjustable width); Ctrl+M toggles Anchors pane.
         self._anchor_tools_pane = ttk.PanedWindow(body, orient=tk.HORIZONTAL)
@@ -6591,16 +6772,21 @@ class HexEditorFrame(ttk.Frame):
         for w in (
             self._text, self._text_ascii, self._goto_entry, self._encoding_combo,
             self._asm_mode_combo, self._asm_frame, self._text_asm,
-            self._pseudo_c_frame, self._text_pseudo_c, pc_toolbar, self._c_inject_offset_entry, outer,
+            self._pseudo_c_frame, self._text_pseudo_c, self._text_c_inject_patches,
+            self._c_inject_patches_label, pc_toolbar, self._c_inject_offset_entry, outer,
         ):
             w.bind("<Control-Shift-Key-4>", self._toggle_c_inject_edit_mode)
             w.bind("<Control-Shift-dollar>", self._toggle_c_inject_edit_mode)
             w.bind("<Control-Shift-Key-5>", self._compile_c_inject)
             w.bind("<Control-Shift-percent>", self._compile_c_inject)
+            w.bind("<Control-Shift-Key-6>", self._apply_c_inject_rom_patches_cmd)
+            w.bind("<Control-Shift-asciicircum>", self._apply_c_inject_rom_patches_cmd)
         self.winfo_toplevel().bind("<Control-Shift-Key-4>", self._toggle_c_inject_edit_mode, add=True)
         self.winfo_toplevel().bind("<Control-Shift-dollar>", self._toggle_c_inject_edit_mode, add=True)
         self.winfo_toplevel().bind("<Control-Shift-Key-5>", self._compile_c_inject, add=True)
         self.winfo_toplevel().bind("<Control-Shift-percent>", self._compile_c_inject, add=True)
+        self.winfo_toplevel().bind("<Control-Shift-Key-6>", self._apply_c_inject_rom_patches_cmd, add=True)
+        self.winfo_toplevel().bind("<Control-Shift-asciicircum>", self._apply_c_inject_rom_patches_cmd, add=True)
         for w in (
             self._text, self._text_ascii, self._goto_entry, self._encoding_combo,
             self._asm_mode_combo, self._asm_frame, self._text_asm,
@@ -6971,6 +7157,40 @@ class HexEditorFrame(ttk.Frame):
         self.after_idle(self._refresh_visible)
         return "break"
 
+    def _hide_asm_and_anchor_for_c_inject(self) -> None:
+        """Close disassembly and anchor browser (C inject steals horizontal space / focus)."""
+        if self._asm_pane_visible:
+            self._asm_pane_visible = False
+            if self._hackmew_mode:
+                self._hackmew_mode = False
+                self._asm_frame.configure(text=" Disassembly ")
+            self._asm_frame.grid_remove()
+        if self._anchor_browser_pane_visible:
+            self._anchor_browser_pane_visible = False
+            if self._anchor_tools_pane_layout:
+                self._anchor_tools_pane.grid_remove()
+                try:
+                    self._anchor_tools_pane.remove(self._anchor_frame)
+                except tk.TclError:
+                    pass
+                try:
+                    self._anchor_tools_pane.remove(self._tools_frame)
+                except tk.TclError:
+                    pass
+                self._tools_frame.grid(row=1, column=6, sticky="nsew", padx=(4, 0))
+                self._anchor_tools_pane_layout = False
+            else:
+                self._anchor_frame.grid_remove()
+
+    def _show_c_inject_patches_pane(self) -> None:
+        """Show ``### hooks`` / repoint column to the right of decompilation."""
+        self._pseudo_c_right.grid(row=1, column=1, sticky="nsew")
+        if not self._text_c_inject_patches.get("1.0", tk.END).strip():
+            self._text_c_inject_patches.insert("1.0", C_INJECT_PATCHES_TEMPLATE)
+
+    def _hide_c_inject_patches_pane(self) -> None:
+        self._pseudo_c_right.grid_remove()
+
     def _toggle_c_inject_edit_mode(self, event: Optional[tk.Event] = None) -> Optional[str]:
         """Toggle editable Pseudo-C for devkitARM C injection. Bound to Ctrl+Shift+4."""
         if not self._pseudo_c_pane_visible:
@@ -6979,13 +7199,169 @@ class HexEditorFrame(ttk.Frame):
             self.after_idle(self._refresh_visible)
         self._c_inject_mode = not self._c_inject_mode
         if self._c_inject_mode:
+            self._hide_asm_and_anchor_for_c_inject()
             self._pseudo_c_frame.configure(text=" Pseudo-C (C edit) ")
             self._text_pseudo_c.configure(state=tk.NORMAL)
+            self._show_c_inject_patches_pane()
             self._text_pseudo_c.focus_set()
         else:
             self._pseudo_c_frame.configure(text=" Pseudo-C ")
+            self._hide_c_inject_patches_pane()
             self._refresh_pseudo_c_selection()
+        self.after_idle(self._refresh_visible)
         return "break"
+
+    def _effective_inject_skip_region(self) -> Optional[Tuple[int, int]]:
+        """Skip region for repoint-all scan (insert blob). Uses last compile span or Inject @ + compiled size."""
+        if self._c_inject_region is not None:
+            return self._c_inject_region
+        off_s = (self._c_inject_offset_var.get() or "").strip()
+        if not off_s:
+            return None
+        fo, _e = self.resolve_file_offset_or_named_anchor(off_s)
+        if fo is None:
+            return None
+        m = re.match(r"(\d+)\s*bytes?\b", self._c_inject_size_var.get() or "", re.I)
+        if m:
+            return (fo, fo + int(m.group(1)))
+        return (fo, fo + 0x1000)
+
+    def _resolve_c_inject_target_file_off(self, sym: str, inject_fo: int) -> Tuple[Optional[int], str]:
+        """Map ``channeler_inject``, last-link ELF symbols (nm), or ``pokefirered.sym`` name to ROM file offset (even)."""
+        s = sym.strip()
+        if not s:
+            return None, "empty symbol"
+        if s.lower() in ("channeler_inject", "inject"):
+            return inject_fo & ~1, ""
+        fo_elf = self._c_inject_elf_symbols.get(s)
+        if fo_elf is not None:
+            return fo_elf & ~1, ""
+        addr = load_pokefirered_sym_name_to_addr().get(s)
+        if addr is None:
+            return None, f"{sym!r} not in pokefirered.sym"
+        if not (GBA_ROM_BASE <= addr <= GBA_ROM_MAX):
+            return None, f"{sym} is not a ROM symbol"
+        return (addr - GBA_ROM_BASE) & ~1, ""
+
+    def _apply_c_inject_rom_patches_cmd(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Apply hooks/repoints from the ``###`` document. Bound to Ctrl+Shift+6."""
+        if not self._pseudo_c_pane_visible or not self._c_inject_mode:
+            messagebox.showinfo("ROM patches", "Enable C inject edit mode (Ctrl+Shift+4) first.")
+            return "break"
+        if not self._data:
+            messagebox.showerror("ROM patches", "No ROM loaded.")
+            return "break"
+        ok, msg = self._apply_c_inject_rom_patches()
+        if ok:
+            messagebox.showinfo("ROM patches", msg)
+        else:
+            messagebox.showerror("ROM patches", msg)
+        return "break"
+
+    def _apply_c_inject_rom_patches(self) -> Tuple[bool, str]:
+        """Parse ``###`` sections and patch ``self._data``. Returns (ok, message)."""
+        if not self._data:
+            return False, "No ROM."
+        off_s = (self._c_inject_offset_var.get() or "").strip()
+        if not off_s:
+            return False, "Set Inject @ for hook destination / symbol resolution."
+        inject_fo, err = self.resolve_file_offset_or_named_anchor(off_s)
+        if inject_fo is None:
+            return False, f"Inject @: {err or 'invalid'}"
+        sections = parse_c_inject_patches_sections(self._text_c_inject_patches.get("1.0", tk.END))
+        nlines = sum(len(sections[k]) for k in sections)
+        if nlines == 0:
+            return True, "(no ### lines to apply)"
+        skip = self._effective_inject_skip_region()
+        log: List[str] = []
+
+        for raw in sections["hooks"]:
+            parts = raw.split()
+            if len(parts) < 3:
+                log.append(
+                    f"hooks: skip (need 3 fields: function_name hook_location register): {raw!r}"
+                )
+                continue
+            sym_tok, addr_tok, reg_tok = parts[0], parts[1], parts[2]
+            dest_fo, er = self._resolve_c_inject_target_file_off(sym_tok, inject_fo)
+            if dest_fo is None:
+                return False, f"hooks: {sym_tok}: {er}"
+            hfo, e = parse_rom_file_offset(addr_tok)
+            if hfo is None:
+                return False, f"hooks: bad address {addr_tok!r}: {e}"
+            try:
+                reg = int(reg_tok, 0)
+            except ValueError:
+                return False, f"hooks: bad register {reg_tok!r}"
+            if not (0 <= reg <= 7):
+                return False, f"hooks: register must be 0–7, got {reg}"
+            hook_at = hfo
+            if hook_at & 1:
+                hook_at -= 1
+            ins_len = 10 if (hook_at % 4) else 8
+            if hook_at + ins_len > len(self._data):
+                return False, f"hooks: hook at 0x{hook_at:X} needs {ins_len} bytes past ROM end."
+            _gba_thumb_hook_write(self._data, hfo, dest_fo, reg)
+            log.append(
+                f"hooks: 0x{GBA_ROM_BASE + hfo:08X} → {sym_tok} (r{reg}), {ins_len} bytes"
+            )
+
+        for raw in sections["repoints"]:
+            parts = raw.split()
+            if len(parts) < 2:
+                log.append(f"repoints: skip: {raw!r}")
+                continue
+            sym, addr_tok = parts[0], parts[1]
+            tfo, er = self._resolve_c_inject_target_file_off(sym, inject_fo)
+            if tfo is None:
+                return False, f"repoints: {er}"
+            wfo, e2 = parse_rom_file_offset(addr_tok)
+            if wfo is None:
+                return False, f"repoints: bad word address {addr_tok!r}: {e2}"
+            if wfo + 4 > len(self._data):
+                return False, f"repoints: write past ROM at 0x{wfo:X}"
+            _gba_repoint_word_write(self._data, tfo, wfo, 0)
+            log.append(f"repoints: *0x{GBA_ROM_BASE + wfo:08X} = ptr to {sym} (no +1)")
+
+        for raw in sections["routinepointers"]:
+            parts = raw.split()
+            if len(parts) < 2:
+                log.append(f"routinepointers: skip: {raw!r}")
+                continue
+            sym, addr_tok = parts[0], parts[1]
+            tfo, er = self._resolve_c_inject_target_file_off(sym, inject_fo)
+            if tfo is None:
+                return False, f"routinepointers: {er}"
+            wfo, e2 = parse_rom_file_offset(addr_tok)
+            if wfo is None:
+                return False, f"routinepointers: bad word address {addr_tok!r}: {e2}"
+            if wfo + 4 > len(self._data):
+                return False, f"routinepointers: write past ROM at 0x{wfo:X}"
+            _gba_repoint_word_write(self._data, tfo, wfo, 1)
+            log.append(f"routinepointers: *0x{GBA_ROM_BASE + wfo:08X} = Thumb ptr to {sym} (+1)")
+
+        for raw in sections["repointall"]:
+            parts = raw.split()
+            if len(parts) < 2:
+                log.append(f"repointall: skip: {raw!r}")
+                continue
+            sym, sample_tok = parts[0], parts[1]
+            tfo, er = self._resolve_c_inject_target_file_off(sym, inject_fo)
+            if tfo is None:
+                return False, f"repointall: {er}"
+            sfo, e2 = parse_rom_file_offset(sample_tok)
+            if sfo is None:
+                return False, f"repointall: bad sample {sample_tok!r}: {e2}"
+            if sfo + 4 > len(self._data):
+                return False, f"repointall: sample past ROM"
+            n = _gba_real_repoint_all_scan(self._data, sfo, tfo, 0, skip)
+            log.append(f"repointall: {n} word(s) → ptr to {sym} (no +1), sample 0x{GBA_ROM_BASE + sfo:08X}")
+
+        self._modified = True
+        self._ldr_pc_targets_valid = False
+        self._schedule_xref_rebuild()
+        self.after_idle(self._refresh_visible)
+        return True, "\n".join(log) if log else "OK"
 
     def _prepare_c_inject_source(self, user_text: str) -> str:
         """Build one translation unit with ``channeler_inject`` unless the user supplied a full file."""
@@ -7153,6 +7529,16 @@ class HexEditorFrame(ttk.Frame):
                 messagebox.showerror("C inject", f"Link failed:\n{err[:4000]}")
                 return "break"
             try:
+                r_nm_elf = subprocess.run([nm_tool, elf_path], capture_output=True, text=True)
+            except FileNotFoundError:
+                r_nm_elf = None
+            if r_nm_elf and r_nm_elf.returncode == 0:
+                self._c_inject_elf_symbols = parse_nm_elf_rom_text_symbols_to_file_offsets(
+                    r_nm_elf.stdout
+                )
+            else:
+                self._c_inject_elf_symbols = {}
+            try:
                 r2 = subprocess.run(
                     [objcopy, "-O", "binary", "-j", ".text", elf_path, bin_path],
                     capture_output=True,
@@ -7182,17 +7568,24 @@ class HexEditorFrame(ttk.Frame):
         self._c_inject_size_var.set(f"{len(blob)} bytes")
         for i, b in enumerate(blob):
             self._data[file_off + i] = b
+        self._c_inject_region = (file_off, file_off + len(blob))
         self._modified = True
         self._ldr_pc_targets_valid = False
         self._schedule_xref_rebuild()
         self._refresh_visible()
         if self._asm_pane_visible:
             self._refresh_asm_selection()
-        messagebox.showinfo(
-            "C inject",
+        patch_ok, patch_msg = self._apply_c_inject_rom_patches()
+        base_msg = (
             f"Wrote {len(blob)} bytes at file offset 0x{file_off:08X} "
-            f"(GBA 0x{GBA_ROM_BASE + file_off:08X}).",
+            f"(GBA 0x{GBA_ROM_BASE + file_off:08X})."
         )
+        if patch_ok and patch_msg and not patch_msg.startswith("("):
+            base_msg += "\n\nROM patches:\n" + patch_msg
+        elif not patch_ok:
+            messagebox.showwarning("C inject", base_msg + "\n\nROM patches failed:\n" + patch_msg)
+            return "break"
+        messagebox.showinfo("C inject", base_msg)
         return "break"
 
     def _toggle_anchor_browser_pane(self, event: Optional[tk.Event] = None) -> Optional[str]:

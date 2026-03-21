@@ -361,7 +361,7 @@ class FireRedEditor:
             "Uses pret/pokefirered for C code reference.\n\n"
             "Ctrl+T — show/hide tools pane\n"
             "Ctrl+Shift+1/2/3 — toggle Table / Struct / Graphics slot\n"
-            "Pseudo-C: Ctrl+D — pane; Ctrl+Shift+4 — C edit mode; Ctrl+Shift+5 — compile C inject\n"
+            "Pseudo-C: Ctrl+D — pane; Ctrl+Shift+4 — C edit + hooks/repoints; Ctrl+Shift+5 — compile; Ctrl+Shift+6 — apply ROM patches\n"
             "Graphics: built-in decode (pret gfx.c–compatible); Pillow required for PNG preview\n"
             "Ctrl+M — Anchors browser: double-click a table/struct leaf to open it in Tools\n"
             "Goto box: NamedAnchor name, file offset, or 0x08… address opens the matching tool when valid",
