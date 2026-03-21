@@ -337,6 +337,7 @@ C_INJECT_PATCHES_TEMPLATE = """### hooks
 """
 
 CHANNELER_SCRIPT_TEMPLATE = """# In-tool script (Ctrl+Shift+Enter). API: ch / channeler
+#  Why here: ch reads/writes the ROM open in this window (+ TOML); a .py on disk must reopen the .gba.
 #  ch.log("msg")          — append to output pane
 #  ch.toml                — copy of loaded TOML dict (FunctionAnchors / NamedAnchors / …)
 #  ch.resolve("name")      — (file_offset|None, err) for Goto-style / NamedAnchor names
@@ -346,6 +347,8 @@ CHANNELER_SCRIPT_TEMPLATE = """# In-tool script (Ctrl+Shift+Enter). API: ch / ch
 #  ch.classify_gba(addr)   — "rom" | "ewram" | "iwram" | "other"
 #  ch.sym_name_to_addr()   full pokefirered.sym map
 #  GBA_ROM_BASE, GBA_ROM_MAX, GBA_EWRAM_* … in namespace
+#  hex_editor, gba_graphics — full modules; also common names at top level (parse_rom_file_offset, …)
+#  Optional: from hex_editor import SomeSymbol  — works like normal Python
 
 ch.log("Hello from Channeler script")
 """

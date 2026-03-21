@@ -3,6 +3,25 @@ Prototype API for in-tool Python scripts (Channeler hex editor).
 
 Scripts run in the UI thread with a restricted namespace: ``ch`` / ``channeler`` expose
 ROM helpers, TOML data, and address/symbol utilities used elsewhere in the editor.
+
+**Why run inside Channeler?** ``ch`` / ``channeler`` read and write the **ROM buffer that is
+open in the editor** (and see the same TOML/anchors as the UI). A script on disk must open the
+``.gba`` path, keep it in sync with saves, and cannot mark the editor dirty or refresh views.
+
+The full ``editors.common.hex_editor`` and ``editors.common.gba_graphics`` modules are injected
+as ``hex_editor`` and ``gba_graphics``. Common helpers are also copied to the **top level** (e.g.
+``parse_rom_file_offset``, ``resolve_gba_pointer``) so short scripts do not need prefixes.
+
+You can also use normal imports in your script text, e.g.
+``from hex_editor import parse_rom_file_offset`` — the name ``hex_editor`` is the module in the
+script namespace.
+
+Those modules are imported **inside** :func:`run_user_script` (not at import time) so loading
+``channeler_script_api`` does not create a circular import with ``hex_editor.py``.
+
+**Caveats:** scripts still run on the **UI thread**; avoid blocking work. You can call private
+names (``_foo``) or types that open dialogs—use judgment. The open ROM is ``ch`` / ``channeler``,
+not a global on those modules.
 """
 
 from __future__ import annotations
@@ -19,6 +38,33 @@ GBA_IWRAM_START = 0x03000000
 GBA_IWRAM_END = 0x03007FFF
 
 LogFn = Callable[[str], None]
+
+# Copied into each script run's globals so users can call ``parse_rom_file_offset(...)`` etc.
+# without ``hex_editor.`` / ``gba_graphics.`` prefixes. Keep this list short and stable.
+_HEX_EDITOR_FLAT_NAMES = (
+    "parse_rom_file_offset",
+    "load_pokefirered_sym_name_to_addr",
+    "load_pokefirered_sym_norm_to_name",
+    "normalize_named_anchor_lookup_key",
+    "normalize_named_anchor_format",
+    "encode_pcs_string",
+    "decode_ascii_slot",
+    "thumb2_bl_immediate_target_gba",
+)
+_GBA_GRAPHICS_FLAT_NAMES = ("resolve_gba_pointer",)
+
+
+def _inject_flat_module_names(
+    ns: Dict[str, Any],
+    hex_editor_mod: Any,
+    gba_graphics_mod: Any,
+) -> None:
+    for name in _HEX_EDITOR_FLAT_NAMES:
+        if hasattr(hex_editor_mod, name):
+            ns[name] = getattr(hex_editor_mod, name)
+    for name in _GBA_GRAPHICS_FLAT_NAMES:
+        if hasattr(gba_graphics_mod, name):
+            ns[name] = getattr(gba_graphics_mod, name)
 
 
 class ChannelerScriptAPI:
@@ -133,11 +179,18 @@ def run_user_script(
     """
     api = ChannelerScriptAPI(hex_editor, log)
 
+    # Lazy import: ``hex_editor`` package imports this module; importing ``hex_editor`` here only
+    # after the app has finished loading avoids circular-import issues.
+    import editors.common.gba_graphics as gba_graphics
+    import editors.common.hex_editor as hex_editor_mod
+
     ns: Dict[str, Any] = {
         "__name__": "__channeler_script__",
         "__builtins__": __builtins__,
         "ch": api,
         "channeler": api,
+        "hex_editor": hex_editor_mod,
+        "gba_graphics": gba_graphics,
         "GBA_ROM_BASE": GBA_ROM_BASE,
         "GBA_ROM_MAX": GBA_ROM_MAX,
         "GBA_EWRAM_START": GBA_EWRAM_START,
@@ -145,6 +198,7 @@ def run_user_script(
         "GBA_IWRAM_START": GBA_IWRAM_START,
         "GBA_IWRAM_END": GBA_IWRAM_END,
     }
+    _inject_flat_module_names(ns, hex_editor_mod, gba_graphics)
     try:
         code = compile(source, "<channeler_script>", "exec")
         exec(code, ns, ns)
