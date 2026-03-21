@@ -4543,6 +4543,26 @@ class StructEditorFrame(ttk.Frame):
         self._entry_index_name_label.grid(row=0, column=3, sticky="w", padx=(8, 0))
         self._entry_index_name_label.grid_remove()
 
+        self._entry_search_frame = ttk.Frame(nav)
+        self._entry_search_frame.columnconfigure(1, weight=1)
+        ttk.Label(self._entry_search_frame, text="Find:", font=("Consolas", 8)).grid(
+            row=0, column=0, sticky="w", padx=(0, 4)
+        )
+        self._entry_search_var = tk.StringVar()
+        self._entry_search_entry = ttk.Entry(
+            self._entry_search_frame, textvariable=self._entry_search_var, font=("Consolas", 8)
+        )
+        self._entry_search_entry.grid(row=0, column=1, sticky="ew")
+        self._entry_search_entry.bind("<Return>", lambda e: self._on_entry_search_next())
+        self._entry_search_result_label = ttk.Label(
+            self._entry_search_frame, text="", font=("Consolas", 8)
+        )
+        self._entry_search_result_label.grid(row=0, column=2, sticky="w", padx=(4, 0))
+        self._entry_search_frame.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(2, 0))
+        self._entry_search_frame.grid_remove()
+        self._entry_search_matches: List[int] = []
+        self._entry_search_match_pos: int = 0
+
         # Edit PCS string for the Format ]suffix table row (same index as struct entry)
         self._entry_label_pcs_frame = ttk.Frame(self)
         self._entry_label_pcs_frame.columnconfigure(1, weight=1)
@@ -4740,18 +4760,30 @@ class StructEditorFrame(ttk.Frame):
         ttk.Label(self._list_enum_frame, text="Pick index (writes ROM only):", font=("Consolas", 8)).grid(
             row=0, column=1, sticky="w", pady=(0, 2)
         )
+        self._list_enum_search_var = tk.StringVar(value="")
+        search_row = ttk.Frame(self._list_enum_frame)
+        search_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 2))
+        search_row.columnconfigure(1, weight=1)
+        ttk.Label(search_row, text="Search:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self._list_enum_search_entry = ttk.Entry(
+            search_row, textvariable=self._list_enum_search_var, font=("Consolas", 8)
+        )
+        self._list_enum_search_entry.grid(row=0, column=1, sticky="ew")
+        self._list_enum_search_var.trace_add("write", lambda *_a: self._on_list_enum_search_changed())
         self._list_enum_rom_combo = ttk.Combobox(
             self._list_enum_frame, font=("Consolas", 8), width=36, state="readonly"
         )
-        self._list_enum_rom_combo.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        self._list_enum_rom_combo.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         self._list_enum_rom_combo.bind("<<ComboboxSelected>>", self._on_list_enum_rom_combo)
         self._list_enum_idx_by_combo: List[int] = []
+        self._list_enum_all_display: List[str] = []
+        self._list_enum_all_indices: List[int] = []
         ttk.Separator(self._list_enum_frame, orient=tk.HORIZONTAL).grid(
-            row=2, column=0, columnspan=2, sticky="ew", pady=(0, 4)
+            row=3, column=0, columnspan=2, sticky="ew", pady=(0, 4)
         )
         self._list_enum_toml_block = ttk.Frame(self._list_enum_frame)
         self._list_enum_toml_block.columnconfigure(0, weight=1)
-        ttk.Label(self._list_enum_toml_block, text="[TOML ✎]", font=("Consolas", 8, "bold")).grid(
+        ttk.Label(self._list_enum_toml_block, text="[TOML \u270e]", font=("Consolas", 8, "bold")).grid(
             row=0, column=0, sticky="nw", padx=(0, 4), pady=(0, 2)
         )
         ttk.Label(
@@ -4769,12 +4801,12 @@ class StructEditorFrame(ttk.Frame):
         )
         self._list_enum_toml_btn.grid(row=1, column=1, sticky="e", padx=(4, 0))
         self._list_enum_toml_entry.bind("<Return>", lambda e: self._on_list_enum_toml_apply())
-        self._list_enum_toml_block.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 2))
+        self._list_enum_toml_block.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 2))
         self._list_enum_toml_block.grid_remove()
 
         self._list_enum_pcs_block = ttk.Frame(self._list_enum_frame)
         self._list_enum_pcs_block.columnconfigure(0, weight=1)
-        ttk.Label(self._list_enum_pcs_block, text="[ROM PCS ✎]", font=("Consolas", 8, "bold")).grid(
+        ttk.Label(self._list_enum_pcs_block, text="[ROM PCS \u270e]", font=("Consolas", 8, "bold")).grid(
             row=0, column=0, sticky="nw", padx=(0, 4), pady=(0, 2)
         )
         ttk.Label(
@@ -4792,7 +4824,7 @@ class StructEditorFrame(ttk.Frame):
         )
         self._list_enum_pcs_btn.grid(row=1, column=1, sticky="e", padx=(4, 0))
         self._list_enum_pcs_entry.bind("<Return>", lambda e: self._on_list_enum_pcs_apply())
-        self._list_enum_pcs_block.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 2))
+        self._list_enum_pcs_block.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 2))
         self._list_enum_pcs_block.grid_remove()
         self._list_enum_fi: Optional[int] = None
         self._list_enum_ctx: Optional[Dict[str, Any]] = None
@@ -5514,10 +5546,13 @@ class StructEditorFrame(ttk.Frame):
             cur = (val >> part["shift"]) & ((1 << part["bits"]) - 1)
 
         self._list_enum_idx_by_combo = []
+        self._list_enum_all_display = []
+        self._list_enum_all_indices = []
         display_vals: List[str] = []
         list_base, delta = _split_enum_field_ref(er)
         list_key = normalize_named_anchor_lookup_key(list_base)
         list_row = cur + delta
+        self._list_enum_search_var.set("")
 
         if list_key in self._lists:
             self._list_enum_active_pcs = None
@@ -5533,11 +5568,13 @@ class StructEditorFrame(ttk.Frame):
                     if rom_try < 0 or rom_try > mx_bf:
                         continue
                 lab = lm[idx]
-                self._list_enum_idx_by_combo.append(idx)
+                self._list_enum_all_indices.append(idx)
                 short = lab.replace("\n", " ")
                 if len(short) > 52:
-                    short = short[:49] + "…"
-                display_vals.append(f"{idx}: {short}")
+                    short = short[:49] + "\u2026"
+                self._list_enum_all_display.append(f"{idx}: {short}")
+            self._list_enum_idx_by_combo = list(self._list_enum_all_indices)
+            display_vals = list(self._list_enum_all_display)
             self._list_enum_rom_combo["values"] = tuple(display_vals)
             try:
                 pos = self._list_enum_idx_by_combo.index(list_row)
@@ -5545,11 +5582,11 @@ class StructEditorFrame(ttk.Frame):
                 if mx_bf is not None and list_row in lm:
                     self._list_enum_rom_combo.set(
                         f"(list row {list_row} needs ROM {list_row - delta}; "
-                        f"subfield allows 0–{mx_bf} — widen Format or trim [[List]])"
+                        f"subfield allows 0\u2013{mx_bf} \u2014 widen Format or trim [[List]])"
                     )
                 else:
                     self._list_enum_rom_combo.set(
-                        f"(ROM {cur} → list row {list_row} — not in [[List]] {list_base!r})"
+                        f"(ROM {cur} \u2192 list row {list_row} \u2014 not in [[List]] {list_base!r})"
                     )
             else:
                 self._list_enum_rom_combo.current(pos)
@@ -5570,11 +5607,13 @@ class StructEditorFrame(ttk.Frame):
                 if rom_try < 0 or rom_try > mx_bf_pcs:
                     continue
             lab = self._pcs_decode_table_row(pcs_info, idx) if pcs_info else ""
-            self._list_enum_idx_by_combo.append(idx)
+            self._list_enum_all_indices.append(idx)
             short = lab.replace("\n", " ")
             if len(short) > 52:
-                short = short[:49] + "…"
-            display_vals.append(f"{idx}: {short}")
+                short = short[:49] + "\u2026"
+            self._list_enum_all_display.append(f"{idx}: {short}")
+        self._list_enum_idx_by_combo = list(self._list_enum_all_indices)
+        display_vals = list(self._list_enum_all_display)
         self._list_enum_rom_combo["values"] = tuple(display_vals)
         try:
             pos = self._list_enum_idx_by_combo.index(list_row)
@@ -5582,11 +5621,11 @@ class StructEditorFrame(ttk.Frame):
             if mx_bf_pcs is not None and 0 <= list_row < count:
                 self._list_enum_rom_combo.set(
                     f"(PCS row {list_row} needs ROM {list_row - delta}; "
-                    f"subfield allows 0–{mx_bf_pcs} — widen Format or trim PCS table)"
+                    f"subfield allows 0\u2013{mx_bf_pcs} \u2014 widen Format or trim PCS table)"
                 )
             else:
                 self._list_enum_rom_combo.set(
-                    f"(ROM {cur} → PCS row {list_row} — past table or negative)"
+                    f"(ROM {cur} \u2192 PCS row {list_row} \u2014 past table or negative)"
                 )
         else:
             self._list_enum_rom_combo.current(pos)
@@ -5594,6 +5633,24 @@ class StructEditorFrame(ttk.Frame):
             self._list_enum_pcs_var.set(self._pcs_decode_table_row(pcs_info, list_row))
         else:
             self._list_enum_pcs_var.set("")
+
+    def _on_list_enum_search_changed(self) -> None:
+        """Filter the ROM index combobox by the search text (case-insensitive substring match on the label)."""
+        query = self._list_enum_search_var.get().strip().lower()
+        if not query:
+            self._list_enum_idx_by_combo = list(self._list_enum_all_indices)
+            self._list_enum_rom_combo["values"] = tuple(self._list_enum_all_display)
+            return
+        filtered_display: List[str] = []
+        filtered_indices: List[int] = []
+        for disp, idx in zip(self._list_enum_all_display, self._list_enum_all_indices):
+            if query in disp.lower():
+                filtered_display.append(disp)
+                filtered_indices.append(idx)
+        self._list_enum_idx_by_combo = filtered_indices
+        self._list_enum_rom_combo["values"] = tuple(filtered_display)
+        if len(filtered_display) == 1:
+            self._list_enum_rom_combo.current(0)
 
     def _on_list_enum_rom_combo(self, event: Optional[tk.Event] = None) -> None:
         ctx = self._list_enum_ctx
@@ -5870,6 +5927,14 @@ class StructEditorFrame(ttk.Frame):
         self._idx_spin.configure(to=max(0, self._entry_count - 1))
         self._idx_var.set("0")
         self._entry_label.config(text=f"/ {self._entry_count}")
+        self._entry_search_var.set("")
+        self._entry_search_result_label.config(text="")
+        self._entry_search_matches.clear()
+        self._entry_search_match_pos = 0
+        if self._entry_index_context_pcs or self._entry_index_context_list:
+            self._entry_search_frame.grid()
+        else:
+            self._entry_search_frame.grid_remove()
         self._load_entry(0)
         self._sync_hex_cursor_to_current_struct_entry(0)
 
@@ -5882,6 +5947,54 @@ class StructEditorFrame(ttk.Frame):
         self._idx_var.set(str(i))
         self._load_entry(i)
         self._sync_hex_cursor_to_current_struct_entry(i)
+
+    def _on_entry_search_next(self) -> None:
+        """Find entries whose PCS/List label contains the search text and cycle through matches."""
+        query = self._entry_search_var.get().strip().lower()
+        if not query:
+            self._entry_search_result_label.config(text="")
+            self._entry_search_matches.clear()
+            self._entry_search_match_pos = 0
+            return
+
+        matches: List[int] = []
+        for idx in range(self._entry_count):
+            label = self._entry_label_for_index(idx)
+            if label and query in label.lower():
+                matches.append(idx)
+
+        if not matches:
+            self._entry_search_result_label.config(text="0 matches")
+            self._entry_search_matches.clear()
+            self._entry_search_match_pos = 0
+            return
+
+        if matches == self._entry_search_matches:
+            self._entry_search_match_pos = (self._entry_search_match_pos + 1) % len(matches)
+        else:
+            self._entry_search_matches = matches
+            self._entry_search_match_pos = 0
+
+        target = matches[self._entry_search_match_pos]
+        self._idx_var.set(str(target))
+        self._on_spin_change()
+        pos_display = self._entry_search_match_pos + 1
+        self._entry_search_result_label.config(text=f"{pos_display}/{len(matches)}")
+
+    def _entry_label_for_index(self, idx: int) -> Optional[str]:
+        """Return the PCS or ``[[List]]`` label for struct entry *idx*, or ``None``."""
+        if self._entry_index_context_pcs:
+            row = self._entry_pcs_row_for_struct_index(idx)
+            if row is not None:
+                return self._pcs_decode_table_row(self._entry_index_context_pcs, row) or None
+        if self._entry_index_context_list:
+            ln = self._entry_index_context_list
+            row = self._entry_list_row_for_struct_index(idx, ln)
+            if row is not None:
+                lm = self._hex.get_lists().get(ln) or {}
+                txt = lm.get(row, "")
+                return txt if txt else None
+        return None
 
     def _pcs_decode_table_row(self, pcs_info: Dict[str, Any], row_idx: int) -> str:
         """Decode PCS string at row_idx in a PCS table anchor."""
@@ -5981,6 +6094,10 @@ class StructEditorFrame(ttk.Frame):
         self._list_enum_ctx = None
         self._entry_index_name_label.grid_remove()
         self._entry_label_pcs_frame.grid_remove()
+        self._entry_search_frame.grid_remove()
+        self._entry_search_var.set("")
+        self._entry_search_matches.clear()
+        self._entry_search_match_pos = 0
         self._list_enum_frame.grid_remove()
         self._list_enum_fi = None
         self._gfx_sprite_frame.grid_remove()
