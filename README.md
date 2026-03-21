@@ -9,6 +9,24 @@ A ROM hacking tool for Game Boy Advance games, built with Python and Tkinter —
 - Use the bundled **`FireRed.toml`** when hacking FireRed, or **`WCT06.toml`** for *Yu-Gi-Oh! Ultimate Masters: World Championship Tournament 2006*.
 - By default, the editor looks for **`{YourRomBasename}.toml`** next to the ROM. You can load another file with **File → Load structure TOML**.
 
+### Struct `Format`: count-based nested arrays
+
+In a NamedAnchor **struct** `Format`, **`name<[inner]/countField>`** means the **`inner`** layout is repeated **`countField`** times. The **`<>…`** block describes the layout **at the address** where the data lives:
+
+- **Default (count before `name`, `name` last):** **`name`** is a **4-byte GBA pointer**; inner rows are read from `*name` (e.g. `pack<[card:… rarity:…]/cardamount>` after earlier `cardamount:` fields).
+- **Implicit pointer (`name` first, `countField` last):** the first **4 bytes of the struct row** are the pointer; **`countField`** follows (e.g. `[options<…/count> count::]`).
+- **`*otherPtr` suffix:** use a named **`ptr` / `pcs_ptr`** field instead of the two cases above.
+
+### Struct `Format`: terminator-delimited nested arrays
+
+In a NamedAnchor **struct** `Format`, a nested field can end with **`!HEX`** instead of **`/countField`**:
+
+- **`name<[inner]/count>`** — `count` is the name of a **uint** field in the same struct that gives the number of inner rows (see **count-based nested arrays** above for pointer layout).
+- **`name<[inner]!0000>`** — **even-length hex** is the **terminator** byte pattern (e.g. `!0000` → **`00 00`**). **By default**, **`name`** is a **4-byte GBA pointer**; the terminator-delimited blob is read starting at **`*name`** (same idea as a pointer column — the field name is unrelated to the layout byte offset variable in the parser).
+- **`name<[inner]!0000>inline`** — **legacy / packed inline**: the nested bytes are stored **inline** in the struct row (no pointer). If the struct has **only** this field, consecutive table entries are **packed** back-to-back in ROM until each terminator; the editor scans row-by-row.
+
+The terminator form must be the **last** field in the struct body. Suffix after `]` is still the table length (e.g. `]deckinfo`).
+
 ## Supported Games
 
 - **Pokémon FireRed** – Uses [pret/pokefirered](https://github.com/pret/pokefirered) for C code reference
@@ -167,9 +185,9 @@ High-level capabilities include:
 - Disassembly (**Ctrl+A**), HackMew ASM (**Ctrl+H**), pseudo-C (**Ctrl+D**), **Ctrl+M** anchor browser.
 - Graphics: sprites, tilemaps, tilesets, palettes; anchor visual browser.
 
-**Rough roadmap / not implemented yet** (non-exhaustive): auto-generated TOML on ROM open, C injection, Python scripting interface, complete pret→TOML function/struct/constant conversion, undo, some FireRed-specific editors (trainer teams, overworld sprites, egg moves).
+**Rough roadmap / not implemented yet** (non-exhaustive): auto-generated TOML on ROM open, Python scripting interface, complete pret→TOML function/struct/constant conversion, undo, some FireRed-specific editors (trainer teams, overworld sprites, egg moves).
 
-**Not currently planned:** mapping, event scripting, battle/animation/trainer-AI scripting.
+**Not currently planned:** C injection, mapping, event scripting, battle/animation/trainer-AI scripting.
 
 ## Credits
 

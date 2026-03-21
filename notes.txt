@@ -1,4 +1,3 @@
-c injection
 python scripting
 addresses should be in hex (tomli-w)
 get rid of second scrollbar (tools)

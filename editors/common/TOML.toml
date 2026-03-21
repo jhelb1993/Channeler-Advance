@@ -9,10 +9,13 @@
 #   ``name''N`` — raw Latin-1 / byte string, width N bytes (NUL-padded; read/display up to first 0x00).
 #   ``baseStatTotal|=hp+attack+def`` — helper row (no ROM bytes): sums named **uint** fields; not editable.
 #   **Nested struct array:** ``name<[inner fields]/countField>`` — repeats ``inner`` N times, N from uint ``countField``.
-#     **(A)** ``countField`` before nested, nested **last** — inline blob after count: ``[count:: … blob<…/count>]``.
-#     **(B)** nested before ``countField``, count **last** — row is **implicit 4-byte GBA pointer + ``countField``**
-#     (e.g. ``[options<…/count> count::]`` → 8 bytes if ``count::`` is 4 bytes); inner rows are read at ``*pointer`` @ offset 0.
-#     Optional: append ``*ptrField`` after ``>`` to use a **named** pointer field instead of the implicit word @0.
+#     The ``<[…]>`` block is the **layout** at ``*name`` for count-based arrays; for ``!HEX`` terminators, default is also
+#     a **4-byte pointer** at ``name`` unless you use ``!HEX>inline`` (packed inline blob in the row).
+#     **(A)** ``countField`` before ``name``, nested field **last** — ``name`` is a **4-byte GBA pointer**; inner rows at ``*name``
+#     (e.g. ``[cost:: … pack<[card:…]/cardamount>]``).
+#     **(B)** nested before ``countField``, count **last** — **implicit** pointer: 4-byte GBA word at **row** offset 0 + ``countField``
+#     (e.g. ``[options<…/count> count::]`` → 8 bytes if ``count::`` is 4 bytes); inner rows at ``*``(word @0).
+#     Optional: append ``*ptrField`` after ``>`` to use a **named** ``ptr``/``pcs_ptr`` field instead of implicit @0 or ``name``.
 #   ``flags.|t|…`` — **bitfield** (``|t|``): storage size before ``|t|`` is the same rule as uints — ``.`` = 1 byte,
 #     each ``:`` = 2 bytes (so ``field:|t|`` = 2-byte container, ``field::|t|`` = 4 bytes). After ``|t|``,
 #     **pipe-separated** subfields ``name`` + bit-width run where ``.`` = 1 bit and ``:`` = 2 bits (LSB-first packing).
