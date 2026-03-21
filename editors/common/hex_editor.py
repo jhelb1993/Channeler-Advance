@@ -6697,8 +6697,8 @@ class HexEditorFrame(ttk.Frame):
         self._text.bind("<Double-Button-1>", self._on_double_click)
         self._text.bind("<Button-3>", self._on_right_click)
         def _bind_asm_toggle(w: tk.Misc) -> None:
-            w.bind("<Control-a>", self._toggle_asm_pane)
-            w.bind("<Control-A>", self._toggle_asm_pane)
+            w.bind("<Control-p>", self._toggle_asm_pane)
+            w.bind("<Control-P>", self._toggle_asm_pane)
 
         def _bind_pseudo_c_toggle(w: tk.Misc) -> None:
             w.bind("<Control-d>", self._toggle_pseudo_c_pane)
@@ -6713,8 +6713,8 @@ class HexEditorFrame(ttk.Frame):
         _bind_asm_toggle(self._encoding_combo)
         _bind_asm_toggle(self._asm_mode_combo)
         _bind_asm_toggle(outer)
-        self.winfo_toplevel().bind("<Control-a>", self._toggle_asm_pane, add=True)
-        self.winfo_toplevel().bind("<Control-A>", self._toggle_asm_pane, add=True)
+        self.winfo_toplevel().bind("<Control-p>", self._toggle_asm_pane, add=True)
+        self.winfo_toplevel().bind("<Control-P>", self._toggle_asm_pane, add=True)
         _bind_pseudo_c_toggle(self._text)
         _bind_pseudo_c_toggle(self._text_ascii)
         _bind_pseudo_c_toggle(self._goto_entry)
@@ -6802,8 +6802,9 @@ class HexEditorFrame(ttk.Frame):
         self.winfo_toplevel().bind("<Control-r>", self._show_replace_dialog, add=True)
         self.winfo_toplevel().bind("<Control-R>", self._show_replace_dialog, add=True)
 
-        self._text.bind("<Control-Shift-A>", lambda e: self._select_all())
-        self._text_ascii.bind("<Control-Shift-A>", lambda e: self._select_all())
+        for w in (self._text_asm, self._text_pseudo_c, self._text_c_inject_patches):
+            w.bind("<Control-a>", self._select_all)
+            w.bind("<Control-A>", self._select_all)
         self._text.bind("<Control-c>", self._copy_hex_ascii)
         self._text.bind("<Control-C>", self._copy_hex_ascii)
         self._text_ascii.bind("<Control-c>", self._copy_hex_ascii)
@@ -6954,7 +6955,7 @@ class HexEditorFrame(ttk.Frame):
             widget.tag_raise(tag)
 
     def _toggle_asm_pane(self, event: Optional[tk.Event] = None) -> Optional[str]:
-        """Toggle ASM disassembly pane visibility. Bound to Ctrl+A.
+        """Toggle ASM disassembly pane visibility. Bound to Ctrl+P.
         When opening, uses highlighted bytes if any."""
         self._goto_entry.selection_clear()
         self._text.focus_set()
@@ -7939,7 +7940,7 @@ class HexEditorFrame(ttk.Frame):
         ):
             return None
         if event.state & 0x4:
-            return None  # Ctrl+A/C/V etc.
+            return None  # Ctrl+A/C/V etc. (native entry behavior)
         ch = event.char
         if not ch:
             return None
@@ -8062,7 +8063,7 @@ class HexEditorFrame(ttk.Frame):
     def _on_ascii_key(self, event: tk.Event) -> Optional[str]:
         """Handle typing in character panel: update byte at cursor, refresh, advance."""
         if event.state & 0x4 and event.keysym.lower() == "a":
-            self._toggle_asm_pane(event)
+            self._select_all(event)
             return "break"
         if not self._data:
             return None
@@ -8235,7 +8236,20 @@ class HexEditorFrame(ttk.Frame):
     def _prevent_unwanted(self, event: tk.Event) -> Optional[str]:
         if event.keysym in ("Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next"):
             return None
-        if event.state & 0x4 and event.keysym.lower() in ("a", "b", "c", "f", "g", "h", "i", "m", "r", "v", "x", "s"):
+        if event.state & 0x4 and event.keysym.lower() in (
+            "b",
+            "c",
+            "f",
+            "g",
+            "h",
+            "i",
+            "m",
+            "p",
+            "r",
+            "v",
+            "x",
+            "s",
+        ):
             return None
         if event.char and event.char in HEX_DIGITS:
             return "break"
@@ -11943,8 +11957,31 @@ Format = "`f|u8`[u8 arg0]"
 
     # ── Key handling ─────────────────────────────────────────────────
 
-    def _select_all(self) -> Optional[str]:
-        if self._data:
+    def _select_all(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Select all in the focused editor: hex/ASCII (whole ROM) or Text panes (disasm / pseudo-C / hooks)."""
+        w = self.winfo_toplevel().focus_get() if event is None else event.widget
+        if w in (self._text, self._text_ascii):
+            if self._data:
+                self._selection_start = 0
+                self._selection_end = len(self._data) - 1
+                self._update_cursor_display()
+            return "break"
+        if w in (self._text_asm, self._text_pseudo_c, self._text_c_inject_patches):
+            try:
+                w.tag_remove("sel", "1.0", "end")
+                w.tag_add("sel", "1.0", "end-1c")
+                w.mark_set("insert", "1.0")
+                w.see("insert")
+            except tk.TclError:
+                pass
+            return "break"
+        if isinstance(w, (tk.Entry, ttk.Entry)):
+            try:
+                w.select_range(0, tk.END)
+            except tk.TclError:
+                pass
+            return "break"
+        if w is None and self._data:
             self._selection_start = 0
             self._selection_end = len(self._data) - 1
             self._update_cursor_display()
@@ -11952,7 +11989,7 @@ Format = "`f|u8`[u8 arg0]"
 
     def _on_key(self, event: tk.Event) -> Optional[str]:
         if event.state & 0x4 and event.keysym.lower() == "a":
-            self._toggle_asm_pane(event)
+            self._select_all(event)
             return "break"
         if not self._data:
             return None

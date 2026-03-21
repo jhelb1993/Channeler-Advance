@@ -113,13 +113,13 @@ These apply when the main hex view (or the overall window, for global toggles) h
 | **Ctrl+G** | Focus the **Goto** (file offset) field |
 | **Ctrl+F** | Open **Find** |
 | **Ctrl+R** | Open **Replace** |
-| **Ctrl+Shift+A** | **Select all** bytes in the ROM |
+| **Ctrl+A** | **Select all** in the focused pane (hex/ASCII = whole ROM; disassembly / pseudo-C / hooks text = all text) |
 | **Ctrl+C** / **Copy** | Copy selection (hex + ASCII) |
 | **Ctrl+V** / **Paste** | Paste — **insert** bytes at cursor (insert mode) |
 | **Ctrl+B** | Paste — **overwrite** (write) |
 | **Ctrl+Home** | Jump to **start** of ROM |
 | **Ctrl+End** | Jump to **end** of ROM |
-| **Ctrl+A** | Toggle **ARM/Thumb disassembly** pane |
+| **Ctrl+P** | Toggle **ARM/Thumb disassembly** pane |
 | **Ctrl+D** | Toggle **pseudo-C** pane |
 | **Ctrl+M** | Toggle **Named Anchor browser** pane (with the pane open, **drag the vertical sash** between Anchors and the Tools column to resize width; **horizontal scrollbar** under the list scrolls long names) |
 | **Ctrl+H** | Toggle **HackMew** mode (when available) |
@@ -182,7 +182,7 @@ High-level capabilities include:
 - Hex / ASCII / PCS text; table and struct editing from TOML; repointing text and pointers (including optional **FF**-fill of old space when relocating).
 - In-tool editing of TOML anchor formats; **double-click** pointers to follow (red highlight); **double-click** the start of an ASM routine in the hex view to highlight through the end (when applicable).
 - **Ctrl+T** / **Ctrl+Shift+1–3** to show or focus Tools slots (FireRed layout).
-- Disassembly (**Ctrl+A**), HackMew ASM (**Ctrl+H**), pseudo-C (**Ctrl+D**), **Ctrl+M** anchor browser.
+- Disassembly (**Ctrl+P**), HackMew ASM (**Ctrl+H**), pseudo-C (**Ctrl+D**), **Ctrl+M** anchor browser.
 - Graphics: sprites, tilemaps, tilesets, palettes; anchor visual browser.
 
 **Rough roadmap / not implemented yet** (non-exhaustive): auto-generated TOML on ROM open, Python scripting interface, complete pret→TOML function/struct/constant conversion, undo, some FireRed-specific editors (trainer teams, overworld sprites, egg moves).
