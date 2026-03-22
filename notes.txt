@@ -1,4 +1,3 @@
-no quotation marks for Addresses in TOML
 ydk import (decks)
 lflist import (banlists)
 improved deck logic

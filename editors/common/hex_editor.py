@@ -6,6 +6,7 @@ ASCII/PCS (Pokemon GBA) encoding for the character pane.
 Optional Capstone disassembly (ARM7TDMI Thumb/ARM).
 """
 
+import io
 import logging
 import os
 import re
@@ -730,7 +731,7 @@ def _toml_address_value_to_file_offset(addr: Any) -> Optional[int]:
 
 
 def _normalize_toml_address_fields_to_hex_strings(toml_data: Dict[str, Any]) -> None:
-    """Force ``Address`` on anchor-like tables to ``0x…`` strings so ``tomli-w`` never emits plain decimal integers."""
+    """Normalize ``Address`` on anchor-like tables to canonical ``0x…`` string form before writing TOML."""
     for key in ("NamedAnchors", "MatchedWords", "FunctionAnchors"):
         rows = toml_data.get(key)
         if not isinstance(rows, list):
@@ -745,6 +746,26 @@ def _normalize_toml_address_fields_to_hex_strings(toml_data: Dict[str, Any]) -> 
             if fo is None or fo < 0:
                 continue
             row["Address"] = _toml_named_anchor_address_hex_string(fo)
+
+
+def _toml_text_unquote_address_hex_literals(text: str) -> str:
+    """Turn ``Address = \"0x…\"`` into ``Address = 0x…`` (valid TOML hex integers, no quotes)."""
+    return re.sub(
+        r'^(\s*)Address\s*=\s*"0x([0-9A-Fa-f]+)"\s*$',
+        r"\1Address = 0x\2",
+        text,
+        flags=re.MULTILINE,
+    )
+
+
+def _write_toml_file_unquoted_hex_addresses(toml_path: str, toml_data: Dict[str, Any]) -> None:
+    """Write structure TOML: normalize addresses, ``tomli_w.dump``, then unquote hex ``Address`` lines."""
+    _normalize_toml_address_fields_to_hex_strings(toml_data)
+    bio = io.BytesIO()
+    tomli_w.dump(toml_data, bio)
+    out = _toml_text_unquote_address_hex_literals(bio.getvalue().decode("utf-8"))
+    with open(toml_path, "wb") as f:
+        f.write(out.encode("utf-8"))
 
 
 def _strip_outer_backticks(s: str) -> str:
@@ -12288,9 +12309,7 @@ Format = "`f|u8`[u8 arg0]"
                 return False
             target[key] = new_label
         try:
-            _normalize_toml_address_fields_to_hex_strings(self._toml_data)
-            with open(self._toml_path, "wb") as f:
-                tomli_w.dump(self._toml_data, f)
+            _write_toml_file_unquoted_hex_addresses(self._toml_path, self._toml_data)
         except OSError as e:
             messagebox.showerror("Struct", f"Could not write TOML:\n{e}")
             return False
@@ -12445,9 +12464,7 @@ Format = "`f|u8`[u8 arg0]"
         if new_format is not None:
             match["Format"] = new_format
         try:
-            _normalize_toml_address_fields_to_hex_strings(self._toml_data)
-            with open(self._toml_path, "wb") as f:
-                tomli_w.dump(self._toml_data, f)
+            _write_toml_file_unquoted_hex_addresses(self._toml_path, self._toml_data)
         except OSError as e:
             return False, str(e), None
         return True, "", action
@@ -12459,10 +12476,8 @@ Format = "`f|u8`[u8 arg0]"
             return False, _tomli_w_missing_message()
         if not self._toml_path or not os.path.isfile(self._toml_path):
             return False, "No TOML file path set."
-        _normalize_toml_address_fields_to_hex_strings(self._toml_data)
         try:
-            with open(self._toml_path, "wb") as f:
-                tomli_w.dump(self._toml_data, f)
+            _write_toml_file_unquoted_hex_addresses(self._toml_path, self._toml_data)
         except OSError as e:
             return False, str(e)
         return True, ""

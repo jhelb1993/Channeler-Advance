@@ -1,341 +1,341 @@
 [[NamedAnchors]]
 Name = "data.text.event"
-Address = "0x1622500"
+Address = 0x1622500
 Format = "[index1: index2:]9908"
 
 [[NamedAnchors]]
 Name = "graphics.icons.large"
-Address = "0xFBC080"
+Address = 0xFBC080
 Format = "[`ucs8x4x6|graphics.icons.palette`]cardgraphicsindexes"
 
 [[NamedAnchors]]
 Name = "graphics.icons.small"
-Address = "0x1326280"
+Address = 0x1326280
 Format = "[`ucs8x3x3|graphics.icons.palette`]cardgraphicsiconsmallindexes"
 
 [[NamedAnchors]]
 Name = "graphics.icons.palette"
-Address = "0x510440"
+Address = 0x510440
 Format = "`ucp4:012345678`"
 
 [[NamedAnchors]]
 Name = "graphics.attributes.palette"
-Address = "0x184DD6C"
+Address = 0x184DD6C
 Format = "`ucp4:012345678`"
 
 [[NamedAnchors]]
 Name = "graphics.races.palette"
-Address = "0x184EE2C"
+Address = 0x184EE2C
 Format = "`ucp4:01234567`"
 
 [[NamedAnchors]]
 Name = "data.cards.stats"
-Address = "0x18169B8"
+Address = 0x18169B8
 Format = "[card:cardnames artwork: editedartwork:editedartwork attack: defense: level: race:races attribute:attributes type:types spelltraptype:spelltrapraces padding:]cardstatsnames"
 
 [[NamedAnchors]]
 Name = "data.cards.stats2"
-Address = "0x1821E04"
+Address = 0x1821E04
 Format = "[card:cardnames artwork: editedartwork:editedartwork attack: defense: level: race:races attribute:attributes type:types spelltraptype:spelltrapraces padding:]cardnamesfrom0"
 
 [[NamedAnchors]]
 Name = "data.cards.art"
-Address = "0x15B5C00"
+Address = 0x15B5C00
 Format = "[unknown:cardgraphicsindexes+1 art:cardgraphicsindexes+1]cardnames2"
 
 [[NamedAnchors]]
 Name = "data.decks.initial.dragonsroar"
-Address = "0x1E5FA58"
+Address = 0x1E5FA58
 Format = "[card:cardnamesinitialdecks padding:]data.constants.decks.initial.dragonsroar"
 
 [[NamedAnchors]]
 Name = "data.decks.initial.zombiemadness"
-Address = "0x1E5FAC8"
+Address = 0x1E5FAC8
 Format = "[card:cardnamesinitialdecks padding:]data.constants.decks.initial.zombiemadness"
 
 [[NamedAnchors]]
 Name = "data.decks.initial.moltendestruction"
-Address = "0x1E5FB38"
+Address = 0x1E5FB38
 Format = "[card:cardnamesinitialdecks padding:]data.constants.decks.initial.moltendestruction"
 
 [[NamedAnchors]]
 Name = "data.decks.initial.furyfromthedeep"
-Address = "0x1E5FBB4"
+Address = 0x1E5FBB4
 Format = "[card:cardnamesinitialdecks padding:]data.constants.decks.initial.furyfromthedeep"
 
 [[NamedAnchors]]
 Name = "data.decks.initial.warriorstriumph"
-Address = "0x1E5FC34"
+Address = 0x1E5FC34
 Format = "[card:cardnamesinitialdecks padding:]data.constants.decks.initial.warriorstriumph"
 
 [[NamedAnchors]]
 Name = "data.decks.initial.spellcastersjudgement"
-Address = "0x1E5FCC4"
+Address = 0x1E5FCC4
 Format = "[card:cardnamesinitialdecks padding:]data.constants.decks.initial.spellcastersjudgement"
 
 [[NamedAnchors]]
 Name = "data.decks.initial.starter"
-Address = "0x1E5F884"
+Address = 0x1E5F884
 Format = "[card:cardnames]40"
 
 [[NamedAnchors]]
 Name = "data.banlist.sept03"
-Address = "0x1E5EF30"
+Address = 0x1E5EF30
 Format = "[card:cardnames copies:]17"
 
 [[NamedAnchors]]
 Name = "data.banlist.mar04"
-Address = "0x1E5EF74"
+Address = 0x1E5EF74
 Format = "[card:cardnames copies:]data.constants.banlist.mar04"
 
 [[NamedAnchors]]
 Name = "data.banlist.sept04"
-Address = "0x1E5EFE0"
+Address = 0x1E5EFE0
 Format = "[card:cardnames copies:]data.constants.banlist.sept04"
 
 [[NamedAnchors]]
 Name = "data.banlist.mar05"
-Address = "0x1E5F07C"
+Address = 0x1E5F07C
 Format = "[card:cardnames copies:]data.constants.banlist.mar05"
 
 [[NamedAnchors]]
 Name = "data.banlist.sept05"
-Address = "0x1E5F150"
+Address = 0x1E5F150
 Format = "[card:cardnames copies:]data.constants.banlist.sept05"
 
 [[NamedAnchors]]
 Name = "data.banlist.mar06"
-Address = "0x1E5F234"
+Address = 0x1E5F234
 Format = "[card:cardnames copies:]data.constants.banlist.mar06"
 
 [[NamedAnchors]]
 Name = "data.banlist.sept06"
-Address = "0x1E5F32C"
+Address = 0x1E5F32C
 Format = "[card:cardnames copies:]data.constants.banlist.sept06"
 
 [[NamedAnchors]]
 Name = "data.banlist.mar07"
-Address = "0x1E5F440"
+Address = 0x1E5F440
 Format = "[card:cardnames copies:]data.constants.banlist.mar07"
 
 [[NamedAnchors]]
 Name = "data.banlist.sept07"
-Address = "0x1E5F580"
+Address = 0x1E5F580
 Format = "[card:cardnames copies:]data.constants.banlist.sept07"
 
 [[NamedAnchors]]
 Name = "data.packs"
-Address = "0x1E5E2E8"
+Address = 0x1E5E2E8
 Format = "[cost: cardsperpack: cardamount: unk1: unk2: unused: pack<[card:cardnames rarity:rarities]/cardamount>]packs"
 
 [[NamedAnchors]]
 Name = "data.cards.searchers"
-Address = "0x1E5A128"
+Address = 0x1E5A128
 Format = "[card:cardnames padding: effect<>]307"
 
 [[NamedAnchors]]
 Name = "data.cards.ids"
-Address = "0x15B7CCC"
+Address = 0x15B7CCC
 Format = "[card:cardstatsnames]cardnamesfrom0"
 
 [[NamedAnchors]]
 Name = "data.cards.prices"
-Address = "0x1CEDFA4"
+Address = 0x1CEDFA4
 Format = "[price::]cardstatsnames"
 
 [[NamedAnchors]]
 Name = "data.cards.passwords"
-Address = "0x15B94CC"
+Address = 0x15B94CC
 Format = "[password::|h]cardstatsnames"
 
 [[NamedAnchors]]
 Name = "data.cards.ritual"
-Address = "0x1E5A0C4"
+Address = 0x1E5A0C4
 Format = "[ritualcards::|t|summoncard::::::.cardnames|activator::::::.cardnames|level:::]24"
 
 [[NamedAnchors]]
 Name = "data.cards.fusion2"
-Address = "0x1E59E14"
+Address = 0x1E59E14
 Format = "[fusor:cardnames fusee1:cardnames fusee2:cardnames padding:]77"
 
 [[NamedAnchors]]
 Name = "data.cards.fusion3"
-Address = "0x1E5A07C"
+Address = 0x1E5A07C
 Format = "[fusor:cardnames fusee1:cardnames fusee2:cardnames fusee3:cardnames]9"
 
 [[NamedAnchors]]
 Name = "data.cards.effects"
-Address = "0x1E3F19C"
+Address = 0x1E3F19C
 Format = "[card:cardnames padding: effect1<> effect2<> effect3<> effect4<> effect5<>]676"
 
 [[NamedAnchors]]
 Name = "data.cards.flip"
-Address = "0x1E430FC"
+Address = 0x1E430FC
 Format = "[card:cardnames padding: effect1<> effect2<> effect3<> effect4<> effect5<>]392"
 
 [[NamedAnchors]]
 Name = "data.cards.effects2"
-Address = "0x1E455BC"
+Address = 0x1E455BC
 Format = "[card:cardnames padding: effect1<> effect2<> effect3<> effect4<> effect5<>]143"
 
 [[NamedAnchors]]
 Name = "data.cards.effects3"
-Address = "0x1E46324"
+Address = 0x1E46324
 Format = "[card:cardnames padding: effect1<> effect2<> effect3<> effect4<> effect5<>]184"
 
 [[NamedAnchors]]
 Name = "data.cards.effects4"
-Address = "0x1E478D0"
+Address = 0x1E478D0
 Format = "[card:cardnames padding: effect<>]798"
 
 [[NamedAnchors]]
 Name = "data.cards.specialsummon"
-Address = "0x1E47560"
+Address = 0x1E47560
 Format = "[card:cardnames padding: unknown:: effect1<> effect2<>]18"
 
 [[NamedAnchors]]
 Name = "data.cards.namesalphabetical"
-Address = "0x1832604"
+Address = 0x1832604
 Format = "[offset:]2081"
 
 [[NamedAnchors]]
 Name = "data.cards.names.pointers"
-Address = "0x15BB594"
+Address = 0x15BB594
 Format = "[offset::]cardstatsnames"
 
 [[NamedAnchors]]
 Name = "data.cards.descriptions.pointers"
-Address = "0x15BD65C"
+Address = 0x15BD65C
 Format = "[offset::]cardstatsnames"
 
 [[NamedAnchors]]
 Name = "graphics.attributes.icons"
-Address = "0x184D8EC"
+Address = 0x184D8EC
 Format = "`ucs4x2x14|graphics.attributes.palette`"
 
 [[NamedAnchors]]
 Name = "graphics.races.icons"
-Address = "0x184E42C"
+Address = 0x184E42C
 Format = "`ucs4x2x40|graphics.races.palette`"
 
 [[NamedAnchors]]
 Name = "data.decks.offsets1"
-Address = "0x1E63BEC"
+Address = 0x1E63BEC
 Format = "[offset<something: [card:cardnames]!0000>]deckinfo"
 
 [[NamedAnchors]]
 Name = "data.decks.offsets2"
-Address = "0x1E64138"
+Address = 0x1E64138
 Format = "[offset<[card:cardnames]!0000>]deckinfo"
 
 [[MatchedWords]]
 Name = "data.constants.cards.stats.limit"
-Address = "0x15B7CC8"
+Address = 0x15B7CC8
 Length = 2
 
 [[MatchedWords]]
 Name = "data.constants.cards.stats.limit2"
-Address = "0x15B7CCA"
+Address = 0x15B7CCA
 Length = 2
 
 [[MatchedWords]]
 Name = "data.constants.effects.limit"
-Address = "0x90524"
+Address = 0x90524
 Length = 2
 
 [[MatchedWords]]
 Name = "data.constants.flip.limit"
-Address = "0x90534"
+Address = 0x90534
 Length = 2
 
 [[MatchedWords]]
 Name = "data.constants.effects2.limit"
-Address = "0x9053A"
+Address = 0x9053A
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.effects3.limit"
-Address = "0x90546"
+Address = 0x90546
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.searchers.limit"
-Address = "0x8DA6E"
+Address = 0x8DA6E
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.decks.initial.starter"
-Address = "0xF4518"
+Address = 0xF4518
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.decks.initial.dragonsroar"
-Address = "0x1E5FD58"
+Address = 0x1E5FD58
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.decks.initial.zombiemadness"
-Address = "0x1E5FD60"
+Address = 0x1E5FD60
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.decks.initial.moltendestruction"
-Address = "0x1E5FD68"
+Address = 0x1E5FD68
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.decks.initial.furyfromthedeep"
-Address = "0x1E5FD70"
+Address = 0x1E5FD70
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.decks.initial.warriorstriumph"
-Address = "0x1E5FD78"
+Address = 0x1E5FD78
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.decks.initial.spellcastersjudgement"
-Address = "0x1E5FD80"
+Address = 0x1E5FD80
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.banlist.mar04"
-Address = "0x1E5F6E0"
+Address = 0x1E5F6E0
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.banlist.sept04"
-Address = "0x1E5F6E8"
+Address = 0x1E5F6E8
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.banlist.mar05"
-Address = "0x1E5F6F0"
+Address = 0x1E5F6F0
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.banlist.sept05"
-Address = "0x1E5F6F8"
+Address = 0x1E5F6F8
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.banlist.mar06"
-Address = "0x1E5F700"
+Address = 0x1E5F700
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.banlist.sept06"
-Address = "0x1E5F708"
+Address = 0x1E5F708
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.banlist.mar07"
-Address = "0x1E5F710"
+Address = 0x1E5F710
 Length = 1
 
 [[MatchedWords]]
 Name = "data.constants.banlist.sept07"
-Address = "0x1E5F718"
+Address = 0x1E5F718
 Length = 1
 
 [[List]]
