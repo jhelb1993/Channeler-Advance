@@ -161,6 +161,10 @@ These apply when the main hex view (or the overall window, for global toggles) h
 | **Ctrl+P** | Toggle **ARM/Thumb disassembly** pane |
 | **Ctrl+D** | Toggle **pseudo-C** pane |
 | **Ctrl+M** | Toggle **Named Anchor browser** pane (with the pane open, **drag the vertical sash** between Anchors and the Tools column to resize width; **horizontal scrollbar** under the list scrolls long names) |
+| **Ctrl+Shift+4** / **Ctrl+Shift+$** | Toggle **pseudo-C full edit** mode (C edit + hooks/repoints panel) |
+| **Ctrl+Shift+5** / **Ctrl+Shift+%** | **Compile** pseudo-C inject sources |
+| **Ctrl+Shift+6** / **Ctrl+Shift+^** | **Apply ROM patches** from pseudo-C inject output |
+| **Ctrl+Shift+7** / **Ctrl+Shift+&** | Toggle **Python script pane** (full right side); close with the same shortcut |
 | **Ctrl+H** | Toggle **HackMew** mode (when available) |
 | **Ctrl+I** | **Compile** HackMew ASM (when HackMew mode and the disassembly pane are active) |
 
@@ -197,8 +201,12 @@ Many modal dialogs use **Enter** to confirm and **Escape** to cancel.
 | Shortcut | Action |
 | -------- | ------ |
 | **Ctrl+S** | Save ROM |
+| **Ctrl+T** | Show or hide the **Tools** pane |
+| **Ctrl+Shift+1** / **Ctrl+Shift+!** | Toggle Tools **slot 1** (PCS string table) |
+| **Ctrl+Shift+2** / **Ctrl+Shift+@** | Toggle Tools **slot 2** (Struct editor) |
+| **Ctrl+Shift+3** / **Ctrl+Shift+#** | Toggle Tools **slot 3** (Graphics preview) |
 
-All **Hex editor** shortcuts above apply. The FireRed-only **Ctrl+T** / **Ctrl+Shift+1–3** tools layout is not present in the WCT 2006 UI.
+All **Hex editor** shortcuts above apply.
 
 ## Graphics import (Tools → graphics preview)
 
@@ -220,7 +228,8 @@ High-level capabilities include:
 - General editing: write, insert (**Insert** key toggles insert mode), delete, copy, paste-overwrite (**Ctrl+B**) / paste-insert (**Ctrl+V**), find/replace, goto.
 - Hex / ASCII / PCS text; table and struct editing from TOML; repointing text and pointers (including optional **FF**-fill of old space when relocating).
 - In-tool editing of TOML anchor formats; **double-click** pointers to follow (red highlight); **double-click** the start of an ASM routine in the hex view to highlight through the end (when applicable).
-- **Ctrl+T** / **Ctrl+Shift+1–3** to show or focus Tools slots (FireRed layout).
+- **Ctrl+T** / **Ctrl+Shift+1–3** to show or focus Tools slots.
+- **Ctrl+Shift+4–7** for pseudo-C inject workflow and Python script pane.
 - Disassembly (**Ctrl+P**), HackMew ASM (**Ctrl+H**), pseudo-C (**Ctrl+D**), **Ctrl+M** anchor browser.
 - Graphics: sprites, tilemaps, tilesets, palettes; anchor visual browser.
 
