@@ -758,11 +758,26 @@ def _toml_text_unquote_address_hex_literals(text: str) -> str:
     )
 
 
+def _toml_coerce_mapping_keys_to_str(obj: Any) -> Any:
+    """Deep copy for writing: ``tomli_w`` requires ``str`` keys; ``tomli`` may load ``[[List]]`` indices as ``int``."""
+    if isinstance(obj, dict):
+        return {
+            (k if isinstance(k, str) else str(k)): _toml_coerce_mapping_keys_to_str(v)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_toml_coerce_mapping_keys_to_str(x) for x in obj]
+    if isinstance(obj, tuple):
+        return tuple(_toml_coerce_mapping_keys_to_str(x) for x in obj)
+    return obj
+
+
 def _write_toml_file_unquoted_hex_addresses(toml_path: str, toml_data: Dict[str, Any]) -> None:
     """Write structure TOML: normalize addresses, ``tomli_w.dump``, then unquote hex ``Address`` lines."""
     _normalize_toml_address_fields_to_hex_strings(toml_data)
+    safe_for_write = _toml_coerce_mapping_keys_to_str(toml_data)
     bio = io.BytesIO()
-    tomli_w.dump(toml_data, bio)
+    tomli_w.dump(safe_for_write, bio)
     out = _toml_text_unquote_address_hex_literals(bio.getvalue().decode("utf-8"))
     with open(toml_path, "wb") as f:
         f.write(out.encode("utf-8"))
@@ -2519,7 +2534,7 @@ class PcsStringTableFrame(ttk.Frame):
         self._combo_search_var.set("")
         self._apply_pcs_combo_filter()
 
-    def show_table(self, anchor_name: str) -> None:
+    def show_table(self, anchor_name: str, row_index: Optional[int] = None) -> None:
         if not self._anchors:
             self.refresh_anchors()
         self._combo_search_var.set("")
@@ -2530,6 +2545,15 @@ class PcsStringTableFrame(ttk.Frame):
             self._combo.set(want)
             self._combo.current(vals.index(want))
             self._load_table()
+            if row_index is not None and self._tree:
+                try:
+                    ri = int(row_index)
+                except (ValueError, TypeError):
+                    return
+                iid = f"pcs_{ri}"
+                if self._tree.exists(iid):
+                    self._tree.selection_set(iid)
+                    self._tree.see(iid)
 
     def _load_table(self) -> None:
         self._tree.delete(*self._tree.get_children())
@@ -4468,6 +4492,32 @@ def _tokenize_struct_body(inner: str) -> List[str]:
     return tokens
 
 
+# ``offset<prefix [inner]!HEX>`` — table row is ``offset<>``; prefix + card run live at ``*offset`` (prefix via ``@offset+N``, cards via ``*offset+N``).
+_OFFSET_ANGLE_INLINE_NESTED_RUN_RE = re.compile(
+    r"offset<\s*(.*?)\s*\[\s*([^\]]+)\s*\]\s*!([0-9a-fA-F]+)\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _normalize_offset_padding_count_card_run(inner: str) -> str:
+    """Expand sugar into ``offset<>`` + ``@offset+N`` payload fields + ``cards<…>inline*offset+N`` (payload at ``*offset``)."""
+
+    def _repl(m: Any) -> str:
+        prefix = m.group(1).strip()
+        bracket_inner = m.group(2).strip()
+        hexterm = m.group(3)
+        expanded = _prefix_tokens_to_at_offset_payload_fields(prefix)
+        if expanded is None:
+            return m.group(0)
+        parts_str, run_delta = expanded
+        tail = f"cards<[{bracket_inner}]!{hexterm}>inline*offset+{run_delta}"
+        if parts_str:
+            return f"offset<> {parts_str} {tail}"
+        return f"offset<> {tail}"
+
+    return _OFFSET_ANGLE_INLINE_NESTED_RUN_RE.sub(_repl, inner)
+
+
 def _merge_bitfield_tokens_list(tokens: List[str]) -> List[str]:
     """Merge tokens so an incomplete ``…|t|`` + continuation (split on spaces) becomes one bitfield token."""
     merged: List[str] = []
@@ -4520,6 +4570,80 @@ def _parse_struct_inner_content_to_fields(inner: str) -> Optional[List[Dict[str,
     return fields if fields else None
 
 
+def _struct_field_omitted_from_editor_tree(fd: Optional[Dict[str, Any]]) -> bool:
+    """True for layout-only names ``padding`` / ``unused``: bytes still define struct layout; tree omits the row."""
+    if not fd:
+        return False
+    nm = str(fd.get("name", "")).lower()
+    return nm in ("padding", "unused")
+
+
+def _struct_field_payload_file_off(
+    entry_base: int,
+    fd: Dict[str, Any],
+    fields: List[Dict[str, Any]],
+    data: bytes,
+) -> Optional[int]:
+    """ROM file offset for a top-level field: row layout, or ``name@ptr+N`` payload under ``*ptr``."""
+    if fd.get("at_ptr_field"):
+        pfn = str(fd["at_ptr_field"])
+        pfd = next((x for x in fields if str(x.get("name")) == pfn), None)
+        if not pfd or pfd.get("type") not in ("ptr", "pcs_ptr"):
+            return None
+        poff = entry_base + int(pfd["offset"])
+        if poff + 4 > len(data):
+            return None
+        ptr = int.from_bytes(data[poff : poff + 4], "little")
+        if (ptr >> 24) not in (0x08, 0x09):
+            return None
+        fo = ptr - GBA_ROM_BASE + int(fd.get("at_ptr_delta") or 0)
+        if fo < 0:
+            return None
+        return fo
+    return entry_base + int(fd["offset"])
+
+
+def _validate_at_ptr_payload_fields(fields: List[Dict[str, Any]]) -> bool:
+    """Each ``at_ptr_field`` reference must name an earlier ``ptr`` / ``pcs_ptr`` field."""
+    by_name = {str(f.get("name")): f for f in fields if f.get("name")}
+    idx_by_name = {str(f.get("name")): i for i, f in enumerate(fields) if f.get("name")}
+    for fd in fields:
+        pfn = fd.get("at_ptr_field")
+        if not pfn:
+            continue
+        pfd = by_name.get(str(pfn))
+        if not pfd or pfd.get("type") not in ("ptr", "pcs_ptr"):
+            return False
+        i_fd = idx_by_name.get(str(fd.get("name", "")))
+        i_p = idx_by_name.get(str(pfn))
+        if i_fd is None or i_p is None or i_fd <= i_p:
+            return False
+    return True
+
+
+def _prefix_tokens_to_at_offset_payload_fields(prefix: str) -> Optional[Tuple[str, int]]:
+    """Expand ``padding:::: main:`` → ``padding@offset+0:::: main@offset+8:``; return (expanded, byte offset before card run)."""
+    if not prefix.strip():
+        return "", 0
+    tokens = _tokenize_struct_body(prefix.strip())
+    tokens = _merge_bitfield_tokens_list(tokens)
+    delta = 0
+    parts: List[str] = []
+    for tok in tokens:
+        pfd = _parse_helper_field_token(tok)
+        if pfd is None:
+            pfd = _parse_single_field(tok)
+        if not pfd or pfd.get("type") != "uint":
+            return None
+        nm = str(pfd["name"])
+        if not tok.startswith(nm):
+            return None
+        rest = tok[len(nm) :]
+        parts.append(f"{nm}@offset+{delta}{rest}")
+        delta += int(pfd["size"])
+    return " ".join(parts), delta
+
+
 def _parse_struct_fields(
     fmt: str,
     blist_resolver: Optional[Callable[[str], Optional[int]]] = None,
@@ -4546,7 +4670,7 @@ def _parse_struct_fields(
                 break
     if close < 0:
         return None
-    inner = s[1:close]
+    inner = _normalize_offset_padding_count_card_run(s[1:close])
 
     tokens = _tokenize_struct_body(inner)
     tokens = _merge_bitfield_tokens_list(tokens)
@@ -4575,6 +4699,8 @@ def _parse_struct_fields(
                 fd["blist_unresolved"] = True
     _finalize_nested_array_pointer_semantics(fields)
     if not _validate_nested_array_fields(fields):
+        return None
+    if not _validate_at_ptr_payload_fields(fields):
         return None
     _assign_struct_field_offsets(fields)
     return fields
@@ -4632,6 +4758,8 @@ def _assign_struct_field_offsets(fields: List[Dict[str, Any]]) -> None:
                 lay_at += _nested_array_max_span_bytes(fd, fields)
             continue
         fd["offset"] = lay_at
+        if fd.get("at_ptr_field"):
+            continue
         lay_at += int(fd["size"])
 
 
@@ -4771,6 +4899,57 @@ def _struct_anchor_table_span_bytes(data: bytes, info: Dict[str, Any]) -> int:
     return int(info["struct_size"]) * int(info["count"])
 
 
+def _struct_row_index_for_file_offset(data: bytes, info: Dict[str, Any], file_off: int) -> int:
+    """0-based struct row index whose ROM span contains ``file_off`` (for Goto / tools sync)."""
+    base = int(info["base_off"])
+    cnt = max(0, int(info.get("count") or 0))
+    if cnt <= 0:
+        return 0
+    if file_off < base:
+        return 0
+    if info.get("packed_terminator") and info.get("packed_terminator_fd"):
+        pfd = info["packed_terminator_fd"]
+        stride = int(pfd["inner_stride"])
+        term = bytes(pfd["terminator"])
+        pos = base
+        for i in range(cnt):
+            row_start = pos
+            end = _terminator_nested_row_end_exclusive(data, row_start, stride, term)
+            if end is None:
+                return i
+            if row_start <= file_off < end:
+                return i
+            pos = end
+        return max(0, cnt - 1)
+    ss = int(info.get("struct_size") or 0)
+    if ss <= 0:
+        return 0
+    idx = (file_off - base) // ss
+    return max(0, min(idx, cnt - 1))
+
+
+def _pcs_row_index_for_file_offset(info: Dict[str, Any], file_off: int) -> int:
+    """0-based PCS table row containing ``file_off``."""
+    addr = info["anchor"].get("Address")
+    if addr is None:
+        return 0
+    try:
+        gba = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+        if gba < GBA_ROM_BASE:
+            gba += GBA_ROM_BASE
+        start = gba - GBA_ROM_BASE
+    except (ValueError, TypeError):
+        return 0
+    w = int(info.get("width") or 0)
+    c = int(info.get("count") or 0)
+    if w <= 0 or c <= 0:
+        return 0
+    if file_off < start:
+        return 0
+    idx = (file_off - start) // w
+    return max(0, min(idx, c - 1))
+
+
 def _nested_array_max_span_bytes(fd: Dict[str, Any], fields: List[Dict[str, Any]]) -> int:
     """Upper bound on bytes for ``nested_array`` from count field uint width."""
     if fd.get("terminator"):
@@ -4817,20 +4996,26 @@ def _struct_row_byte_size(fields: List[Dict[str, Any]]) -> int:
             else:
                 n += _nested_array_max_span_bytes(f, fields)
         else:
+            if f.get("at_ptr_field"):
+                continue
             n += int(f["size"])
     return n
 
 
 def _try_parse_nested_array_token(token: str) -> Optional[Dict[str, Any]]:
-    """Parse ``name<[inner]/countField>``, ``name<[inner]!HEX>`` (terminator bytes), or ``…/count>*ptrField``."""
+    """Parse ``name<[inner]/countField>``, ``name<[inner]!HEX>`` (terminator bytes), or ``…*ptr`` / ``…*ptr+N``."""
     raw = token.strip()
     base_ptr_field: Optional[str] = None
+    base_ptr_delta: int = 0
     if "*" in raw:
         head, tail = raw.rsplit("*", 1)
         h, t = head.strip(), tail.strip()
-        if re.match(r"^\w+$", t) and h.endswith(">"):
+        m_tail = re.match(r"^(\w+)(\+(\d+))?$", t)
+        # ``…!0000>inline`` ends with ``inline``, not ``>`` — same rule as below.
+        if m_tail and (h.endswith(">") or re.search(r">\s*inline\s*$", h)):
             raw = h
-            base_ptr_field = t
+            base_ptr_field = m_tail.group(1)
+            base_ptr_delta = int(m_tail.group(3)) if m_tail.group(3) else 0
     if "<[" not in raw:
         return None
     rs = raw.rstrip()
@@ -4900,12 +5085,14 @@ def _try_parse_nested_array_token(token: str) -> Optional[Dict[str, Any]]:
         "inner_fields": inner_fields,
         "inner_stride": inner_stride,
         "count_field": count_field,
+        "base_ptr_delta": 0,
     }
     if terminator is not None:
         out["terminator"] = terminator
         out["terminator_inline_packed"] = terminator_inline_packed
     if base_ptr_field:
         out["base_ptr_field"] = base_ptr_field
+        out["base_ptr_delta"] = base_ptr_delta
     return out
 
 
@@ -4938,6 +5125,26 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
     if "|s=" in token:
         token = token.split("|s=")[0]
     token, hex_hint, signed_hint = _strip_struct_field_modifiers(token)
+    m_at = re.match(r"^(\w+)@(\w+)\+(\d+)([.:]+)([\w.]*)([+-]\d+)?$", token.strip())
+    if m_at:
+        name = m_at.group(1)
+        pfn = m_at.group(2)
+        delta = int(m_at.group(3))
+        size_chars = m_at.group(4)
+        base = (m_at.group(5) or "").strip()
+        tail = m_at.group(6) or ""
+        enum_ref = (base + tail).strip() if base else None
+        size = sum(1 if c == "." else 2 for c in size_chars)
+        return {
+            "name": name,
+            "size": size,
+            "type": "uint",
+            "enum": enum_ref or None,
+            "hex": hex_hint,
+            "signed": signed_hint,
+            "at_ptr_field": pfn,
+            "at_ptr_delta": delta,
+        }
     m_blist = re.match(r"^(\w+)\|b\[\]([\w.]+)$", token.strip())
     if m_blist:
         return {
@@ -5222,7 +5429,12 @@ class StructEditorFrame(ttk.Frame):
         return pos if pos is not None else self._base_off
 
     def _sync_hex_cursor_to_current_struct_entry(self, entry_idx: int) -> None:
-        """Move hex view: ``!HEX`` pointer column → follow to blob; ``!HEX>inline`` packed → row start."""
+        """Move hex view to the **struct row** in ROM (table base + index × row size).
+
+        Pointer payloads (e.g. ``offset<>`` + data at ``*offset``) are **not** auto-followed here — that was
+        stealing focus from NamedAnchor / Goto, which must land on the table ``Address``. Use **Follow pointer**
+        on the ``offset`` field to jump to the deck blob.
+        """
         he = self._hex
         if he is None or not hasattr(he, "_do_goto"):
             return
@@ -5247,14 +5459,11 @@ class StructEditorFrame(ttk.Frame):
                     except (tk.TclError, AttributeError):
                         pass
             return
-        if not self._struct_packed_terminator:
-            return
-        off = self._entry_file_offset(entry_idx)
-        he._do_goto(off)
+        he._do_goto(entry_base)
         gv = getattr(he, "_goto_var", None)
         if gv is not None:
             try:
-                gv.set(f"{off:08X}")
+                gv.set(f"{entry_base:08X}")
             except (tk.TclError, AttributeError):
                 pass  # widget may be gone
 
@@ -7007,7 +7216,7 @@ class StructEditorFrame(ttk.Frame):
         self._apply_struct_combo_filter()
         self._tree.delete(*self._tree.get_children())
 
-    def show_struct(self, anchor_name: str) -> None:
+    def show_struct(self, anchor_name: str, entry_idx: Optional[int] = None) -> None:
         if not self._anchors:
             self.refresh_anchors()
         want = anchor_name.strip()
@@ -7019,6 +7228,14 @@ class StructEditorFrame(ttk.Frame):
         self._combo.set(want)
         self._combo.current(vals.index(want))
         self._on_combo_select()
+        if entry_idx is not None:
+            try:
+                ei = int(entry_idx)
+            except (ValueError, TypeError):
+                return
+            ei = max(0, min(ei, max(0, self._entry_count - 1)))
+            self._idx_var.set(str(ei))
+            self._on_spin_change()
 
     def _read_nested_array_element_count(
         self, entry_base: int, na_fd: Dict[str, Any], na_base: int
@@ -7033,6 +7250,13 @@ class StructEditorFrame(ttk.Frame):
             )
         return self._read_nested_array_count(entry_base, na_fd)
 
+    def _struct_field_file_off(self, entry_base: int, fd: Dict[str, Any]) -> Optional[int]:
+        """Row layout or ``@ptr+N`` payload under ``*ptr`` (``offset`` column)."""
+        data = self._hex.get_data()
+        if not data:
+            return None
+        return _struct_field_payload_file_off(entry_base, fd, self._fields, bytes(data))
+
     def _read_nested_array_count(self, entry_base: int, na_fd: Dict[str, Any]) -> int:
         cf_name = str(na_fd.get("count_field") or "")
         cf = next((f for f in self._fields if f.get("name") == cf_name), None)
@@ -7041,7 +7265,9 @@ class StructEditorFrame(ttk.Frame):
         data = self._hex.get_data()
         if not data:
             return 0
-        roff = entry_base + int(cf["offset"])
+        roff = self._struct_field_file_off(entry_base, cf)
+        if roff is None:
+            return 0
         rsz = int(cf["size"])
         if roff + rsz > len(data):
             return 0
@@ -7088,7 +7314,7 @@ class StructEditorFrame(ttk.Frame):
         fo = ptr - GBA_ROM_BASE
         if fo < 0 or fo >= len(data):
             return None
-        return fo
+        return fo + int(na_fd.get("base_ptr_delta") or 0)
 
     def _nested_element_file_off(
         self, entry_base: int, na_fd: Dict[str, Any], ai: int, ij: int
@@ -7158,6 +7384,8 @@ class StructEditorFrame(ttk.Frame):
                     n_sub = self._read_nested_array_element_count(off, fd, na_base)
                     for ai in range(n_sub):
                         for ij, ifd in enumerate(inner):
+                            if _struct_field_omitted_from_editor_tree(ifd):
+                                continue
                             if ifd.get("type") == "bitfield":
                                 foff = na_base + ai * stride + int(ifd["offset"])
                                 sz = int(ifd["size"])
@@ -7166,6 +7394,8 @@ class StructEditorFrame(ttk.Frame):
                                 raw = bytes(data[foff : foff + sz])
                                 val = int.from_bytes(raw, "little")
                                 for j, p in enumerate(ifd["parts"]):
+                                    if _struct_field_omitted_from_editor_tree(p):
+                                        continue
                                     subv = (val >> p["shift"]) & ((1 << p["bits"]) - 1)
                                     label = f"{fd['name']}[{ai}].{p['name']}"
                                     disp = self._format_bitfield_part_display(subv, p)
@@ -7193,6 +7423,8 @@ class StructEditorFrame(ttk.Frame):
                     raw = bytes(data[foff : foff + sz])
                     val = int.from_bytes(raw, "little")
                     for j, p in enumerate(fd["parts"]):
+                        if _struct_field_omitted_from_editor_tree(p):
+                            continue
                         subv = (val >> p["shift"]) & ((1 << p["bits"]) - 1)
                         disp = self._format_bitfield_part_display(subv, p)
                         self._tree.insert(
@@ -7202,7 +7434,11 @@ class StructEditorFrame(ttk.Frame):
                             iid=f"sf_{fi}_b{j}",
                         )
                     continue
-                foff = off + fd["offset"]
+                if _struct_field_omitted_from_editor_tree(fd):
+                    continue
+                foff = self._struct_field_file_off(off, fd)
+                if foff is None:
+                    break
                 sz = fd["size"]
                 if foff + sz > len(data):
                     break
@@ -7324,10 +7560,13 @@ class StructEditorFrame(ttk.Frame):
             return None
         if fd.get("type") != "uint" or not fd.get("enum"):
             return None
+        foff_u = self._struct_field_file_off(entry_base, fd)
+        if foff_u is None:
+            return None
         return {
             "kind": "uint",
             "enum_ref": str(fd["enum"]),
-            "foff": entry_base + int(fd["offset"]),
+            "foff": foff_u,
             "fd": fd,
             "fi": fi,
             "tree_iid": iid,
@@ -7388,7 +7627,10 @@ class StructEditorFrame(ttk.Frame):
             if rf is None or rf.get("type") != "uint":
                 missing.append(ref)
                 continue
-            roff = entry_base + int(rf["offset"])
+            roff = self._struct_field_file_off(entry_base, rf)
+            if roff is None:
+                missing.append(ref)
+                continue
             rsz = int(rf["size"])
             if roff + rsz > len(data):
                 missing.append(ref)
@@ -7591,7 +7833,7 @@ class StructEditorFrame(ttk.Frame):
             fd = self._fields[fi]
             if fd.get("type") == "helper":
                 return
-            foff = entry_base + int(fd["offset"])
+            foff = self._struct_field_file_off(entry_base, fd)
 
         if foff is None:
             return
@@ -7785,8 +8027,8 @@ class StructEditorFrame(ttk.Frame):
         if fd.get("type") == "helper":
             self._cancel_inline_edit()
             return
-        foff = entry_base + int(fd["offset"])
-        if foff + int(fd["size"]) > len(data):
+        foff = self._struct_field_file_off(entry_base, fd)
+        if foff is None or foff + int(fd["size"]) > len(data):
             self._cancel_inline_edit()
             return
 
@@ -9942,6 +10184,20 @@ class HexEditorFrame(ttk.Frame):
         self._on_goto_entry_change()
         return "break"
 
+    def _goto_named_anchor_at_offset_with_tools(self, file_off: int, ai: Dict[str, Any]) -> None:
+        """Jump hex to ``file_off`` (inside a table) and notify tools with row index for Struct / PCS."""
+        self._do_goto(file_off)
+        cb = self._on_pointer_to_named_anchor_cb
+        if not cb:
+            return
+        snap = dict(ai)
+        t = ai.get("type")
+        if t == "struct":
+            snap["struct_entry_index"] = _struct_row_index_for_file_offset(bytes(self._data), ai, file_off)
+        elif t == "pcs":
+            snap["pcs_row_index"] = _pcs_row_index_for_file_offset(ai, file_off)
+        self.after(10, lambda s=snap: cb(s))
+
     def _goto_resolve_and_maybe_open_tool(self, s: str) -> bool:
         """If ``s`` is a NamedAnchor name or a file/GBA offset inside one, select that anchor and notify tools."""
         s = s.strip()
@@ -9959,10 +10215,7 @@ class HexEditorFrame(ttk.Frame):
         if sym_offset is not None and 0 <= sym_offset < len(self._data):
             ai2 = self._find_named_anchor_at_offset(sym_offset, exact=False)
             if ai2:
-                self._select_named_anchor_extent(ai2)
-                if cb:
-                    snap = dict(ai2)
-                    self.after(10, lambda s=snap: cb(s))
+                self._goto_named_anchor_at_offset_with_tools(sym_offset, ai2)
                 return True
         ts = s
         if ts.startswith("0x") or ts.startswith("0X"):
@@ -9978,10 +10231,7 @@ class HexEditorFrame(ttk.Frame):
         if 0 <= val < len(self._data):
             ai3 = self._find_named_anchor_at_offset(val, exact=False)
             if ai3:
-                self._select_named_anchor_extent(ai3)
-                if cb:
-                    snap = dict(ai3)
-                    self.after(10, lambda s=snap: cb(s))
+                self._goto_named_anchor_at_offset_with_tools(val, ai3)
                 return True
         return False
 
@@ -15217,9 +15467,17 @@ class RomToolsShell:
             self._root.after(50, lambda: self.graphics_preview._combo.focus_set())
         elif t == "struct":
             self.struct_editor.refresh_anchors()
-            self.struct_editor.show_struct(name)
+            ei = anchor_info.get("struct_entry_index")
+            if ei is not None:
+                self.struct_editor.show_struct(name, entry_idx=ei)
+            else:
+                self.struct_editor.show_struct(name)
             self._root.after(50, lambda: self.struct_editor._tree.focus_set())
         else:
             self.pcs_table.refresh_anchors()
-            self.pcs_table.show_table(name)
+            pri = anchor_info.get("pcs_row_index")
+            if pri is not None:
+                self.pcs_table.show_table(name, row_index=pri)
+            else:
+                self.pcs_table.show_table(name)
             self._root.after(50, lambda: self.pcs_table._tree.focus_set())

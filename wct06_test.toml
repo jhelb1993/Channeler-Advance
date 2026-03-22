@@ -219,12 +219,12 @@ Address = 0x184E42C
 Format = "`ucs4x2x40|graphics.races.palette`"
 
 [[NamedAnchors]]
-Name = "data.decks.offsets1"
+Name = "data.decks.offsets.actual"
 Address = 0x1E63BEC
-Format = "[offset<something: [card:cardnames]!0000>]deckinfo"
+Format = "[offset<padding:::: main: [card:cardnames]!0000>]deckinfo"
 
 [[NamedAnchors]]
-Name = "data.decks.offsets2"
+Name = "data.decks.offsets.unknown"
 Address = 0x1E64138
 Format = "[offset<[card:cardnames]!0000>]deckinfo"
 

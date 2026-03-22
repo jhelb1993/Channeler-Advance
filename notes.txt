@@ -1,6 +1,6 @@
+! add x new
 ydk import (decks)
 lflist import (banlists)
-improved deck logic
 read the code
 python scripting
 split hex_editor.py up into separate files
