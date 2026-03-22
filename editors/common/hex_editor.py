@@ -1220,6 +1220,145 @@ class _GfxRelocateDialog:
         self._dlg.destroy()
 
 
+class _TableGrowRepointDialog:
+    """When a table cannot grow in place (not enough 0xFF space after it), pick a new base file offset."""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        hex_editor: "HexEditorFrame",
+        need_bytes: int,
+        excl_lo: int,
+        excl_hi: int,
+        old_base: int,
+        table_desc: str,
+    ) -> None:
+        self.result: Optional[Tuple[int, bool]] = None  # (new_file_offset, fill_old_with_ff)
+        self._need = int(need_bytes)
+        self._excl_lo = int(excl_lo)
+        self._excl_hi = int(excl_hi)
+        self._old_base = int(old_base)
+        self._hex = hex_editor
+        self._dlg = tk.Toplevel(parent)
+        self._dlg.title("Repoint table — not enough free space")
+        self._dlg.transient(parent)
+        self._dlg.grab_set()
+        f = ttk.Frame(self._dlg, padding=10)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            f,
+            text=(
+                f"Not enough consecutive 0xFF space after this table to add rows in place.\n\n"
+                f"{table_desc}\n"
+                f"Current table starts at file offset 0x{self._old_base:X} (needs 0x{self._need:X} byte(s) total "
+                f"for the expanded table).\n\n"
+                "Choose a new **file offset** for the start of the full expanded table, or search for an FF gap.\n"
+                "Word-aligned ROM pointers to the old start address will be updated to the new start.\n"
+            ),
+            wraplength=460,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(f, text="New table file offset:", font=("Consolas", 9)).grid(row=1, column=0, sticky="w")
+        self._off_var = tk.StringVar(value="")
+        ttk.Entry(f, textvariable=self._off_var, width=22, font=("Consolas", 9)).grid(
+            row=1, column=1, sticky="ew", pady=2
+        )
+        ttk.Label(f, text="FF gap search from / through:", font=("Consolas", 8), foreground="#666").grid(
+            row=2, column=0, sticky="nw", pady=(8, 0)
+        )
+        gap_f = ttk.Frame(f)
+        gap_f.grid(row=2, column=1, sticky="ew", pady=(8, 0))
+        self._from_var = tk.StringVar(value="")
+        self._to_var = tk.StringVar(value="")
+        ttk.Entry(gap_f, textvariable=self._from_var, width=14, font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Entry(gap_f, textvariable=self._to_var, width=14, font=("Consolas", 8)).pack(side=tk.LEFT)
+        ttk.Label(
+            f,
+            text="(leave both empty to search the whole ROM; end is inclusive)",
+            font=("Consolas", 7),
+            foreground="#666",
+        ).grid(row=3, column=1, sticky="w", pady=(2, 0))
+        ttk.Button(f, text="Search FF gap", command=self._on_search).grid(row=4, column=1, sticky="e", pady=(6, 0))
+        self._fill_old_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            f,
+            text="Fill old table range with 0xFF after moving (reclaim as free space)",
+            variable=self._fill_old_var,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        btnf = ttk.Frame(f)
+        btnf.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
+        f.columnconfigure(1, weight=1)
+        self._dlg.bind("<Escape>", lambda e: self._on_cancel())
+        self._dlg.wait_window()
+
+    def _on_search(self) -> None:
+        data = self._hex.get_data()
+        if not data:
+            messagebox.showerror("Repoint table", "No ROM loaded.")
+            return
+        w_lo, w_hi_ex, w_err = parse_ff_gap_search_window_strings(
+            data, self._from_var.get(), self._to_var.get()
+        )
+        if w_err:
+            messagebox.showerror("Repoint table", w_err)
+            return
+        gap = find_disjoint_ff_gap_start(
+            data,
+            self._need,
+            self._excl_lo,
+            self._excl_hi,
+            window_lo=w_lo,
+            window_hi=w_hi_ex,
+        )
+        if gap is None:
+            messagebox.showerror(
+                "Repoint table",
+                f"No qualifying block of {self._need} consecutive 0xFF byte(s) was found "
+                f"(disjoint from the current table). Adjust the search range or enter an offset manually.",
+            )
+            return
+        self._off_var.set(f"0x{gap:X}")
+
+    def _on_ok(self) -> None:
+        data = self._hex.get_data()
+        if not data:
+            self._dlg.destroy()
+            return
+        s = self._off_var.get().strip()
+        if not s:
+            messagebox.showwarning(
+                "Repoint table",
+                "Enter a file offset (hex or decimal), or use Search FF gap.",
+            )
+            return
+        try:
+            off = int(s, 0)
+        except ValueError:
+            messagebox.showwarning("Repoint table", "Invalid offset (use decimal or 0x hex).")
+            return
+        if off < 0:
+            messagebox.showwarning("Repoint table", "Offset must be ≥ 0.")
+            return
+        if GBA_ROM_BASE <= off <= GBA_ROM_MAX:
+            off -= GBA_ROM_BASE
+        ok_slot, err = self._hex._dest_accepts_table_write(off, self._need)
+        if not ok_slot:
+            messagebox.showerror("Repoint table", err or "Destination is not free space.")
+            return
+        if off == self._old_base:
+            messagebox.showwarning(
+                "Repoint table",
+                "Pick a different offset than the current table start (or cancel and free space in place).",
+            )
+            return
+        self.result = (off, bool(self._fill_old_var.get()))
+        self._dlg.destroy()
+
+    def _on_cancel(self) -> None:
+        self._dlg.destroy()
+
+
 class _RepointBytesDialog:
     """Move selected bytes to an FF gap (or manual offset); repoint .word pointers and optional BLs."""
 
@@ -2117,6 +2256,16 @@ class PcsStringTableFrame(ttk.Frame):
         self._tree.bind("<F2>", self._start_inline_edit)
         self._tree.bind("<ButtonRelease-1>", self._on_tree_click)
 
+        add_row = ttk.Frame(self)
+        add_row.grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(add_row, text="Add", font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 4))
+        self._pcs_add_n_var = tk.IntVar(value=1)
+        ttk.Spinbox(add_row, from_=1, to=500, width=5, textvariable=self._pcs_add_n_var, font=("Consolas", 8)).pack(
+            side=tk.LEFT
+        )
+        ttk.Label(add_row, text="new rows", font=("Consolas", 8)).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(add_row, text="Apply", command=self._on_pcs_add_rows).pack(side=tk.LEFT, padx=(8, 0))
+
     def _schedule_pcs_combo_filter(self, event: Optional[tk.Event] = None) -> None:
         if self._pcs_filter_job is not None:
             try:
@@ -2324,6 +2473,23 @@ class PcsStringTableFrame(ttk.Frame):
         return "break"
 
     def _on_combo_select(self, event: Optional[tk.Event] = None) -> None:
+        self._load_table()
+
+    def _on_pcs_add_rows(self) -> None:
+        try:
+            n = int(self._pcs_add_n_var.get())
+        except (tk.TclError, ValueError):
+            n = 1
+        n = max(1, min(n, 500))
+        info = self._selected_pcs_anchor()
+        if not info:
+            messagebox.showinfo("PCS table", "Select a string table first.")
+            return
+        ok, err = self._hex.append_pcs_table_rows(info, n)
+        if not ok:
+            messagebox.showerror("PCS table", err)
+            return
+        self.refresh_anchors()
         self._load_table()
 
     def refresh_anchors(self) -> None:
@@ -5109,6 +5275,12 @@ class StructEditorFrame(ttk.Frame):
         self._entry_index_name_label = ttk.Label(nav, text="", font=("Consolas", 8))
         self._entry_index_name_label.grid(row=0, column=3, sticky="w", padx=(8, 0))
         self._entry_index_name_label.grid_remove()
+        self._struct_add_n_var = tk.IntVar(value=1)
+        ttk.Label(nav, text="Add", font=("Consolas", 8)).grid(row=0, column=4, sticky="e", padx=(12, 2))
+        ttk.Spinbox(
+            nav, from_=1, to=500, width=4, textvariable=self._struct_add_n_var, font=("Consolas", 8)
+        ).grid(row=0, column=5, sticky="w")
+        ttk.Button(nav, text="new rows", command=self._on_struct_add_rows).grid(row=0, column=6, sticky="w", padx=(4, 0))
 
         self._entry_search_frame = ttk.Frame(nav)
         self._entry_search_frame.columnconfigure(1, weight=1)
@@ -6623,6 +6795,26 @@ class StructEditorFrame(ttk.Frame):
             self._entry_search_frame.grid_remove()
         self._load_entry(0)
         self._sync_hex_cursor_to_current_struct_entry(0)
+
+    def _on_struct_add_rows(self) -> None:
+        try:
+            n = int(self._struct_add_n_var.get())
+        except (tk.TclError, ValueError):
+            n = 1
+        n = max(1, min(n, 500))
+        info = self._selected_struct_anchor()
+        if not info:
+            messagebox.showinfo("Struct", "Select a struct table first.")
+            return
+        old_count = int(info["count"])
+        ok, err = self._hex.append_struct_table_rows(info, n)
+        if not ok:
+            messagebox.showerror("Struct", err)
+            return
+        self._anchors = self._hex.get_struct_anchors()
+        self._on_combo_select()
+        self._idx_var.set(str(old_count))
+        self._on_spin_change()
 
     def _on_spin_change(self) -> None:
         try:
@@ -11660,6 +11852,395 @@ Format = "`f|u8`[u8 arg0]"
     def get_lists(self) -> Dict[str, Dict[int, str]]:
         """Return all [[List]] entries as {name: {index: label}}."""
         return _load_toml_lists(self._toml_data)
+
+    def insert_rom_bytes(self, offset: int, blob: bytes) -> bool:
+        """Insert ``blob`` at ``offset`` (``offset`` may be ``len(ROM)`` to append). Returns False on bad bounds."""
+        if self._data is None or offset < 0 or offset > len(self._data):
+            return False
+        self._data[offset:offset] = blob
+        self._modified = True
+        self._ldr_pc_targets_valid = False
+        self._schedule_xref_rebuild()
+        self._invalidate_xref_index()
+        self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
+        self._refresh_visible()
+        self._update_scrollbar()
+        return True
+
+    def _dest_accepts_table_write(self, off: int, need: int) -> Tuple[bool, str]:
+        """True if ``need`` bytes can be written starting at ``off`` without clobbering non-0xFF (EOF append OK)."""
+        if need <= 0:
+            return True, ""
+        if not self._data or off < 0:
+            return False, "Invalid ROM or offset."
+        d = self._data
+        n = len(d)
+        if off > n:
+            return False, "Offset is past end of ROM."
+        if off == n:
+            return True, ""
+        end = off + need
+        for i in range(off, min(end, n)):
+            if d[i] != 0xFF:
+                return (
+                    False,
+                    f"Not enough free space: byte at file 0x{i:X} is 0x{d[i]:02X} (need 0xFF padding here).",
+                )
+        return True, ""
+
+    def _room_for_table_grow(self, table_end: int, need: int) -> bool:
+        """True if new row bytes can be placed at ``table_end`` using only 0xFF padding / EOF growth."""
+        ok, _ = self._dest_accepts_table_write(table_end, need)
+        return ok
+
+    def write_bytes_at_extend(self, offset: int, data: bytes) -> None:
+        """Write ``data`` at ``offset``, extending the ROM if the write ends past ``len(ROM)``."""
+        if not self._data or offset < 0:
+            return
+        n = len(self._data)
+        if offset > n:
+            return
+        for i, b in enumerate(data):
+            p = offset + i
+            if p < n:
+                self._data[p] = b
+            else:
+                self._data.append(b)
+        self._modified = True
+        self._ldr_pc_targets_valid = False
+        self._schedule_xref_rebuild()
+        self._invalidate_xref_index()
+        self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
+        self._refresh_visible()
+        self._update_scrollbar()
+
+    def _repoint_anchor_table_for_grow(
+        self,
+        anchor: Dict[str, Any],
+        old_base: int,
+        old_total: int,
+        new_tail: bytes,
+        new_base: int,
+        fill_old_with_ff: bool,
+    ) -> Tuple[bool, str]:
+        """Move expanded table: copy ``old_total`` bytes from ``old_base``, append ``new_tail``, write at ``new_base``."""
+        if not self._data:
+            return False, "No ROM loaded."
+        total_new = old_total + len(new_tail)
+        old_chunk = bytes(self._data[old_base : old_base + old_total]) if old_total > 0 else b""
+        payload = old_chunk + new_tail
+        old_gba = GBA_ROM_BASE + int(old_base)
+        new_gba = GBA_ROM_BASE + int(new_base)
+        self.write_bytes_at_extend(int(new_base), payload)
+        excl = [
+            (int(old_base), int(old_base) + max(int(old_total), 4)),
+            (int(new_base), int(new_base) + int(total_new)),
+        ]
+        self.replace_word_aligned_rom_pointers(old_gba, new_gba, exclude_ranges=excl)
+        if fill_old_with_ff:
+            ob = int(old_base)
+            for i in range(ob, ob + int(old_total)):
+                if i < len(self._data):
+                    self._data[i] = 0xFF
+        anchor["Address"] = _toml_named_anchor_address_hex_string(int(new_base))
+        return True, ""
+
+    def _struct_list_name_for_append_labels(self, struct_info: Dict[str, Any]) -> Optional[str]:
+        """If this struct's row count is driven by a ``[[List]]``, return that list's TOML ``Name`` for new labels."""
+        elk = struct_info.get("entry_label_list")
+        if elk:
+            lk = normalize_named_anchor_lookup_key(str(elk).strip())
+            if lk in _load_toml_lists(self._toml_data):
+                return str(elk).strip()
+        cr = struct_info.get("count_ref")
+        if cr and isinstance(cr, str):
+            base = _struct_count_ref_base_name(str(cr).strip())
+            lk = normalize_named_anchor_lookup_key(base)
+            if lk in _load_toml_lists(self._toml_data):
+                return base
+        return None
+
+    def _append_list_placeholders_mut(self, list_name: str, n: int) -> Tuple[bool, str]:
+        """Append ``n`` lines ``New entry {index}`` to ``[[List]]`` (mutates ``self._toml_data`` only)."""
+        if n <= 0:
+            return False, "Count must be positive."
+        rows = self._toml_data.get("List")
+        if not isinstance(rows, list):
+            return False, "TOML has no [[List]] section."
+        want = normalize_named_anchor_lookup_key(list_name.strip())
+        target: Optional[Dict[str, Any]] = None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if normalize_named_anchor_lookup_key(str(row.get("Name", ""))) == want:
+                target = row
+                break
+        if target is None:
+            return False, f"[[List]] not found: {list_name!r}"
+        hi = self._resolve_list_entry_span_end(list_name.strip())
+        if hi is None:
+            hi = 0
+        z = target.get(0)
+        if isinstance(z, list):
+            for i in range(n):
+                z.append(f"New entry {hi + i}")
+        else:
+            for i in range(n):
+                target[hi + i] = f"New entry {hi + i}"
+        return True, ""
+
+    def _replace_pcs_format_literal_count(self, anchor: Dict[str, Any], new_count: int) -> bool:
+        fmt = normalize_named_anchor_format(anchor.get("Format", ""))
+        parsed = self._parse_pcs_format(fmt)
+        if not parsed:
+            return False
+        _field, _w, ln, _enc = parsed
+        if not isinstance(ln, int):
+            return False
+        m = re.search(r"\](\d+)\s*$", fmt)
+        if not m:
+            return False
+        anchor["Format"] = fmt[: m.start(1)] + str(int(new_count)) + fmt[m.end(1) :]
+        return True
+
+    def _replace_struct_format_literal_count(self, anchor: Dict[str, Any], new_count: int) -> bool:
+        fmt = normalize_named_anchor_format(anchor.get("Format", ""))
+        cr = _parse_struct_count(fmt)
+        if not isinstance(cr, int):
+            return False
+        raw = fmt.strip()
+        has_caret = raw.startswith("^")
+        s = raw[1:] if has_caret else raw
+        depth = 0
+        for i, ch in enumerate(s):
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    anchor["Format"] = ("^" if has_caret else "") + s[: i + 1] + str(int(new_count))
+                    return True
+        return False
+
+    def _write_matched_word_numeric_value(self, mw_name: str, value: int) -> bool:
+        """Write little-endian integer to the MatchedWord row named ``mw_name`` in ROM."""
+        want = str(mw_name).strip()
+        for mw in self._toml_data.get("MatchedWords", []) or []:
+            if not isinstance(mw, dict):
+                continue
+            if str(mw.get("Name", "")).strip() != want:
+                continue
+            fo = _toml_address_value_to_file_offset(mw.get("Address"))
+            if fo is None or fo < 0 or not self._data:
+                return False
+            try:
+                ln = int(mw.get("Length", 1))
+            except (ValueError, TypeError):
+                ln = 1
+            if ln <= 0:
+                ln = 1
+            v = int(value)
+            for i in range(ln):
+                if fo + i >= len(self._data):
+                    return False
+                self._data[fo + i] = (v >> (8 * i)) & 0xFF
+            return True
+        return False
+
+    def append_pcs_table_rows(self, pcs_info: Dict[str, Any], n: int) -> Tuple[bool, str]:
+        """Add ``n`` empty PCS/ASCII slots at the end of a string table; update Format or MatchedWord count."""
+        if n <= 0:
+            return False, "Count must be positive."
+        if not self._data:
+            return False, "No ROM loaded."
+        if not self._toml_path or not os.path.isfile(self._toml_path):
+            return False, "Save or load a structure TOML next to the ROM before adding rows."
+        anchor = pcs_info["anchor"]
+        width = int(pcs_info["width"])
+        old_count = int(pcs_info["count"])
+        enc = pcs_info.get("encoding", "pcs")
+        addr = anchor.get("Address")
+        if addr is None:
+            return False, "Anchor has no Address."
+        try:
+            gba = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+            if gba < GBA_ROM_BASE:
+                gba += GBA_ROM_BASE
+            base_off = gba - GBA_ROM_BASE
+        except (ValueError, TypeError):
+            return False, "Bad anchor Address."
+        fmt = normalize_named_anchor_format(anchor.get("Format", ""))
+        parsed = self._parse_pcs_format(fmt)
+        if not parsed:
+            return False, "Could not parse PCS Format."
+        _f, _w, length_part, _enc = parsed
+        insert_off = base_off + old_count * width
+        parts = bytearray()
+        for _ in range(n):
+            if enc == "ascii":
+                parts.extend(encode_ascii_slot("", width))
+            else:
+                parts.extend(encode_pcs_string("", width))
+        blob = bytes(parts)
+        need = len(blob)
+        old_total = old_count * width
+        total_expanded = old_total + need
+
+        def _apply_pcs_metadata() -> Tuple[bool, str, bool]:
+            toml_changed = False
+            if isinstance(length_part, int):
+                if not self._replace_pcs_format_literal_count(anchor, old_count + n):
+                    return False, "Could not update PCS Format row count.", False
+                toml_changed = True
+            else:
+                ref = str(length_part).strip()
+                if not self._write_matched_word_numeric_value(ref, old_count + n):
+                    return (
+                        False,
+                        f"Could not write MatchedWord {ref!r} (not found, or ROM range invalid).",
+                        False,
+                    )
+            return True, "", toml_changed
+
+        parent = self.winfo_toplevel()
+        if self._room_for_table_grow(insert_off, need):
+            ok_m, err_m, toml_changed = _apply_pcs_metadata()
+            if not ok_m:
+                return False, err_m
+            self.write_bytes_at_extend(insert_off, blob)
+            if toml_changed:
+                ok, err = self.persist_toml_data()
+                if not ok:
+                    return False, err
+            self._invoke_anchor_refresh_callback()
+            return True, ""
+
+        dlg = _TableGrowRepointDialog(
+            parent,
+            self,
+            total_expanded,
+            base_off,
+            base_off + old_total,
+            base_off,
+            f"PCS table {pcs_info.get('name', '')!r}",
+        )
+        if dlg.result is None:
+            return False, "Cancelled."
+        new_base, fill_old = dlg.result
+        ok_m, err_m, toml_changed = _apply_pcs_metadata()
+        if not ok_m:
+            return False, err_m
+        ok_r, err_r = self._repoint_anchor_table_for_grow(
+            anchor, base_off, old_total, blob, new_base, fill_old
+        )
+        if not ok_r:
+            return False, err_r
+        if toml_changed:
+            ok, err = self.persist_toml_data()
+            if not ok:
+                return False, err
+        self._invoke_anchor_refresh_callback()
+        return True, ""
+
+    def append_struct_table_rows(self, struct_info: Dict[str, Any], n: int) -> Tuple[bool, str]:
+        """Add ``n`` zero-filled struct rows at the end; extend ``[[List]]`` when the table uses a List."""
+        if n <= 0:
+            return False, "Count must be positive."
+        if not self._data:
+            return False, "No ROM loaded."
+        if not self._toml_path or not os.path.isfile(self._toml_path):
+            return False, "Save or load a structure TOML next to the ROM before adding rows."
+        if struct_info.get("packed_terminator"):
+            return False, "Adding rows is not supported for packed !HEX terminator tables yet."
+        name = str(struct_info.get("name", "")).strip()
+        info = self.find_struct_anchor_by_name(name)
+        if not info:
+            return False, f"Struct {name!r} not found."
+        anchor = info["anchor"]
+        old_count = int(info["count"])
+        struct_size = int(info["struct_size"])
+        base_off = int(info["base_off"])
+        cr = info.get("count_ref")
+        fmt_norm = normalize_named_anchor_format(anchor.get("Format", ""))
+        count_raw = _parse_struct_count(fmt_norm)
+        insert_off = base_off + old_count * struct_size
+        blob = b"\x00" * (n * struct_size)
+        need = len(blob)
+        old_total = old_count * struct_size
+        total_expanded = old_total + need
+
+        def _apply_struct_metadata() -> Tuple[bool, str, bool]:
+            toml_changed = False
+            list_nm = self._struct_list_name_for_append_labels(info)
+            if list_nm:
+                ok, err = self._append_list_placeholders_mut(list_nm, n)
+                if not ok:
+                    return False, err, False
+                toml_changed = True
+            elif isinstance(cr, str):
+                base = _struct_count_ref_base_name(str(cr).strip())
+                if self._resolve_table_length(base) is not None:
+                    if not self._write_matched_word_numeric_value(base, old_count + n):
+                        return False, f"Could not update MatchedWord {base!r} in ROM.", False
+                elif any(str(p["name"]) == base for p in self._get_pcs_table_anchors()):
+                    return (
+                        False,
+                        "This struct's ]count references another PCS table. Add rows to that PCS table first, then reload.",
+                        False,
+                    )
+                elif isinstance(count_raw, str):
+                    return (
+                        False,
+                        f"Unsupported ]count reference {count_raw!r} for adding rows (use a List, literal count, or MatchedWord).",
+                        False,
+                    )
+            elif isinstance(count_raw, int):
+                if not self._replace_struct_format_literal_count(anchor, old_count + n):
+                    return False, "Could not update struct Format row count.", False
+                toml_changed = True
+            else:
+                return False, "Could not determine how this table's size is stored (List / literal / MatchedWord).", False
+            return True, "", toml_changed
+
+        parent = self.winfo_toplevel()
+        if self._room_for_table_grow(insert_off, need):
+            ok_m, err_m, toml_changed = _apply_struct_metadata()
+            if not ok_m:
+                return False, err_m
+            self.write_bytes_at_extend(insert_off, blob)
+            if toml_changed:
+                ok, err = self.persist_toml_data()
+                if not ok:
+                    return False, err
+            self._invoke_anchor_refresh_callback()
+            return True, ""
+
+        dlg = _TableGrowRepointDialog(
+            parent,
+            self,
+            total_expanded,
+            base_off,
+            base_off + old_total,
+            base_off,
+            f"Struct table {name!r}",
+        )
+        if dlg.result is None:
+            return False, "Cancelled."
+        new_base, fill_old = dlg.result
+        ok_m, err_m, toml_changed = _apply_struct_metadata()
+        if not ok_m:
+            return False, err_m
+        ok_r, err_r = self._repoint_anchor_table_for_grow(
+            anchor, base_off, old_total, blob, new_base, fill_old
+        )
+        if not ok_r:
+            return False, err_r
+        if toml_changed:
+            ok, err = self.persist_toml_data()
+            if not ok:
+                return False, err
+        self._invoke_anchor_refresh_callback()
+        return True, ""
 
     def update_toml_list_string_at_index(self, list_name: str, flat_index: int, new_label: str) -> bool:
         """Update one string in ``[[List]]`` and rewrite the TOML file on disk."""

@@ -1,5 +1,6 @@
-add x new
-ydk import
+no quotation marks for Addresses in TOML
+ydk import (decks)
+lflist import (banlists)
 improved deck logic
 read the code
 python scripting
