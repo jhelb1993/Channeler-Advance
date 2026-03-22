@@ -133,40 +133,35 @@ Or copy the path shown in the error dialog and run `"<that path>" -m pip install
 
 Bindings use **Ctrl** as the primary modifier (Windows/Linux). macOS may use **Cmd** for some system shortcuts; Tkinter typically still uses **Control** for these bindings.
 
-### Pokémon FireRed editor — window / tools
-
-| Shortcut | Action |
-| -------- | ------ |
-| **Ctrl+S** | Save ROM |
-| **Ctrl+T** | Show or hide the **Tools** pane (PCS string table, Struct editor, Graphics preview) |
-| **Ctrl+Shift+1** / **Ctrl+Shift+!** | Toggle Tools **slot 1** (PCS string table) |
-| **Ctrl+Shift+2** / **Ctrl+Shift+@** | Toggle Tools **slot 2** (Struct editor) |
-| **Ctrl+Shift+3** / **Ctrl+Shift+#** | Toggle Tools **slot 3** (Graphics preview) |
-
 ### Hex editor (all game editors)
 
 These apply when the main hex view (or the overall window, for global toggles) has focus unless noted.
 
 | Shortcut | Action |
 | -------- | ------ |
-| **Ctrl+G** | Focus the **Goto** (file offset) field |
-| **Ctrl+F** | Open **Find** (hex mode: space-separated token **`xx`** or **`XX`** matches any byte, e.g. `00 xx 08 XX 09 xx 10`) |
-| **Ctrl+R** | Open **Replace** (same hex wildcards in **Find**; replacement uses fixed hex only) |
 | **Ctrl+A** | **Select all** in the focused pane (hex/ASCII = whole ROM; disassembly / pseudo-C / hooks text = all text) |
-| **Ctrl+C** / **Copy** | Copy selection (hex + ASCII) |
-| **Ctrl+V** / **Paste** | Paste — **insert** bytes at cursor (insert mode) |
 | **Ctrl+B** | Paste — **overwrite** (write) |
-| **Ctrl+Home** | Jump to **start** of ROM |
-| **Ctrl+End** | Jump to **end** of ROM |
-| **Ctrl+P** | Toggle **ARM/Thumb disassembly** pane |
+| **Ctrl+C** / **Copy** | Copy selection (hex + ASCII) |
 | **Ctrl+D** | Toggle **pseudo-C** pane |
-| **Ctrl+M** | Toggle **Named Anchor browser** pane (with the pane open, **drag the vertical sash** between Anchors and the Tools column to resize width; **horizontal scrollbar** under the list scrolls long names) |
-| **Ctrl+Shift+4** / **Ctrl+Shift+$** | Toggle **pseudo-C full edit** mode (C edit + hooks/repoints panel) |
-| **Ctrl+Shift+5** / **Ctrl+Shift+%** | **Compile** pseudo-C inject sources |
-| **Ctrl+Shift+6** / **Ctrl+Shift+^** | **Apply ROM patches** from pseudo-C inject output |
-| **Ctrl+Shift+7** / **Ctrl+Shift+&** | Toggle **Python script pane** (full right side); close with the same shortcut |
+| **Ctrl+End** | Jump to **end** of ROM |
+| **Ctrl+F** | Open **Find** (hex mode: space-separated token **`xx`** or **`XX`** matches any byte, e.g. `00 xx 08 XX 09 xx 10`) |
+| **Ctrl+G** | Focus the **Goto** (file offset) field |
 | **Ctrl+H** | Toggle **HackMew** mode (when available) |
+| **Ctrl+Home** | Jump to **start** of ROM |
 | **Ctrl+I** | **Compile** HackMew ASM (when HackMew mode and the disassembly pane are active) |
+| **Ctrl+M** | Toggle **Named Anchor browser** pane (with the pane open, **drag the vertical sash** between Anchors and the Tools column to resize width; **horizontal scrollbar** under the list scrolls long names) |
+| **Ctrl+P** | Toggle **ARM/Thumb disassembly** pane |
+| **Ctrl+R** | Open **Replace** (same hex wildcards in **Find**; replacement uses fixed hex only) |
+| **Ctrl+S** | Save ROM |
+| **1.** **Ctrl+Shift+1** / **Ctrl+Shift+!** | Toggle Tools **slot 1** (PCS string table) |
+| **2.** **Ctrl+Shift+2** / **Ctrl+Shift+@** | Toggle Tools **slot 2** (Struct editor) |
+| **3.** **Ctrl+Shift+3** / **Ctrl+Shift+#** | Toggle Tools **slot 3** (Graphics preview) |
+| **4.** **Ctrl+Shift+4** / **Ctrl+Shift+$** | Toggle **pseudo-C full edit** mode (C edit + hooks/repoints panel) |
+| **5.** **Ctrl+Shift+5** / **Ctrl+Shift+%** | **Compile** pseudo-C inject sources |
+| **6.** **Ctrl+Shift+6** / **Ctrl+Shift+^** | **Apply ROM patches** from pseudo-C inject output |
+| **7.** **Ctrl+Shift+7** / **Ctrl+Shift+&** | Toggle **Python script pane** (full right side); close with the same shortcut |
+| **Ctrl+T** | Show or hide the **Tools** pane (PCS string table, Struct editor, Graphics preview) |
+| **Ctrl+V** / **Paste** | Paste — **insert** bytes at cursor (insert mode) |
 
 ### Hex view — movement and editing
 
@@ -195,18 +190,6 @@ These apply when the main hex view (or the overall window, for global toggles) h
 ### Dialogs
 
 Many modal dialogs use **Enter** to confirm and **Escape** to cancel.
-
-### Yu-Gi-Oh! WCT 2006 editor
-
-| Shortcut | Action |
-| -------- | ------ |
-| **Ctrl+S** | Save ROM |
-| **Ctrl+T** | Show or hide the **Tools** pane |
-| **Ctrl+Shift+1** / **Ctrl+Shift+!** | Toggle Tools **slot 1** (PCS string table) |
-| **Ctrl+Shift+2** / **Ctrl+Shift+@** | Toggle Tools **slot 2** (Struct editor) |
-| **Ctrl+Shift+3** / **Ctrl+Shift+#** | Toggle Tools **slot 3** (Graphics preview) |
-
-All **Hex editor** shortcuts above apply.
 
 ## Graphics import (Tools → graphics preview)
 
