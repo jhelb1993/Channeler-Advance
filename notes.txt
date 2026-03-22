@@ -1,3 +1,6 @@
+add x new
+ydk import
+improved deck logic
 read the code
 python scripting
 split hex_editor.py up into separate files

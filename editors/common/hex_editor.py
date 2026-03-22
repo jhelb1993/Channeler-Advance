@@ -1,6 +1,7 @@
 """
 Shared hex editor for GBA ROM hacking.
-Supports pointer detection (0x08/0x09), follow, incoming xref lists (.word vs BL), replace/insert mode, delete.
+Supports pointer detection (0x08/0x09), follow, incoming xref lists (.word vs BL), replace/insert mode, delete,
+and context-menu **Repoint bytes** (move a selection to 0xFF free space and repoint .word / optional BL).
 ASCII/PCS (Pokemon GBA) encoding for the character pane.
 Optional Capstone disassembly (ARM7TDMI Thumb/ARM).
 """
@@ -600,12 +601,150 @@ def thumb2_bl_immediate_target_gba(hw1: int, hw2: int, bl_instruction_addr: int)
     return tgt
 
 
+def thumb2_bl_encode(bl_addr: int, target_gba: int) -> Optional[Tuple[int, int]]:
+    """
+    Encode a Thumb-2 ``BL`` at ``bl_addr`` (byte address of first halfword) branching to ``target_gba``.
+
+    Returns ``(hw1, hw2)`` halfwords or ``None`` if the branch is out of range (Thumb ``BL`` is ±4 MiB).
+    """
+    imm32 = (target_gba - bl_addr - 4) & 0xFFFFFFFF
+    if imm32 & 0x80000000:
+        imm32 -= 0x100000000
+    # ±4 MiB (same practical limit as ``-mlong-calls`` / linker errors for BL).
+    if imm32 < -0x400000 or imm32 >= 0x400000:
+        return None
+    imm25 = imm32 & 0x1FFFFFF
+    S = (imm25 >> 24) & 1
+    I1 = (imm25 >> 23) & 1
+    I2 = (imm25 >> 22) & 1
+    imm10 = (imm25 >> 12) & 0x3FF
+    imm11 = (imm25 >> 1) & 0x7FF
+    J1 = (~(I1 ^ S)) & 1
+    J2 = (~(I2 ^ S)) & 1
+    hw1 = 0xF000 | (S << 10) | imm10
+    hw2 = 0xF800 | (J1 << 13) | (J2 << 11) | imm11
+    if thumb2_bl_immediate_target_gba(hw1, hw2, bl_addr) != (target_gba & 0xFFFFFFFF):
+        return None
+    return hw1, hw2
+
+
+def _repoint_rom_for_moved_byte_range(
+    rom: bytearray,
+    src_lo: int,
+    src_hi: int,
+    new_lo: int,
+    *,
+    include_bl: bool,
+    fill_old: bool = True,
+) -> Tuple[int, int, List[str]]:
+    """
+    Data in ``[src_lo, src_hi)`` has been logically moved to ``[new_lo, new_lo + (src_hi - src_lo))``.
+
+    - Every word-aligned ROM pointer (0x08…… / 0x09……) whose target file offset lies in
+      ``[src_lo, src_hi)`` is adjusted by ``(new_lo - src_lo)``.
+    - If ``include_bl``, every Thumb-2 ``BL`` whose target lies in that range is re-encoded to the new target.
+
+    Then the patched bytes from ``[src_lo, src_hi)`` are copied to ``new_lo``. If ``fill_old`` is true,
+    ``[src_lo, src_hi)`` is filled with ``0xFF`` (reclaim as free space).
+
+    Returns ``(n_word_patches, n_bl_patches, bl_error_messages)``.
+    """
+    bl_errors: List[str] = []
+    if src_lo < 0 or src_hi <= src_lo or new_lo < 0:
+        return 0, 0, ["Invalid range."]
+    length = src_hi - src_lo
+    if new_lo + length > len(rom):
+        return 0, 0, ["Destination range extends past end of ROM."]
+    excl_lo, excl_hi = src_lo, src_hi
+    if not (new_lo + length <= excl_lo or new_lo >= excl_hi):
+        return 0, 0, ["Destination overlaps the original range; pick a disjoint offset."]
+    delta = new_lo - src_lo
+    n_word = 0
+    n_bl = 0
+
+    for off in range(0, len(rom) - 3, 4):
+        ptr = int.from_bytes(rom[off : off + 4], "little")
+        if (ptr >> 24) not in (0x08, 0x09):
+            continue
+        tgt_fo = ptr - GBA_ROM_BASE
+        if src_lo <= tgt_fo < src_hi:
+            new_ptr = (ptr + delta) & 0xFFFFFFFF
+            rom[off : off + 4] = new_ptr.to_bytes(4, "little")
+            n_word += 1
+
+    if include_bl:
+        for off in range(0, len(rom) - 3, 2):
+            hw1 = rom[off] | (rom[off + 1] << 8)
+            hw2 = rom[off + 2] | (rom[off + 3] << 8)
+            bl_gba = GBA_ROM_BASE + off
+            tgt_gba = thumb2_bl_immediate_target_gba(hw1, hw2, bl_gba)
+            if tgt_gba is None:
+                continue
+            if not (GBA_ROM_BASE <= tgt_gba <= GBA_ROM_MAX):
+                continue
+            tgt_fo = tgt_gba - GBA_ROM_BASE
+            if not (src_lo <= tgt_fo < src_hi):
+                continue
+            new_tgt = (tgt_gba + delta) & 0xFFFFFFFF
+            enc = thumb2_bl_encode(bl_gba, new_tgt)
+            if enc is None:
+                bl_errors.append(
+                    f"file 0x{off:08X} (GBA 0x{bl_gba:08X}): BL cannot reach new target "
+                    f"0x{new_tgt:08X} (Thumb BL range is ±4 MiB from the instruction)."
+                )
+                continue
+            hw1n, hw2n = enc
+            rom[off] = hw1n & 0xFF
+            rom[off + 1] = (hw1n >> 8) & 0xFF
+            rom[off + 2] = hw2n & 0xFF
+            rom[off + 3] = (hw2n >> 8) & 0xFF
+            n_bl += 1
+
+    rom[new_lo : new_lo + length] = rom[src_lo:src_hi]
+    if fill_old:
+        for i in range(src_lo, src_hi):
+            rom[i] = 0xFF
+
+    return n_word, n_bl, bl_errors
+
+
 def _toml_named_anchor_address_hex_string(file_offset: int) -> str:
     """Format a ROM **file** offset for ``[[NamedAnchors]].Address`` (``0x…`` hex, no ``0x08`` GBA prefix)."""
     fo = int(file_offset)
     if fo < 0:
         raise ValueError("ROM file offset must be non-negative")
     return f"0x{fo:X}"
+
+
+def _toml_address_value_to_file_offset(addr: Any) -> Optional[int]:
+    """Parse a TOML ``Address`` field (int or hex string) to ROM **file** offset (same rules as repoint / anchors)."""
+    if addr is None:
+        return None
+    try:
+        gba = int(addr) if isinstance(addr, (int, float)) else int(str(addr).strip(), 0)
+    except (ValueError, TypeError):
+        return None
+    if gba < GBA_ROM_BASE:
+        gba += GBA_ROM_BASE
+    return gba - GBA_ROM_BASE
+
+
+def _normalize_toml_address_fields_to_hex_strings(toml_data: Dict[str, Any]) -> None:
+    """Force ``Address`` on anchor-like tables to ``0x…`` strings so ``tomli-w`` never emits plain decimal integers."""
+    for key in ("NamedAnchors", "MatchedWords", "FunctionAnchors"):
+        rows = toml_data.get(key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            addr = row.get("Address")
+            if addr is None:
+                continue
+            fo = _toml_address_value_to_file_offset(addr)
+            if fo is None or fo < 0:
+                continue
+            row["Address"] = _toml_named_anchor_address_hex_string(fo)
 
 
 def _strip_outer_backticks(s: str) -> str:
@@ -1075,6 +1214,149 @@ class _GfxRelocateDialog:
             return
         self.fill_old_slot = bool(self._fill_old_var.get())
         self.result = off
+        self._dlg.destroy()
+
+    def _on_cancel(self) -> None:
+        self._dlg.destroy()
+
+
+class _RepointBytesDialog:
+    """Move selected bytes to an FF gap (or manual offset); repoint .word pointers and optional BLs."""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        hex_editor: "HexEditorFrame",
+        src_lo: int,
+        src_hi: int,
+    ) -> None:
+        self.result: Optional[Tuple[int, bool, bool]] = None
+        self._hex = hex_editor
+        self._src_lo = int(src_lo)
+        self._src_hi = int(src_hi)
+        self._need = self._src_hi - self._src_lo
+        self._dlg = tk.Toplevel(parent)
+        self._dlg.title("Repoint bytes")
+        self._dlg.transient(parent)
+        self._dlg.grab_set()
+        f = ttk.Frame(self._dlg, padding=10)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            f,
+            text=(
+                f"Move {self._need} byte(s) from file 0x{self._src_lo:08X}–0x{self._src_hi - 1:08X} "
+                f"(GBA 0x{self._src_lo + GBA_ROM_BASE:08X} …).\n\n"
+                "All word-aligned ROM pointers (0x08…… / 0x09……) that target any address in this range "
+                "will be adjusted. Optionally, Thumb-2 BL instructions that branch into this range are re-encoded.\n\n"
+                "Pick a **destination file offset** (must be a run of 0xFF bytes of at least this length, "
+                "disjoint from the source range), or use Search FF gap."
+            ),
+            wraplength=460,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(f, text="Destination file offset:", font=("Consolas", 9)).grid(row=1, column=0, sticky="w")
+        self._off_var = tk.StringVar(value="")
+        ttk.Entry(f, textvariable=self._off_var, width=22, font=("Consolas", 9)).grid(
+            row=1, column=1, sticky="ew", pady=2
+        )
+        ttk.Label(f, text="FF gap search from / through:", font=("Consolas", 8), foreground="#666").grid(
+            row=2, column=0, sticky="nw", pady=(8, 0)
+        )
+        gap_f = ttk.Frame(f)
+        gap_f.grid(row=2, column=1, sticky="ew", pady=(8, 0))
+        self._from_var = tk.StringVar(value="")
+        self._to_var = tk.StringVar(value="")
+        ttk.Entry(gap_f, textvariable=self._from_var, width=14, font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Entry(gap_f, textvariable=self._to_var, width=14, font=("Consolas", 8)).pack(side=tk.LEFT)
+        ttk.Button(f, text="Search FF gap", command=self._on_search).grid(row=3, column=1, sticky="e", pady=(6, 0))
+        self._fill_old_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            f,
+            text="Fill original range with 0xFF after moving (reclaim as free space)",
+            variable=self._fill_old_var,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        self._include_bl_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            f,
+            text="Also repoint Thumb-2 BL instructions that branch into this range",
+            variable=self._include_bl_var,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        btnf = ttk.Frame(f)
+        btnf.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
+        f.columnconfigure(1, weight=1)
+        self._dlg.bind("<Return>", lambda e: self._on_ok())
+        self._dlg.bind("<Escape>", lambda e: self._on_cancel())
+        self._dlg.wait_window()
+
+    def _on_search(self) -> None:
+        data = self._hex.get_data()
+        if not data:
+            messagebox.showerror("Repoint bytes", "No ROM loaded.")
+            return
+        w_lo, w_hi_ex, w_err = parse_ff_gap_search_window_strings(
+            data, self._from_var.get(), self._to_var.get()
+        )
+        if w_err:
+            messagebox.showerror("Repoint bytes", w_err)
+            return
+        gap = find_disjoint_ff_gap_start(
+            data,
+            self._need,
+            self._src_lo,
+            self._src_hi,
+            window_lo=w_lo,
+            window_hi=w_hi_ex,
+        )
+        if gap is None:
+            messagebox.showerror(
+                "Repoint bytes",
+                f"No qualifying block of {self._need} consecutive 0xFF byte(s) found "
+                f"(disjoint from the source range). Adjust the search range or enter an offset manually.",
+            )
+            return
+        self._off_var.set(f"0x{gap:X}")
+
+    def _on_ok(self) -> None:
+        data = self._hex.get_data()
+        if not data:
+            self._dlg.destroy()
+            return
+        s = self._off_var.get().strip()
+        if not s:
+            messagebox.showwarning("Repoint bytes", "Enter a destination file offset, or use Search FF gap.")
+            return
+        try:
+            off = int(s, 0)
+        except ValueError:
+            messagebox.showwarning("Repoint bytes", "Invalid offset (use decimal or 0x hex).")
+            return
+        if GBA_ROM_BASE <= off <= GBA_ROM_MAX:
+            off -= GBA_ROM_BASE
+        if off < 0:
+            messagebox.showwarning("Repoint bytes", "Offset must be ≥ 0.")
+            return
+        if off + self._need > len(data):
+            messagebox.showerror(
+                "Repoint bytes",
+                f"Need {self._need} byte(s) at file offset 0x{off:X}, but ROM ends before that region.",
+            )
+            return
+        # Destination must be 0xFF run (and disjoint from source)
+        for i in range(self._need):
+            if off + i >= len(data) or data[off + i] != 0xFF:
+                messagebox.showerror(
+                    "Repoint bytes",
+                    f"Destination 0x{off:08X}–0x{off + self._need - 1:08X} must be entirely 0xFF "
+                    f"(free space). Use Search FF gap or pick another offset.",
+                )
+                return
+        if not (off + self._need <= self._src_lo or off >= self._src_hi):
+            messagebox.showerror("Repoint bytes", "Destination must not overlap the source range.")
+            return
+        fill_old = bool(self._fill_old_var.get())
+        include_bl = bool(self._include_bl_var.get())
+        self.result = (off, fill_old, include_bl)
         self._dlg.destroy()
 
     def _on_cancel(self) -> None:
@@ -7463,6 +7745,11 @@ class HexEditorFrame(ttk.Frame):
         self.graphics_table_row_var = tk.IntVar(value=0)
         self._script_pane_visible = False
         self._script_ui_saved: Optional[Dict[str, Any]] = None
+        # Optional: PCS/Struct/Graphics tools refresh after structure TOML is written on disk.
+        self._anchor_refresh_callback: Optional[Callable[[], None]] = None
+        # Hex pane: byte value before the current high-nibble edit (for MatchedWords delta propagation).
+        self._hex_pair_snapshot_byte: Optional[int] = None
+        self._suppress_matched_word_propagate: bool = False
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -7504,6 +7791,7 @@ class HexEditorFrame(ttk.Frame):
         self._goto_entry.bind("<FocusIn>", self._on_goto_focus_in)
         self._goto_entry.bind("<KeyPress>", self._on_goto_keypress, add=True)
         self._goto_entry.bind("<<Paste>>", self._on_goto_paste, add=True)
+        self._goto_entry.bind("<Escape>", self._on_goto_escape_to_hex)
         ttk.Label(top_row, text="Chars:", font=("Consolas", 9)).grid(row=0, column=7, sticky="w", padx=(8, 2))
         self._encoding_var = tk.StringVar(value=self._encoding.upper())
         self._encoding_combo = ttk.Combobox(
@@ -8036,6 +8324,11 @@ class HexEditorFrame(ttk.Frame):
         """Focus the Goto (offset) entry box. Bound to Ctrl+G."""
         self._goto_entry.focus_set()
         self._goto_entry.select_range(0, tk.END)
+        return "break"
+
+    def _on_goto_escape_to_hex(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Leave the Goto field and return keyboard focus to the hex pane."""
+        self._text.focus_set()
         return "break"
 
     def _init_syntax_highlight_tags(self) -> None:
@@ -9575,7 +9868,10 @@ class HexEditorFrame(ttk.Frame):
                     byte_val = ord(event.char) % 256
             else:
                 byte_val = ord(event.char) % 256
+            old_b = self._data[off]
             self._data[off] = byte_val
+            if not self._suppress_matched_word_propagate:
+                self._propagate_matched_word_byte_change(off, old_b, byte_val)
             self._modified = True
             self._ldr_pc_targets_valid = False
             self._schedule_xref_rebuild()
@@ -9667,6 +9963,7 @@ class HexEditorFrame(ttk.Frame):
         self._modified = True
         self._ldr_pc_targets_valid = False
         self._schedule_xref_rebuild()
+        self._hex_pair_snapshot_byte = None
         self._nibble_pos = 0
         self._cursor_byte_offset = min(pos + count, len(self._data) - 1) if self._data else 0
         self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
@@ -9693,6 +9990,7 @@ class HexEditorFrame(ttk.Frame):
         self._modified = True
         self._ldr_pc_targets_valid = False
         self._schedule_xref_rebuild()
+        self._hex_pair_snapshot_byte = None
         self._nibble_pos = 0
         self._cursor_byte_offset = min(pos + len(data), len(self._data) - 1)
         self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
@@ -9897,6 +10195,7 @@ class HexEditorFrame(ttk.Frame):
         self._cursor_byte_offset = offset
         self._selection_start = offset
         self._selection_end = offset + length - 1
+        self._hex_pair_snapshot_byte = None
         self._nibble_pos = 0
         self._ensure_cursor_visible()
         self._refresh_visible()
@@ -11408,6 +11707,7 @@ Format = "`f|u8`[u8 arg0]"
                 return False
             target[key] = new_label
         try:
+            _normalize_toml_address_fields_to_hex_strings(self._toml_data)
             with open(self._toml_path, "wb") as f:
                 tomli_w.dump(self._toml_data, f)
         except OSError as e:
@@ -11564,6 +11864,7 @@ Format = "`f|u8`[u8 arg0]"
         if new_format is not None:
             match["Format"] = new_format
         try:
+            _normalize_toml_address_fields_to_hex_strings(self._toml_data)
             with open(self._toml_path, "wb") as f:
                 tomli_w.dump(self._toml_data, f)
         except OSError as e:
@@ -11577,12 +11878,289 @@ Format = "`f|u8`[u8 arg0]"
             return False, _tomli_w_missing_message()
         if not self._toml_path or not os.path.isfile(self._toml_path):
             return False, "No TOML file path set."
+        _normalize_toml_address_fields_to_hex_strings(self._toml_data)
         try:
             with open(self._toml_path, "wb") as f:
                 tomli_w.dump(self._toml_data, f)
         except OSError as e:
             return False, str(e)
         return True, ""
+
+    def _propagate_matched_word_byte_change(self, off: int, old_b: int, new_b: int) -> None:
+        """When a byte inside a ``[[MatchedWords]]`` range changes, apply the same delta to the **same slot**
+        in **other** instances (other ``Address`` rows with that ``Name``).
+
+        Bytes at other indices within the edited row are left alone (e.g. length-2 words: editing byte 0 does
+        not change byte 1 in the same ROM span).
+        """
+        if self._suppress_matched_word_propagate:
+            return
+        if old_b == new_b:
+            return
+        if not self._data or off < 0 or off >= len(self._data):
+            return
+        rows = self._toml_data.get("MatchedWords")
+        if not isinstance(rows, list):
+            return
+        names: Set[str] = set()
+        idx_within: Optional[int] = None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            nm = str(row.get("Name", "")).strip()
+            if not nm:
+                continue
+            fo = _toml_address_value_to_file_offset(row.get("Address"))
+            if fo is None or fo < 0:
+                continue
+            try:
+                ln = int(row.get("Length", 1))
+            except (ValueError, TypeError):
+                ln = 1
+            if ln <= 0:
+                ln = 1
+            if fo <= off < fo + ln:
+                names.add(nm)
+                if idx_within is None:
+                    idx_within = off - fo
+        if not names or idx_within is None:
+            return
+        delta = new_b - old_b
+        self._suppress_matched_word_propagate = True
+        try:
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                nm = str(row.get("Name", "")).strip()
+                if nm not in names:
+                    continue
+                fo = _toml_address_value_to_file_offset(row.get("Address"))
+                if fo is None or fo < 0:
+                    continue
+                try:
+                    ln = int(row.get("Length", 1))
+                except (ValueError, TypeError):
+                    ln = 1
+                if ln <= 0:
+                    ln = 1
+                # Do not touch other bytes in the instance the user edited.
+                if fo <= off < fo + ln:
+                    continue
+                if idx_within >= ln:
+                    continue
+                o = fo + idx_within
+                if o < 0 or o >= len(self._data):
+                    continue
+                self._data[o] = (self._data[o] + delta) & 0xFF
+        finally:
+            self._suppress_matched_word_propagate = False
+
+    def open_matched_words_editor(self) -> None:
+        """Dialog to edit ``[[MatchedWords]]`` Address / Length / Offset; saves the structure TOML with hex addresses."""
+        rows_raw = self._toml_data.get("MatchedWords")
+        if not isinstance(rows_raw, list) or not rows_raw:
+            messagebox.showinfo("Matched words", "No [[MatchedWords]] section in the structure TOML.")
+            return
+        if not self._toml_path or not os.path.isfile(self._toml_path):
+            messagebox.showwarning(
+                "Matched words",
+                "No structure TOML file on disk — use Load structure TOML or open a ROM with a paired .toml first.",
+            )
+            return
+        parent = self.winfo_toplevel()
+        d = tk.Toplevel(parent)
+        d.title("Matched Words")
+        d.transient(parent)
+        d.minsize(520, 420)
+
+        outer = ttk.Frame(d, padding=8)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        tv = ttk.Treeview(
+            outer,
+            columns=("name", "address", "length", "offset"),
+            show="headings",
+            height=14,
+            selectmode="browse",
+        )
+        tv.heading("name", text="Name")
+        tv.heading("address", text="Address")
+        tv.heading("length", text="Length")
+        tv.heading("offset", text="Offset")
+        tv.column("name", width=220, stretch=True)
+        tv.column("address", width=100, stretch=False)
+        tv.column("length", width=56, stretch=False)
+        tv.column("offset", width=56, stretch=False)
+        sb = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        tv.grid(row=0, column=0, sticky="nsew")
+        sb.grid(row=0, column=1, sticky="ns")
+        outer.rowconfigure(0, weight=1)
+        outer.columnconfigure(0, weight=1)
+
+        def row_display_vals(r: Dict[str, Any]) -> Tuple[str, str, str, str]:
+            nm = str(r.get("Name", ""))
+            addr = r.get("Address", "")
+            ln = r.get("Length", 1)
+            off = r.get("Offset", "")
+            off_s = "" if off == "" or off is None else str(off)
+            return (nm, str(addr), str(ln), off_s)
+
+        for i, row in enumerate(rows_raw):
+            if not isinstance(row, dict):
+                continue
+            tv.insert("", tk.END, iid=str(i), values=row_display_vals(row))
+
+        edit_fr = ttk.LabelFrame(outer, text="Edit selected row", padding=6)
+        edit_fr.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Label(edit_fr, text="Address (hex or file offset):").grid(row=0, column=0, sticky="w")
+        addr_var = tk.StringVar(value="")
+        len_var = tk.StringVar(value="1")
+        off_var = tk.StringVar(value="")
+
+        addr_e = ttk.Entry(edit_fr, textvariable=addr_var, width=22)
+        addr_e.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        ttk.Label(edit_fr, text="Length:").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(edit_fr, textvariable=len_var, width=8).grid(row=1, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
+        ttk.Label(edit_fr, text="Offset (optional):").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(edit_fr, textvariable=off_var, width=8).grid(row=2, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
+        edit_fr.columnconfigure(1, weight=1)
+
+        name_lbl = ttk.Label(edit_fr, text="", wraplength=480)
+        name_lbl.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        def load_selection(*_a: Any) -> None:
+            sel = tv.selection()
+            if not sel:
+                return
+            i = int(sel[0])
+            row = rows_raw[i]
+            if not isinstance(row, dict):
+                return
+            addr_var.set(str(row.get("Address", "")))
+            len_var.set(str(row.get("Length", 1)))
+            o = row.get("Offset", "")
+            off_var.set("" if o == "" or o is None else str(o))
+            name_lbl.config(text=f"Name: {row.get('Name', '')}")
+
+        tv.bind("<<TreeviewSelect>>", load_selection)
+        kids = tv.get_children()
+        if kids:
+            tv.selection_set(kids[0])
+            tv.focus(kids[0])
+            load_selection()
+
+        def apply_row() -> None:
+            sel = tv.selection()
+            if not sel:
+                messagebox.showwarning("Matched words", "Select a row.", parent=d)
+                return
+            i = int(sel[0])
+            row = rows_raw[i]
+            if not isinstance(row, dict):
+                return
+            try:
+                s = addr_var.get().strip()
+                gba = int(s, 0)
+            except ValueError:
+                messagebox.showerror("Matched words", "Address must be a hex or decimal integer (e.g. 0x15B7CC8).", parent=d)
+                return
+            if gba < GBA_ROM_BASE:
+                gba += GBA_ROM_BASE
+            fo = gba - GBA_ROM_BASE
+            if fo < 0:
+                messagebox.showerror("Matched words", "Address resolves to a negative file offset.", parent=d)
+                return
+            try:
+                ln = int(len_var.get().strip(), 0)
+            except ValueError:
+                messagebox.showerror("Matched words", "Length must be an integer.", parent=d)
+                return
+            if ln < 1:
+                messagebox.showerror("Matched words", "Length must be at least 1.", parent=d)
+                return
+            off_txt = off_var.get().strip()
+            if off_txt == "":
+                row.pop("Offset", None)
+            else:
+                try:
+                    row["Offset"] = int(off_txt, 0)
+                except ValueError:
+                    messagebox.showerror("Matched words", "Offset must be an integer or empty.", parent=d)
+                    return
+            row["Address"] = _toml_named_anchor_address_hex_string(fo)
+            row["Length"] = ln
+            ok, err = self.persist_toml_data()
+            if not ok:
+                messagebox.showerror("Matched words", err, parent=d)
+                return
+            self._invoke_anchor_refresh_callback()
+            tv.item(str(i), values=row_display_vals(row))
+
+        btn_fr = ttk.Frame(outer)
+        btn_fr.grid(row=2, column=0, columnspan=2, pady=(8, 0))
+        ttk.Button(btn_fr, text="Apply", command=apply_row).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(btn_fr, text="Close", command=d.destroy).pack(side=tk.LEFT)
+
+        d.bind("<Escape>", lambda e: d.destroy())
+        d.grab_set()
+
+    def set_anchor_refresh_callback(self, cb: Optional[Callable[[], None]]) -> None:
+        """Register a callback (e.g. ``RomToolsShell.refresh_anchors``) after structure TOML changes on disk."""
+        self._anchor_refresh_callback = cb
+
+    def _invoke_anchor_refresh_callback(self) -> None:
+        if self._anchor_refresh_callback is None:
+            return
+        try:
+            self._anchor_refresh_callback()
+        except Exception:
+            pass
+
+    def shift_toml_named_anchors_for_repoint(self, src_lo: int, src_hi: int, delta: int) -> Tuple[int, str]:
+        """
+        After **Repoint bytes**, shift ``[[NamedAnchors]]`` and ``[[MatchedWords]]`` **Address** by ``delta``
+        when the row’s start file offset lies in ``[src_lo, src_hi)``.
+
+        Persists the TOML when at least one row is updated. Returns ``(rows_updated, error_message)``.
+        """
+        if delta == 0:
+            return 0, ""
+        _try_import_tomli_w()
+        if not _TOMLI_W_AVAILABLE or tomli_w is None:
+            return 0, _tomli_w_missing_message()
+        if not self._toml_path or not os.path.isfile(self._toml_path):
+            return 0, ""
+        n = 0
+        rom_len = len(self._data) if self._data else 0
+        for table_key in ("NamedAnchors", "MatchedWords"):
+            rows_raw = self._toml_data.get(table_key)
+            if not isinstance(rows_raw, list):
+                continue
+            for anchor in rows_raw:
+                if not isinstance(anchor, dict):
+                    continue
+                addr = anchor.get("Address")
+                if addr is None:
+                    continue
+                fo = _toml_address_value_to_file_offset(addr)
+                if fo is None:
+                    continue
+                if not (src_lo <= fo < src_hi):
+                    continue
+                new_fo = fo + delta
+                if new_fo < 0 or (rom_len and new_fo >= rom_len):
+                    continue
+                anchor["Address"] = _toml_named_anchor_address_hex_string(new_fo)
+                n += 1
+        if n == 0:
+            return 0, ""
+        ok, err = self.persist_toml_data()
+        if not ok:
+            return n, err
+        self._ldr_pc_targets_valid = False
+        self._invoke_anchor_refresh_callback()
+        return n, ""
 
     def reload_toml_from_disk(self) -> bool:
         """Re-read the structure TOML from disk into ``self._toml_data`` (normalizes deprecated keys)."""
@@ -13079,6 +13657,9 @@ Format = "`f|u8`[u8 arg0]"
     # ── Mouse interaction ────────────────────────────────────────────
 
     def _on_click(self, event: tk.Event) -> Optional[str]:
+        # Must take focus (same as ASCII pane); otherwise after Ctrl+G the Goto entry keeps focus and
+        # typed hex digits go there instead of into the hex buffer editor.
+        self._text.focus_set()
         idx = self._text.index(f"@{event.x},{event.y}")
         off = self._index_to_offset(idx)
         if off is not None:
@@ -13287,6 +13868,8 @@ Format = "`f|u8`[u8 arg0]"
                 label="Incoming references to this byte…",
                 command=lambda o=off: self._show_xref_dialog(o),
             )
+        if self._selection_start is not None and self._selection_end is not None and self._data:
+            menu.add_command(label="Repoint bytes…", command=self._on_repoint_bytes)
         menu.add_command(label="Select all", command=lambda: self._select_all())
         menu.add_command(label="Go to offset...", command=self._on_goto_offset)
         menu.add_separator()
@@ -13393,6 +13976,59 @@ Format = "`f|u8`[u8 arg0]"
             self._update_cursor_display()
             return True
         return False
+
+    def _on_repoint_bytes(self) -> None:
+        """Context menu: move selected bytes to free space and repoint references."""
+        if not self._data or self._selection_start is None or self._selection_end is None:
+            return
+        src_lo = min(self._selection_start, self._selection_end)
+        src_hi = max(self._selection_start, self._selection_end) + 1
+        if src_hi <= src_lo:
+            return
+        dlg = _RepointBytesDialog(self.winfo_toplevel(), self, src_lo, src_hi)
+        if dlg.result is None:
+            return
+        new_lo, fill_old, include_bl = dlg.result
+        n_w, n_bl, bl_errs = _repoint_rom_for_moved_byte_range(
+            self._data,
+            src_lo,
+            src_hi,
+            new_lo,
+            include_bl=include_bl,
+            fill_old=fill_old,
+        )
+        delta = new_lo - src_lo
+        n_toml, err_toml = self.shift_toml_named_anchors_for_repoint(src_lo, src_hi, delta)
+        self._modified = True
+        self._schedule_xref_rebuild()
+        self._cursor_byte_offset = new_lo
+        self._selection_start = new_lo
+        self._selection_end = new_lo + (src_hi - src_lo) - 1
+        self._visible_row_start = new_lo // BYTES_PER_ROW
+        self._refresh_visible()
+        self._update_scrollbar()
+        self._update_cursor_display()
+        msg = (
+            f"Moved {src_hi - src_lo} byte(s) to file 0x{new_lo:08X} (GBA 0x{new_lo + GBA_ROM_BASE:08X}).\n"
+            f"Updated {n_w} word-aligned pointer(s)"
+        )
+        if include_bl:
+            msg += f"; repointed {n_bl} Thumb BL instruction(s)."
+        else:
+            msg += "."
+        if n_toml:
+            msg += f"\n\nUpdated {n_toml} [[NamedAnchors]] Address row(s) in the structure TOML."
+        if err_toml:
+            msg += f"\n\nTOML: {err_toml}"
+        if bl_errs:
+            msg += "\n\nBL out of range (not patched):\n" + "\n".join(bl_errs[:20])
+            if len(bl_errs) > 20:
+                msg += f"\n… and {len(bl_errs) - 20} more."
+        parent = self.winfo_toplevel()
+        if bl_errs or err_toml:
+            messagebox.showwarning("Repoint bytes", msg, parent=parent)
+        else:
+            messagebox.showinfo("Repoint bytes", msg, parent=parent)
 
     def _invalidate_xref_index(self) -> None:
         self._xref_index_valid = False
@@ -13658,10 +14294,17 @@ Format = "`f|u8`[u8 arg0]"
                 self._schedule_xref_rebuild()
             b = self._data[self._cursor_byte_offset]
             if self._nibble_pos == 0:
+                self._hex_pair_snapshot_byte = b
                 self._data[self._cursor_byte_offset] = (b & 0x0F) | (digit << 4)
                 self._nibble_pos = 1
             else:
+                old_b = self._hex_pair_snapshot_byte if self._hex_pair_snapshot_byte is not None else b
+                cur_off = self._cursor_byte_offset
                 self._data[self._cursor_byte_offset] = (b & 0xF0) | digit
+                new_b = self._data[self._cursor_byte_offset]
+                self._hex_pair_snapshot_byte = None
+                if not self._suppress_matched_word_propagate:
+                    self._propagate_matched_word_byte_change(cur_off, old_b, new_b)
                 self._nibble_pos = 0
                 self._cursor_byte_offset = min(self._cursor_byte_offset + 1, len(self._data) - 1)
             self._modified = True
@@ -13691,6 +14334,7 @@ Format = "`f|u8`[u8 arg0]"
         self._modified = True
         self._ldr_pc_targets_valid = False
         self._schedule_xref_rebuild()
+        self._hex_pair_snapshot_byte = None
         self._nibble_pos = 0
         self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
         self._ensure_cursor_visible()
@@ -13710,6 +14354,7 @@ Format = "`f|u8`[u8 arg0]"
             self._modified = True
             self._ldr_pc_targets_valid = False
             self._schedule_xref_rebuild()
+            self._hex_pair_snapshot_byte = None
             self._nibble_pos = 0
             self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
             self._ensure_cursor_visible()
@@ -13725,6 +14370,7 @@ Format = "`f|u8`[u8 arg0]"
             return None
         self._selection_start = self._selection_end = None
         self._cursor_byte_offset = max(0, min(len(self._data) - 1, self._cursor_byte_offset + delta))
+        self._hex_pair_snapshot_byte = None
         self._nibble_pos = 0
         if self._ensure_cursor_visible():
             self._refresh_visible()
@@ -13754,6 +14400,7 @@ Format = "`f|u8`[u8 arg0]"
     def _on_insert_key(self, event: tk.Event) -> Optional[str]:
         self._insert_mode = not self._insert_mode
         self._mode_label.config(text="INSERT" if self._insert_mode else "REPLACE")
+        self._hex_pair_snapshot_byte = None
         self._nibble_pos = 0
         return "break"
 

@@ -45,6 +45,7 @@ class WCT06Editor:
         )
         file_menu.add_command(label="Save", command=self._on_save, state=tk.DISABLED)
         file_menu.add_command(label="Save As...", command=self._on_save_as, state=tk.DISABLED)
+        file_menu.add_command(label="Edit Matched Words…", command=self._on_edit_matched_words, state=tk.DISABLED)
         file_menu.add_separator()
         file_menu.add_command(label="Import Sprite...", command=self._on_file_import_sprite, state=tk.DISABLED)
         file_menu.add_command(
@@ -68,6 +69,9 @@ class WCT06Editor:
         self._main_paned.add(self._hex_editor)
 
         self._tools_shell = RomToolsShell(self.root, self._main_paned, self._hex_editor)
+        self._hex_editor.set_anchor_refresh_callback(
+            lambda: self._tools_shell.refresh_anchors() if self._tools_shell else None
+        )
 
         self._update_file_menu_state()
         self.root.bind("<Control-s>", lambda e: self._on_save())
@@ -85,6 +89,7 @@ class WCT06Editor:
         )
         for _imp in ("Import Sprite...", "Import Tilemap/Tileset...", "Import Palette..."):
             self._file_menu.entryconfig(_imp, state=state)
+        self._file_menu.entryconfig("Edit Matched Words…", state=state)
         if has_file and self._tools_shell:
             self._tools_shell.refresh_anchors()
 
@@ -142,6 +147,10 @@ class WCT06Editor:
     def _on_save_as(self) -> None:
         if self._hex_editor and self._hex_editor.save_file_as():
             self.root.title(f"Channeler Advance - Yu-Gi-Oh! WCT 2006 — {self._hex_editor.get_file_path()}")
+
+    def _on_edit_matched_words(self) -> None:
+        if self._hex_editor:
+            self._hex_editor.open_matched_words_editor()
 
     def _on_exit(self) -> None:
         if self._hex_editor and self._hex_editor.is_modified():
