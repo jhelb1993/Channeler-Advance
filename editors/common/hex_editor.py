@@ -961,12 +961,42 @@ def encode_ascii_slot(text: str, width: int) -> bytearray:
     return out[:width]
 
 
-def _normalize_offset_angle_open_bracket_before_ydk(t: str) -> str:
-    """Insert ``[`` after ``offset<`` when a `` `ydk` `` deck inner omits it.
+def _normalize_offset_padding_dual_ydeck_main_extra(t: str) -> str:
+    """Expand ``offset<padding:::: main: `ydk`…[card:L]/main extra: `ydk`…[card:L]/extra>`` into a parseable layout.
 
-    Valid nested-array form is ``offset<[`ydk`Anchor[card:List]…``; TOML often has ``offset<`ydk`…`` with no
+    Inserts ``offset<>`` (4-byte pointer column) and lays out padding, lengths, and YDK blobs under ``*offset``
+    (``padding@offset+0``, ``maindeck<*offset+10+…>``, etc.) so ROM reads follow the row pointer before fields.
+    The sugar form is not bracket-safe for :func:`_parse_struct_fields` (outer ``]`` matches too early).
+    On-disk TOML can keep the sugar spelling."""
+    pat = re.compile(
+        r"offset<padding::::\s*main:\s*`ydk`([\w.]+)\s*\[\s*card\s*:\s*([\w.]+)\s*\]\s*/main\s+"
+        r"extra:\s*`ydk`([\w.]+)\s*\[\s*card\s*:\s*([\w.]+)\s*\]\s*/extra\s*>\s*(?:padding:)?\s*",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    def repl(m: Any) -> str:
+        a1, l1, a2, l2 = m.group(1), m.group(2), m.group(3), m.group(4)
+        return (
+            f"offset<> padding@offset+0:::: main@offset+8: "
+            f"maindeck<[`ydk`{a1}[card:{l1}]]/main>*offset+10 "
+            f"extra@offset+10+main: extradeck<[`ydk`{a2}[card:{l2}]]/extra>*offset+10+main+2 "
+            f"tail@offset+10+main+2+extra:"
+        )
+
+    return pat.sub(repl, str(t or ""))
+
+
+def _normalize_offset_angle_open_bracket_before_ydk(t: str) -> str:
+    """Insert ``[`` after ``word<`` when a `` `ydk` `` deck inner omits it (``offset<``, ``maindeck<``, etc.).
+
+    Valid nested-array form is ``name<[`ydk`Anchor[card:List]…``; TOML often has ``offset<`ydk`…`` with no
     ``[`` between ``<`` and the backticks, which breaks bracket matching for the outer struct."""
-    return re.sub(r"offset<(?!\[)\s*(`ydk`)", r"offset<[\1", str(t or ""), flags=re.IGNORECASE)
+    return re.sub(
+        r"(\w+)<(?!\[)\s*(`ydk`)",
+        r"\1<[\2",
+        str(t or ""),
+        flags=re.IGNORECASE,
+    )
 
 
 def _normalize_offset_inner_card_before_count_slash(t: str) -> str:
@@ -1035,6 +1065,7 @@ def _normalize_shorthand_bracket_terminator_format(s: str) -> str:
     if t.startswith("^"):
         prefix = "^"
         t = t[1:].strip()
+    t = _normalize_offset_padding_dual_ydeck_main_extra(t)
     t = _normalize_offset_angle_open_bracket_before_ydk(t)
     t = _normalize_offset_inner_card_before_count_slash(t)
     t = _normalize_nested_array_slash_count_bracket_order(t)
@@ -4957,16 +4988,27 @@ def _ydk_build_deck_blob(
     saw_extra_section: bool,
     term: bytes,
 ) -> bytes:
-    """Little-endian ``u16`` card indices, optional ``u16`` extra count, then ``term`` (e.g. ``0000``)."""
+    """Little-endian ``u16`` main indices, then ``u16`` extra indices, then ``term`` (no ``u16`` count between decks)."""
+    _ = saw_extra_section
     parts: List[bytes] = []
     for x in main_idx:
         parts.append(int(x).to_bytes(2, "little"))
-    if saw_extra_section:
-        parts.append(int(len(extra_idx)).to_bytes(2, "little"))
     for x in extra_idx:
         parts.append(int(x).to_bytes(2, "little"))
     parts.append(bytes(term))
     return b"".join(parts)
+
+
+def _ydk_card_indices_for_nested_count_field(
+    count_field: str, main_idx: List[int], extra_idx: List[int]
+) -> List[int]:
+    """``/main`` / ``/extra`` on ``offset<[`ydk`…]/…>`` map to ``#main`` / ``#extra``; any other count field uses both sections (main then extra)."""
+    cf = str(count_field or "").lower()
+    if cf == "extra":
+        return list(extra_idx)
+    if cf == "main":
+        return list(main_idx)
+    return list(main_idx) + list(extra_idx)
 
 
 def _normalize_offset_padding_count_card_run(inner: str) -> str:
@@ -5067,11 +5109,74 @@ def _parse_nested_array_inner_body_fields(inner_body: str) -> Optional[List[Dict
 
 
 def _struct_field_omitted_from_editor_tree(fd: Optional[Dict[str, Any]]) -> bool:
-    """True for layout-only names ``padding`` / ``unused``: bytes still define struct layout; tree omits the row."""
+    """True for layout-only names ``padding`` / ``unused`` / ``tail``: bytes still define struct layout; tree omits the row."""
     if not fd:
         return False
     nm = str(fd.get("name", "")).lower()
-    return nm in ("padding", "unused")
+    return nm in ("padding", "unused", "tail")
+
+
+def _resolve_ptr_chain_accumulator(
+    entry_base: int,
+    fields: List[Dict[str, Any]],
+    data: bytes,
+    chain_segments: List[str],
+) -> Optional[int]:
+    """Sum ``+10+main+2``-style segments after following a GBA pointer: digits add constants; words add uint values.
+
+    If ``seg`` names a ``nested_array`` count field and that nested blob is *not* ``*bytes``-length, the uint is
+    treated as an **element** count and contributes ``value * inner_stride`` bytes (so main/extra can store card
+    counts while ``+main`` / ``+extra`` still skip the correct number of bytes).
+    """
+    acc = 0
+    for seg in chain_segments:
+        if seg.isdigit():
+            acc += int(seg)
+            continue
+        cf = next((x for x in fields if str(x.get("name")) == seg), None)
+        if not cf or cf.get("type") != "uint":
+            return None
+        roff = _struct_field_payload_file_off(entry_base, cf, fields, data)
+        if roff is None:
+            return None
+        rsz = int(cf["size"])
+        if roff + rsz > len(data):
+            return None
+        raw = int.from_bytes(data[roff : roff + rsz], "little")
+        na_for = next(
+            (
+                fd
+                for fd in fields
+                if fd.get("type") == "nested_array"
+                and str(fd.get("count_field") or "") == seg
+            ),
+            None,
+        )
+        if na_for is not None and na_for.get("count_is_byte_length"):
+            acc += raw
+        elif na_for is not None:
+            st = int(na_for.get("inner_stride") or 0)
+            acc += raw * st if st > 0 else raw
+        else:
+            acc += raw
+    return acc
+
+
+def _nested_alloc_plus_base_ptr_chain(
+    fo: int,
+    entry_base: int,
+    na_fd: Dict[str, Any],
+    fields: List[Dict[str, Any]],
+    data: bytes,
+) -> Optional[int]:
+    """``fo`` = file offset of allocation start; add ``base_ptr_chain`` or legacy ``base_ptr_delta``."""
+    ch = na_fd.get("base_ptr_chain")
+    if ch is not None and len(ch) > 0:
+        acc = _resolve_ptr_chain_accumulator(entry_base, fields, data, ch)
+        if acc is None:
+            return None
+        return fo + acc
+    return fo + int(na_fd.get("base_ptr_delta") or 0)
 
 
 def _struct_field_payload_file_off(
@@ -5092,10 +5197,16 @@ def _struct_field_payload_file_off(
         ptr = int.from_bytes(data[poff : poff + 4], "little")
         if (ptr >> 24) not in (0x08, 0x09):
             return None
-        fo = ptr - GBA_ROM_BASE + int(fd.get("at_ptr_delta") or 0)
+        fo = ptr - GBA_ROM_BASE
         if fo < 0:
             return None
-        return fo
+        ch = fd.get("at_ptr_chain")
+        if ch is not None and len(ch) > 0:
+            acc = _resolve_ptr_chain_accumulator(entry_base, fields, data, ch)
+            if acc is None:
+                return None
+            return fo + acc
+        return fo + int(fd.get("at_ptr_delta") or 0)
     return entry_base + int(fd["offset"])
 
 
@@ -5114,6 +5225,45 @@ def _validate_at_ptr_payload_fields(fields: List[Dict[str, Any]]) -> bool:
         i_p = idx_by_name.get(str(pfn))
         if i_fd is None or i_p is None or i_fd <= i_p:
             return False
+        chain = fd.get("at_ptr_chain")
+        if chain:
+            for seg in chain:
+                if seg.isdigit():
+                    continue
+                i_seg = idx_by_name.get(seg)
+                if i_seg is None:
+                    return False
+                if i_seg >= i_fd:
+                    return False
+    return True
+
+
+def _validate_base_ptr_chain_fields(fields: List[Dict[str, Any]]) -> bool:
+    """``*ptr+10+main`` on nested arrays: pointer field and any ``+name`` segment must precede the nested field."""
+    idx_by_name = {str(f.get("name")): i for i, f in enumerate(fields) if f.get("name")}
+    for fd in fields:
+        if fd.get("type") != "nested_array":
+            continue
+        chain = fd.get("base_ptr_chain")
+        if not chain:
+            continue
+        ni = idx_by_name.get(str(fd.get("name", "")))
+        if ni is None:
+            return False
+        bpf = fd.get("base_ptr_field")
+        if not bpf:
+            continue
+        i_p = idx_by_name.get(str(bpf))
+        if i_p is None or ni <= i_p:
+            return False
+        for seg in chain:
+            if seg.isdigit():
+                continue
+            i_seg = idx_by_name.get(seg)
+            if i_seg is None:
+                return False
+            if i_seg >= ni:
+                return False
     return True
 
 
@@ -5197,6 +5347,8 @@ def _parse_struct_fields(
     if not _validate_nested_array_fields(fields):
         return None
     if not _validate_at_ptr_payload_fields(fields):
+        return None
+    if not _validate_base_ptr_chain_fields(fields):
         return None
     _assign_struct_field_offsets(fields)
     return fields
@@ -5284,8 +5436,31 @@ def _validate_nested_array_fields(fields: List[Dict[str, Any]]) -> bool:
         ci = names.index(cf_name)
         ni = names.index(str(fd["name"]))
         if ci < ni:
-            if i != len(fields) - 1:
+            # ``[main: maindeck<…/main> …]`` — count immediately before its nested field.
+            if ni != ci + 1:
                 return False
+            if ni < len(fields) - 1:
+                j = ni + 1
+                while j < len(fields):
+                    fj = fields[j]
+                    if fj.get("type") == "helper":
+                        j += 1
+                        continue
+                    if fj.get("type") == "uint":
+                        if j + 1 < len(fields) and fields[j + 1].get("type") == "nested_array":
+                            nxt = fields[j + 1]
+                            if str(nxt.get("count_field") or "") != str(fj.get("name") or ""):
+                                return False
+                            j += 2
+                            continue
+                        for k in range(j, len(fields)):
+                            fk = fields[k]
+                            if fk.get("type") == "helper":
+                                continue
+                            if fk.get("type") not in ("uint", "pcs", "ascii"):
+                                return False
+                        break
+                    return False
         elif ni < ci:
             # Nested field before count: count uint is usually last (``[options<…/c> c::]``). Allow
             # trailing fixed slots (e.g. ``padding:.``) after the count when they are plain uint/PCS/ASCII.
@@ -5562,6 +5737,8 @@ def _nested_array_max_span_bytes(fd: Dict[str, Any], fields: List[Dict[str, Any]
         return 0
     w = int(cf["size"])
     mx = min((1 << (8 * w)) - 1, 65535)
+    if fd.get("count_is_byte_length"):
+        return int(mx)
     return int(fd["inner_stride"]) * mx
 
 
@@ -5624,7 +5801,7 @@ def _nested_array_data_base_file(
     fo = ptr - GBA_ROM_BASE
     if fo < 0 or fo >= len(data):
         return None
-    return fo + int(na_fd.get("base_ptr_delta") or 0)
+    return _nested_alloc_plus_base_ptr_chain(fo, entry_base, na_fd, fields, data)
 
 
 def _ptr_word_off_and_alloc_start(
@@ -5676,7 +5853,9 @@ def _ptr_word_off_and_alloc_start(
     fo = ptr - GBA_ROM_BASE
     if fo < 0 or fo >= len(data):
         return None
-    na_base = fo + int(na_fd.get("base_ptr_delta") or 0)
+    na_base = _nested_alloc_plus_base_ptr_chain(fo, entry_base, na_fd, fields, data)
+    if na_base is None:
+        return None
     return poff, fo, na_base
 
 
@@ -5691,8 +5870,9 @@ def _struct_per_row_terminator_nested_field(fields: List[Dict[str, Any]]) -> Opt
     return None
 
 
-def _struct_ydk_pointer_count_nested_field(fields: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """``offset<[`ydk`…]/length>``-style: count-driven nested array at a pointer, u16 ``card`` slots, no ``!`` terminator."""
+def _struct_ydk_pointer_count_nested_fields(fields: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """All ``[`ydk`…]/countField>`` pointer+length nested arrays (u16 ``card`` rows, no ``!`` terminator)."""
+    out: List[Dict[str, Any]] = []
     for fd in fields:
         if fd.get("type") != "nested_array":
             continue
@@ -5710,8 +5890,14 @@ def _struct_ydk_pointer_count_nested_field(fields: List[Dict[str, Any]]) -> Opti
             continue
         if int(fd.get("inner_stride") or 0) != 2:
             continue
-        return fd
-    return None
+        out.append(fd)
+    return out
+
+
+def _struct_ydk_pointer_count_nested_field(fields: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """First :func:`_struct_ydk_pointer_count_nested_fields` entry, or ``None``."""
+    xs = _struct_ydk_pointer_count_nested_fields(fields)
+    return xs[0] if xs else None
 
 
 def _struct_supports_terminator_table_slots(info: Dict[str, Any]) -> bool:
@@ -5796,16 +5982,17 @@ def _try_parse_nested_array_token(token: str) -> Optional[Dict[str, Any]]:
     """Parse ``name<[inner]/countField>``, ``name<[inner]!HEX>`` (terminator bytes), or ``…*ptr`` / ``…*ptr+N``."""
     raw = token.strip()
     base_ptr_field: Optional[str] = None
-    base_ptr_delta: int = 0
+    base_ptr_chain: List[str] = []
     if "*" in raw:
         head, tail = raw.rsplit("*", 1)
         h, t = head.strip(), tail.strip()
-        m_tail = re.match(r"^(\w+)(\+(\d+))?$", t)
+        m_tail = re.match(r"^(\w+)((?:\+\d+|\+\w+)+)?$", t)
         # ``…!0000>inline`` ends with ``inline``, not ``>`` — same rule as below.
         if m_tail and (h.endswith(">") or re.search(r">\s*inline\s*$", h)):
             raw = h
             base_ptr_field = m_tail.group(1)
-            base_ptr_delta = int(m_tail.group(3)) if m_tail.group(3) else 0
+            rest = m_tail.group(2) or ""
+            base_ptr_chain = re.findall(r"\+(\d+|\w+)", rest)
     if "<[" not in raw:
         return None
     rs = raw.rstrip()
@@ -5835,6 +6022,7 @@ def _try_parse_nested_array_token(token: str) -> Optional[Dict[str, Any]]:
     # ``/countField>`` — length from a uint field; ``!HEX>`` — run until this byte pattern (even hex = bytes).
     m_term = re.match(r"^!([0-9a-fA-F]+)>\s*(inline)?\s*$", rest)
     count_field: Optional[str] = None
+    count_is_byte_length = False
     terminator: Optional[bytes] = None
     terminator_inline_packed = False
     if m_term:
@@ -5849,10 +6037,11 @@ def _try_parse_nested_array_token(token: str) -> Optional[Dict[str, Any]]:
             return None
         terminator_inline_packed = bool(m_term.group(2))
     else:
-        m2 = re.match(r"^/(\w+)>\s*$", rest)
+        m2 = re.match(r"^/(\w+)(\*bytes)?>\s*$", rest)
         if not m2:
             return None
         count_field = m2.group(1)
+        count_is_byte_length = bool(m2.group(2))
     inner_bracketed = raw[start_bracket : close_bracket + 1]
     inner_s = inner_bracketed.strip()
     if not inner_s.startswith("[") or not inner_s.endswith("]"):
@@ -5875,14 +6064,14 @@ def _try_parse_nested_array_token(token: str) -> Optional[Dict[str, Any]]:
         "inner_fields": inner_fields,
         "inner_stride": inner_stride,
         "count_field": count_field,
-        "base_ptr_delta": 0,
+        "count_is_byte_length": bool(count_field) and count_is_byte_length,
     }
     if terminator is not None:
         out["terminator"] = terminator
         out["terminator_inline_packed"] = terminator_inline_packed
     if base_ptr_field:
         out["base_ptr_field"] = base_ptr_field
-        out["base_ptr_delta"] = base_ptr_delta
+        out["base_ptr_chain"] = base_ptr_chain
     return out
 
 
@@ -5915,16 +6104,20 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
     if "|s=" in token:
         token = token.split("|s=")[0]
     token, hex_hint, signed_hint = _strip_struct_field_modifiers(token)
-    m_at = re.match(r"^(\w+)@(\w+)\+(\d+)([.:]+)([\w.]*)([+-]\d+)?$", token.strip())
+    m_at = re.match(
+        r"^(\w+)@(\w+)((?:\+\d+|\+\w+)+)([.:]+)([\w.]*)([+-]\d+)?$",
+        token.strip(),
+    )
     if m_at:
         name = m_at.group(1)
         pfn = m_at.group(2)
-        delta = int(m_at.group(3))
+        chain_raw = m_at.group(3)
         size_chars = m_at.group(4)
         base = (m_at.group(5) or "").strip()
         tail = m_at.group(6) or ""
         enum_ref = (base + tail).strip() if base else None
         size = sum(1 if c == "." else 2 for c in size_chars)
+        chain_segments = re.findall(r"\+(\d+|\w+)", chain_raw)
         return {
             "name": name,
             "size": size,
@@ -5933,7 +6126,7 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
             "hex": hex_hint,
             "signed": signed_hint,
             "at_ptr_field": pfn,
-            "at_ptr_delta": delta,
+            "at_ptr_chain": chain_segments,
         }
     m_blist = re.match(r"^(\w+)\|b\[\]([\w.]+)$", token.strip())
     if m_blist:
@@ -8198,7 +8391,18 @@ class StructEditorFrame(ttk.Frame):
                     if inner >= 0 and st > 0:
                         return inner // st
             return _count_nested_elements_until_terminator(raw, na_base, st, tb)
-        return self._read_nested_array_count(entry_base, na_fd)
+        n = self._read_nested_array_count(entry_base, na_fd)
+        if na_fd.get("count_is_byte_length"):
+            st = int(na_fd["inner_stride"])
+            if st > 0:
+                n = n // st
+        data = self._hex.get_data()
+        if data and na_base is not None:
+            stride = int(na_fd["inner_stride"])
+            if stride > 0:
+                span = max(0, len(data) - int(na_base))
+                n = min(n, int(span // stride))
+        return max(0, n)
 
     def _struct_field_file_off(self, entry_base: int, fd: Dict[str, Any]) -> Optional[int]:
         """Row layout or ``@ptr+N`` payload under ``*ptr`` (``offset`` column)."""
@@ -8264,7 +8468,7 @@ class StructEditorFrame(ttk.Frame):
         fo = ptr - GBA_ROM_BASE
         if fo < 0 or fo >= len(data):
             return None
-        return fo + int(na_fd.get("base_ptr_delta") or 0)
+        return _nested_alloc_plus_base_ptr_chain(fo, entry_base, na_fd, self._fields, data)
 
     def _nested_element_file_off(
         self, entry_base: int, na_fd: Dict[str, Any], ai: int, ij: int
@@ -14505,8 +14709,10 @@ Format = "`f|u8`[u8 arg0]"
         path: str,
         se: Any,
         entry_idx: int,
+        count_field_name: str = "",
+        show_done_message: bool = True,
     ) -> None:
-        """Write a main-deck-only u16 blob at ``*ptr`` for ``offset<[`ydk`…]/length>`` layouts; update ``length``."""
+        """Write u16 card indices at ``*ptr`` for ``offset<[`ydk`…]/countField>`` layouts; update ``length``."""
         struct_name = str(info.get("name", "")).strip()
         base_off = int(info["base_off"])
         entry_base = base_off + entry_idx * int(info["struct_size"])
@@ -14523,7 +14729,9 @@ Format = "`f|u8`[u8 arg0]"
             messagebox.showerror("Import YDK", "Could not resolve the deck pointer for this row.")
             return
         cur_len = int(se._read_nested_array_count(entry_base, na_fd))
-        old_span = max(0, cur_len * stride)
+        byte_len = bool(na_fd.get("count_is_byte_length"))
+        # ``*bytes`` count fields hold byte length; otherwise the uint is card/element count (stride × count = bytes).
+        old_span = max(0, cur_len if byte_len else cur_len * stride)
         reloc = _ptr_word_off_and_alloc_start(entry_base, na_fd, fields, data)
         if reloc is None:
             messagebox.showerror(
@@ -14535,10 +14743,16 @@ Format = "`f|u8`[u8 arg0]"
         if na_chk != na_base:
             messagebox.showerror("Import YDK", "Internal: nested base mismatch.")
             return
-        old_hi = alloc_lo + old_span
+        # Card u16 data starts at ``na_base`` (e.g. *offset+10); ``alloc_lo`` is the pointer target (allocation head).
+        data_lo = int(na_base)
+        old_hi = data_lo + old_span
         need_bytes = len(new_blob)
         mx = min((1 << (8 * rsz)) - 1, 65535)
-        length_val = max(0, min(int(new_len), mx))
+        if byte_len:
+            length_val = max(0, min(need_bytes, mx))
+        else:
+            # Length uint stores card/element count (not byte length ×2).
+            length_val = max(0, min(int(new_len), mx))
 
         def _write_length_field() -> bool:
             roff = se._struct_field_file_off(entry_base, cf)
@@ -14554,37 +14768,70 @@ Format = "`f|u8`[u8 arg0]"
                 se._load_entry(entry_idx)
             except (tk.TclError, AttributeError):
                 pass
+            if not show_done_message:
+                return
+            cf_l = str(count_field_name or "").lower()
+            if cf_l == "main":
+                src = "YDK #main"
+            elif cf_l == "extra":
+                src = "YDK #extra"
+            else:
+                src = "main deck (default)"
             messagebox.showinfo(
                 "Import YDK",
                 f"Imported {path}\nStruct {struct_name!r}, row {entry_idx}: "
-                f"{new_len} main card index(es) (pointer+length layout; extra deck not stored).",
+                f"{new_len} card index(es) from {src}; pointer+length layout.",
             )
 
         if need_bytes <= 0:
             messagebox.showerror("Import YDK", "Nothing to import.")
             return
-        lim = len(self._data)
-        tail_room = max(0, lim - alloc_lo)
         if old_span > 0 and need_bytes <= old_span:
             pad = b"\xFF" * (old_span - need_bytes)
-            self.write_bytes_at_extend(alloc_lo, new_blob + pad)
+            self.write_bytes_at_extend(data_lo, new_blob + pad)
             if not _write_length_field():
                 return
             _done_ok()
             return
-        if need_bytes <= tail_room:
-            self.write_bytes_at_extend(alloc_lo, new_blob)
+        # Growing past the previous span: only safe in-place if the extra bytes are 0xFF padding (or EOF).
+        # Do not use (ROM size - data_lo): that wrongly treats everything to EOF as free and clobbers data.
+        grow = need_bytes - old_span
+        ok_pad, err_pad = self._dest_accepts_table_write(old_hi, grow)
+        if ok_pad:
+            self.write_bytes_at_extend(data_lo, new_blob)
             if not _write_length_field():
                 return
             _done_ok()
             return
+        if not messagebox.askyesno(
+            "Import YDK — not enough free space",
+            f"The deck needs {need_bytes} bytes ({grow} more than the previous {old_span} bytes).\n"
+            f"Growing in place would overwrite non-padding data:\n{err_pad}\n\n"
+            "Repoint the allocation pointer to a new free area? This opens the repoint dialog.\n\n"
+            "Yes — continue.\n"
+            "No — cancel import.",
+        ):
+            return
+        hdr_len = data_lo - int(alloc_lo)
+        if hdr_len < 0:
+            messagebox.showerror("Import YDK", "Internal: card data offset precedes allocation start.")
+            return
+        if hdr_len > 0:
+            if int(alloc_lo) + hdr_len > len(self._data):
+                messagebox.showerror("Import YDK", "Could not read bytes before the card run (truncated ROM?).")
+                return
+            hdr = bytes(self._data[alloc_lo : alloc_lo + hdr_len])
+            repoint_blob = hdr + new_blob
+        else:
+            repoint_blob = new_blob
+        need_repoint = len(repoint_blob)
         ptr_label = str(na_fd.get("name") or "pointer")
         desc = f"Struct {struct_name!r}, row index {entry_idx} (pointer+length deck)."
         excl_hi = old_hi if old_hi > alloc_lo else alloc_lo + 1
         dlg = _PointedBlobRepointDialog(
             parent,
             self,
-            need_bytes,
+            need_repoint,
             alloc_lo,
             excl_hi,
             alloc_lo,
@@ -14594,13 +14841,170 @@ Format = "`f|u8`[u8 arg0]"
         if dlg.result is None:
             return
         new_off, fill_old = dlg.result
-        ok_r, err_r = self._repoint_pointed_allocation(alloc_lo, old_hi if old_hi > alloc_lo else alloc_lo, new_blob, new_off, fill_old)
+        ok_r, err_r = self._repoint_pointed_allocation(
+            alloc_lo, old_hi if old_hi > alloc_lo else alloc_lo, repoint_blob, new_off, fill_old
+        )
         if not ok_r:
             messagebox.showerror("Import YDK", err_r or "Repoint failed.")
             return
         if not _write_length_field():
             return
         _done_ok()
+
+    def _file_import_ydk_pointer_count_dual_offset_decks(
+        self,
+        *,
+        parent: tk.Misc,
+        info: Dict[str, Any],
+        fields: List[Dict[str, Any]],
+        na_main: Dict[str, Any],
+        na_extra: Dict[str, Any],
+        main_idx: List[int],
+        extra_idx: List[int],
+        path: str,
+        se: Any,
+        entry_idx: int,
+    ) -> None:
+        """Write padding + main count/cards + extra count/cards + tail in one allocation (``offset<>`` dual YDK decks).
+
+        If main+extra card totals increase vs. ROM, the user is prompted to repoint before writing. Repoint is
+        also used when the new blob does not fit in the ROM tail after the allocation pointer.
+        """
+        struct_name = str(info.get("name", "")).strip()
+        base_off = int(info["base_off"])
+        entry_base = base_off + entry_idx * int(info["struct_size"])
+        stride = 2
+        nm = len(main_idx)
+        ne = len(extra_idx)
+        main_blob = b"".join(int(x).to_bytes(2, "little") for x in main_idx)
+        extra_blob = b"".join(int(x).to_bytes(2, "little") for x in extra_idx)
+        data = bytes(self._data)
+        om_old = int(se._read_nested_array_count(entry_base, na_main))
+        oe_old = int(se._read_nested_array_count(entry_base, na_extra))
+        main_na = _nested_array_data_base_file(entry_base, na_main, fields, data)
+        extra_na = _nested_array_data_base_file(entry_base, na_extra, fields, data)
+        if main_na is None or extra_na is None:
+            messagebox.showerror("Import YDK", "Could not resolve main/extra deck pointers for this row.")
+            return
+        reloc = _ptr_word_off_and_alloc_start(entry_base, na_main, fields, data)
+        if reloc is None:
+            messagebox.showerror(
+                "Import YDK",
+                "This dual-deck layout is not relocatable (expected a GBA pointer field).",
+            )
+            return
+        _poff, alloc_lo, na_chk = reloc
+        if na_chk != main_na:
+            messagebox.showerror("Import YDK", "Internal: main nested base mismatch.")
+            return
+        alloc_lo = int(alloc_lo)
+        tail_fd = next((f for f in fields if str(f.get("name", "")).lower() == "tail"), None)
+        tail_old_off: Optional[int] = None
+        if tail_fd and tail_fd.get("type") == "uint":
+            tail_old_off = _struct_field_payload_file_off(entry_base, tail_fd, fields, data)
+        old_alloc_hi: int
+        if tail_old_off is not None and tail_fd is not None:
+            old_alloc_hi = int(tail_old_off) + int(tail_fd["size"])
+        else:
+            old_alloc_hi = int(extra_na) + max(0, oe_old) * stride
+        old_span_alloc = max(0, old_alloc_hi - alloc_lo)
+        pad8 = data[alloc_lo : alloc_lo + 8]
+        if len(pad8) < 8:
+            pad8 = pad8 + b"\x00" * (8 - len(pad8))
+        else:
+            pad8 = pad8[:8]
+        out = bytearray()
+        out.extend(pad8)
+        out.extend(int(nm).to_bytes(2, "little"))
+        out.extend(main_blob)
+        out.extend(int(ne).to_bytes(2, "little"))
+        out.extend(extra_blob)
+        if tail_fd and tail_fd.get("type") == "uint" and tail_old_off is not None:
+            tsz = int(tail_fd["size"])
+            if int(tail_old_off) + tsz <= len(data):
+                out.extend(data[int(tail_old_off) : int(tail_old_off) + tsz])
+        need = len(out)
+        combined_grows = (nm + ne) > (om_old + oe_old)
+
+        def _done_dual() -> None:
+            self._invoke_anchor_refresh_callback()
+            try:
+                se._load_entry(entry_idx)
+            except (tk.TclError, AttributeError):
+                pass
+            messagebox.showinfo(
+                "Import YDK",
+                f"Imported {path}\nStruct {struct_name!r}, row {entry_idx}: "
+                f"{nm} main + {ne} extra card index(es); pointer+length dual deck.",
+            )
+
+        if need <= 0:
+            messagebox.showerror("Import YDK", "Nothing to import.")
+            return
+
+        def _repoint_dialog_and_write(*, after_growth_prompt: bool, repoint_reason: str = "") -> None:
+            ptr_label = "offset"
+            if after_growth_prompt:
+                desc = (
+                    f"Struct {struct_name!r}, row index {entry_idx}: "
+                    f"place the larger deck ({need} bytes) at a new free offset and repoint `offset`."
+                )
+            else:
+                extra = f"\n{repoint_reason}" if repoint_reason else ""
+                desc = (
+                    f"Struct {struct_name!r}, row index {entry_idx}: "
+                    f"dual deck needs {need} bytes ({need - old_span_alloc} more than the previous {old_span_alloc} bytes). "
+                    f"Not enough 0xFF padding after the current allocation.{extra}\n"
+                    "Pick a new free offset and repoint `offset`."
+                )
+            excl_hi = old_alloc_hi if old_alloc_hi > alloc_lo else alloc_lo + 1
+            dlg = _PointedBlobRepointDialog(
+                parent,
+                self,
+                need,
+                alloc_lo,
+                excl_hi,
+                alloc_lo,
+                ptr_label,
+                desc,
+            )
+            if dlg.result is None:
+                return
+            new_off, fill_old = dlg.result
+            ok_r, err_r = self._repoint_pointed_allocation(
+                alloc_lo, old_alloc_hi if old_alloc_hi > alloc_lo else alloc_lo, bytes(out), new_off, fill_old
+            )
+            if not ok_r:
+                messagebox.showerror("Import YDK", err_r or "Repoint failed.")
+                return
+            _done_dual()
+
+        if combined_grows:
+            if not messagebox.askyesno(
+                "Import YDK — deck grew",
+                f"Main+extra card total increased from {om_old + oe_old} to {nm + ne} "
+                f"(was {om_old}+{oe_old}, now {nm}+{ne}).\n\n"
+                "Repoint the deck pointer to a new free ROM allocation? "
+                "(Recommended when the deck grows.)\n\n"
+                "Yes — open the repoint dialog.\n"
+                "No — cancel this import.",
+            ):
+                return
+            _repoint_dialog_and_write(after_growth_prompt=True)
+            return
+
+        if old_span_alloc > 0 and need <= old_span_alloc:
+            pad_ff = b"\xFF" * (old_span_alloc - need)
+            self.write_bytes_at_extend(alloc_lo, bytes(out) + pad_ff)
+            _done_dual()
+            return
+        grow = need - old_span_alloc
+        ok_pad, err_pad = self._dest_accepts_table_write(old_alloc_hi, grow)
+        if ok_pad:
+            self.write_bytes_at_extend(alloc_lo, bytes(out))
+            _done_dual()
+            return
+        _repoint_dialog_and_write(after_growth_prompt=False, repoint_reason=err_pad)
 
     def _file_import_ydk_flat_card_table(
         self,
@@ -14610,13 +15014,15 @@ Format = "`f|u8`[u8 arg0]"
         card_fd: Dict[str, Any],
         main_idx: List[int],
         extra_idx: List[int],
-        saw_extra: bool,
         se: Any,
         path: str,
         fmt_src: str,
         entry_idx: int,
     ) -> None:
-        """Import passwords into a ``[card:List]N`` table (normalized `` `ydk`…[card:List]N`` shorthand)."""
+        """Import passwords into a ``[card:List]N`` table (normalized `` `ydk`…[card:List]N`` shorthand).
+
+        ``#main`` then ``#extra`` YDK lines are written as one contiguous u16-per-row run (main cards first).
+        """
         struct_name = str(info.get("name", "")).strip()
         struct_size = int(info["struct_size"])
         base_off = int(info["base_off"])
@@ -14624,16 +15030,8 @@ Format = "`f|u8`[u8 arg0]"
         anchor = info["anchor"]
         nm = len(main_idx)
         ne = len(extra_idx)
-        need_rows = int(entry_idx) + nm
-
-        if saw_extra and ne > 0:
-            if not messagebox.askyesno(
-                "Import YDK — extra deck",
-                "This table only stores main-deck card slots (u16 per row). "
-                f"The YDK has {ne} extra-deck card(s), which will not be written.\n\n"
-                "Import main deck only?",
-            ):
-                return
+        combined_idx = main_idx + extra_idx
+        need_rows = int(entry_idx) + len(combined_idx)
 
         if need_rows > tbl_count:
             n_add = need_rows - tbl_count
@@ -14666,7 +15064,7 @@ Format = "`f|u8`[u8 arg0]"
 
         anchor = info["anchor"]
         bump = self._ydk_maybe_bump_anchor_literal_after_import(anchor, fmt_src, need_rows)
-        for i, vid in enumerate(main_idx):
+        for i, vid in enumerate(combined_idx):
             row = int(entry_idx) + i
             entry_base = base_off + row * struct_size
             foff = se._struct_field_file_off(entry_base, card_fd)
@@ -14680,9 +15078,14 @@ Format = "`f|u8`[u8 arg0]"
             se._load_entry(entry_idx)
         except (tk.TclError, AttributeError):
             pass
+        wrote_detail = (
+            f"{len(combined_idx)} card index(es) ({nm} main + {ne} extra)"
+            if ne
+            else f"{nm} card index(es)"
+        )
         msg_lines = [
             f"Imported {path}",
-            f"Struct {struct_name!r}: wrote {nm} main card index(es) starting at row {entry_idx}.",
+            f"Struct {struct_name!r}: wrote {wrote_detail} starting at row {entry_idx}.",
         ]
         if bump:
             msg_lines.append(bump)
@@ -14724,13 +15127,15 @@ Format = "`f|u8`[u8 arg0]"
         flat_ydk = bool(flat_card_fd and _struct_format_has_ydk_import_marker(fmt_src_early))
         na_fd_term: Optional[Dict[str, Any]] = None
         na_fd_pc: Optional[Dict[str, Any]] = None
+        na_fd_pc_list: List[Dict[str, Any]] = []
         stride = 2
         term = b""
         na_fd: Optional[Dict[str, Any]] = None
         if not flat_ydk:
             na_fd_term = _struct_per_row_terminator_nested_field(fields)
-            na_fd_pc = _struct_ydk_pointer_count_nested_field(fields)
-            if not na_fd_term and not (na_fd_pc and _struct_format_has_ydk_import_marker(fmt_src_early)):
+            na_fd_pc_list = _struct_ydk_pointer_count_nested_fields(fields)
+            na_fd_pc = na_fd_pc_list[0] if na_fd_pc_list else None
+            if not na_fd_term and not (na_fd_pc_list and _struct_format_has_ydk_import_marker(fmt_src_early)):
                 messagebox.showerror(
                     "Import YDK",
                     "This struct must have either a per-row !-terminated nested card run, a "
@@ -14854,6 +15259,22 @@ Format = "`f|u8`[u8 arg0]"
                 msg = "\n\n".join(warn_lines) + "\n\nContinue import anyway?"
                 if not messagebox.askyesno("Import YDK — deck size", msg):
                     return
+        elif na_fd_pc_list:
+            for na_fd_one in na_fd_pc_list:
+                cf_pc = str(na_fd_one.get("count_field") or "").lower()
+                if cf_pc == "main" and (nm < 40 or nm > 60):
+                    warn_lines.append(f"Main deck has {nm} valid card(s) (expected 40–60).")
+                if cf_pc == "extra" and ne > 15:
+                    warn_lines.append(f"Extra deck has {ne} card(s) (maximum 15).")
+                if cf_pc not in ("main", "extra"):
+                    if nm < 40 or nm > 60:
+                        warn_lines.append(f"Main deck has {nm} valid card(s) (expected 40–60).")
+                    if ne > 15:
+                        warn_lines.append(f"Extra deck has {ne} card(s) (maximum 15).")
+            if warn_lines:
+                msg = "\n\n".join(sorted(set(warn_lines))) + "\n\nContinue import anyway?"
+                if not messagebox.askyesno("Import YDK — deck size", msg):
+                    return
 
         try:
             entry_idx = int(se._idx_var.get())
@@ -14867,7 +15288,6 @@ Format = "`f|u8`[u8 arg0]"
                 card_fd=flat_card_fd,
                 main_idx=main_idx,
                 extra_idx=extra_idx,
-                saw_extra=saw_extra,
                 se=se,
                 path=path,
                 fmt_src=fmt_src_early,
@@ -14875,19 +15295,40 @@ Format = "`f|u8`[u8 arg0]"
             )
             return
 
-        if na_fd_pc:
-            new_blob = b"".join(int(x).to_bytes(2, "little") for x in main_idx)
-            self._file_import_ydk_pointer_count_deck_blob(
-                parent=parent,
-                info=info,
-                fields=fields,
-                na_fd=na_fd_pc,
-                new_blob=new_blob,
-                new_len=len(main_idx),
-                path=path,
-                se=se,
-                entry_idx=entry_idx,
-            )
+        if na_fd_pc_list:
+            cfs_pc = [str(x.get("count_field") or "").lower() for x in na_fd_pc_list]
+            if len(na_fd_pc_list) == 2 and cfs_pc[0] == "main" and cfs_pc[1] == "extra":
+                self._file_import_ydk_pointer_count_dual_offset_decks(
+                    parent=parent,
+                    info=info,
+                    fields=fields,
+                    na_main=na_fd_pc_list[0],
+                    na_extra=na_fd_pc_list[1],
+                    main_idx=main_idx,
+                    extra_idx=extra_idx,
+                    path=path,
+                    se=se,
+                    entry_idx=entry_idx,
+                )
+                return
+            n_pc = len(na_fd_pc_list)
+            for i, na_fd_one in enumerate(na_fd_pc_list):
+                cf_pc = str(na_fd_one.get("count_field") or "")
+                idxs = _ydk_card_indices_for_nested_count_field(cf_pc, main_idx, extra_idx)
+                new_blob = b"".join(int(x).to_bytes(2, "little") for x in idxs)
+                self._file_import_ydk_pointer_count_deck_blob(
+                    parent=parent,
+                    info=info,
+                    fields=fields,
+                    na_fd=na_fd_one,
+                    new_blob=new_blob,
+                    new_len=len(idxs),
+                    path=path,
+                    se=se,
+                    entry_idx=entry_idx,
+                    count_field_name=cf_pc,
+                    show_done_message=(i == n_pc - 1),
+                )
             return
 
         new_blob = _ydk_build_deck_blob(main_idx, extra_idx, saw_extra, term)

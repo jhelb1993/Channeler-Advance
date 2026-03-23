@@ -221,12 +221,12 @@ Format = "`ucs4x2x40|graphics.races.palette`"
 [[NamedAnchors]]
 Name = "data.decks.offsets.actual"
 Address = 0x1E63BEC
-Format = "[offset<padding:::: main: `ydk`data.cards.passwords[card:cardnames]!0000>]deckinfo"
+Format = "[offset<padding:::: main: `ydk`data.cards.passwords[card:cardnames]/main extra: `ydk`data.cards.passwords[card:cardnames]/extra> padding::]deckinfo"
 
 [[NamedAnchors]]
 Name = "data.decks.offsets.unknown"
 Address = 0x1E64138
-Format = "[offset<padding:::: main: `ydk`data.cards.passwords[card:cardnames]/main extra: [card:cardnames]/extra>]deckinfo"
+Format = "[offset<padding:::: main: `ydk`data.cards.passwords[card:cardnames]/main extra: `ydk`data.cards.passwords[card:cardnames]/extra> padding::]deckinfo"
 
 [[MatchedWords]]
 Name = "data.constants.cards.stats.limit"

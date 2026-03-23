@@ -12699,14 +12699,9 @@ Address = 0x198736
 Format = '''[card:cardinternalnumbers]7'''
 
 [[NamedAnchors]]
-Name = '''data.decks.tier1.yugimuto.cards'''
-Address = 0x19D34C
-Format = '''`ydk`data.cards.passwords[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
 Name = '''data.decks.all'''
 Address = 0x19DC74
-Format = '''[offset<`ydk`data.cards.passwords[card:cardinternalnumbers]/length> length. padding:.]duelists'''
+Format = '''[offset<`ydk`data.cards.passwords[card:cardinternalnumbers]/total> total. padding:.]duelists'''
 
 [[NamedAnchors]]
 Name = '''data.specialpacks.weeklygiftpacka.cards.normal'''

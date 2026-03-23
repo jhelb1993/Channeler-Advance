@@ -1,8 +1,8 @@
-fix ydk import (decks) (main/extra/both)
 lflist import (banlists) (change constant?)
 correct eds toml (pack pointers)
 find
 triple backticks instead of quotes
+improve performance (carot loading)
 read the code
 python scripting
 split hex_editor.py up into separate files
