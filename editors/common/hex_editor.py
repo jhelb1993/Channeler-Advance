@@ -992,12 +992,15 @@ def _normalize_nested_array_slash_count_bracket_order(t: str) -> str:
 
 
 def _normalize_ydk_deck_struct_shorthand_format(t: str) -> str:
-    """Expand minimal `` `ydk` `` deck lines into offset-style structs so :func:`_parse_struct_fields` accepts them.
+    """Expand minimal `` `ydk` `` deck lines so :func:`_parse_struct_fields` accepts them.
 
     * `` `ydk`anchor[card:List]N`` (no outer brackets) — common in TOML; struct loader requires ``[…]N``.
-    * ``[`ydk`anchor[card:List]!HEX>]N`` — inner body does not tokenize as fields; same expansion.
+    * ``[`ydk`anchor[card:List]!HEX>]N`` — same idea with an explicit ``!`` terminator hex (ignored for layout).
 
-    Both become ``[offset<padding:::: main: `ydk`…[card:…]!0000>]N`` (matches working ``offset<…>`` sugar).
+    Both normalize to ``[card:List]N``: **N** rows of **u16** ``card`` slots with the given ``[[List]]`` enum — the
+    password table name stays only in the **raw** Format (for YDK import / password lookup), not in this expansion.
+
+    For a pointer-based deck blob (``offset<… main: …``), write the full ``offset<…>`` form in TOML instead of this shorthand.
     """
     s = str(t or "").strip()
     if not s:
@@ -1008,21 +1011,16 @@ def _normalize_ydk_deck_struct_shorthand_format(t: str) -> str:
         re.IGNORECASE,
     )
     if m_wrapped:
-        a, lst, hx, cnt = (
-            m_wrapped.group(1),
-            m_wrapped.group(2),
-            m_wrapped.group(3).lower(),
-            m_wrapped.group(4),
-        )
-        return f"[offset<padding:::: main: `ydk`{a}[card:{lst}]!{hx}>]{cnt}"
+        lst, cnt = m_wrapped.group(2), m_wrapped.group(4)
+        return f"[card:{lst}]{cnt}"
     m_bare = re.match(
         r"^\s*`ydk`([\w.]+)\s*\[\s*card\s*:\s*([\w.]+)\s*\]\s*(\d+)\s*$",
         s,
         re.IGNORECASE,
     )
     if m_bare:
-        a, lst, cnt = m_bare.group(1), m_bare.group(2), m_bare.group(3)
-        return f"[offset<padding:::: main: `ydk`{a}[card:{lst}]!0000>]{cnt}"
+        lst, cnt = m_bare.group(2), m_bare.group(3)
+        return f"[card:{lst}]{cnt}"
     return s
 
 
@@ -4790,12 +4788,31 @@ def _struct_format_has_ydk_import_marker(fmt_raw: str) -> bool:
 
 
 def _struct_format_ydk_password_anchor_name(fmt_raw: str) -> str:
-    """NamedAnchor ``Name`` for 32-bit password lookup: text after `` `ydk` ``, else ``data.cards.passwords``."""
-    m = re.search(r"`ydk`\s*([\w.]*)", str(fmt_raw or ""))
+    """NamedAnchor ``Name`` for 32-bit password lookup: text after `` `ydk` ``, up to the ``[`` that opens ``[card:…]``.
+
+    Stops before that bracket so names like ``data.cards.passwords`` are not fused with the card list (and are not
+    mistaken for a width token next to ``[``).
+    """
+    m = re.search(r"`ydk`\s*([\w.]*?)\s*\[", str(fmt_raw or ""))
     if not m:
         return "data.cards.passwords"
     name = (m.group(1) or "").strip()
     return name if name else "data.cards.passwords"
+
+
+def _parse_bare_ydk_deck_shorthand_trailing_count(fmt_raw: str) -> Optional[int]:
+    """If *fmt_raw* is the minimal `` `ydk`Anchor[card:List]N`` line (no outer ``[``), return *N*; else ``None``."""
+    s = str(fmt_raw or "").strip()
+    if s.startswith("^"):
+        s = s[1:].strip()
+    m = re.match(
+        r"^\s*`ydk`\s*[\w.]+\s*\[\s*card\s*:\s*[\w.]+\s*\](\d+)\s*$",
+        s,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
+        return None
+    return int(m.group(1))
 
 
 def _struct_format_ydk_card_list_name(fmt_raw: str) -> Optional[str]:
@@ -4832,6 +4849,22 @@ def _list_reverse_label_to_smallest_key(enum_map: Dict[int, str]) -> Dict[str, i
         if lab not in out:
             out[lab] = int(k)
     return out
+
+
+def _struct_flat_ydk_card_table_field(fields: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Normalized ``[card:List]N`` from :func:`_normalize_ydk_deck_struct_shorthand_format`: one u16 ``card`` + enum."""
+    if len(fields) != 1:
+        return None
+    fd = fields[0]
+    if str(fd.get("name", "")).lower() != "card":
+        return None
+    if fd.get("type") != "uint":
+        return None
+    if int(fd.get("size") or 0) != 2:
+        return None
+    if not fd.get("enum"):
+        return None
+    return fd
 
 
 def _struct_anchor_info_supports_ydk_import(info: Optional[Dict[str, Any]]) -> bool:
@@ -13272,6 +13305,17 @@ Format = "`f|u8`[u8 arg0]"
             anchor["Format"] = ("^" if has_caret else "") + f"[{inner}]!{hx}"
             anchor.pop("Count", None)
             return True
+        # Bare YDK deck line: `` `ydk`Anchor[card:List]N`` (no outer ``[``) — common in TOML before normalization.
+        m_bare_ydk = re.match(
+            r"^(\s*`ydk`\s*[\w.]+\s*\[\s*card\s*:\s*[\w.]+\s*\])(\d+)\s*$",
+            body,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if m_bare_ydk:
+            if int(new_count) <= 0:
+                return False
+            anchor["Format"] = ("^" if has_caret else "") + m_bare_ydk.group(1) + str(int(new_count))
+            return True
         cr = _parse_struct_count(raw_in)
         if not isinstance(cr, int):
             return False
@@ -13287,6 +13331,22 @@ Format = "`f|u8`[u8 arg0]"
                     anchor["Format"] = ("^" if has_caret else "") + s[: i + 1] + str(int(new_count))
                     return True
         return False
+
+    def _ydk_maybe_bump_anchor_literal_after_import(
+        self, anchor: Dict[str, Any], fmt_raw: str, min_table_rows: int
+    ) -> Optional[str]:
+        """Bare `` `ydk`…[card:…]N``: if the table needs more than *N* rows, raise the trailing count in TOML."""
+        cur = _parse_bare_ydk_deck_shorthand_trailing_count(fmt_raw)
+        if cur is None or min_table_rows <= cur:
+            return None
+        if not self._toml_path or not os.path.isfile(self._toml_path):
+            return None
+        if not self._replace_struct_format_literal_count(anchor, min_table_rows):
+            return None
+        ok, err = self.persist_toml_data()
+        if not ok:
+            return f"Could not save TOML ({err})."
+        return f"Structure Format ]count: {cur} → {min_table_rows}."
 
     def _write_matched_word_numeric_value(self, mw_name: str, value: int) -> bool:
         """Write little-endian integer to the MatchedWord row named ``mw_name`` in ROM."""
@@ -14525,6 +14585,92 @@ Format = "`f|u8`[u8 arg0]"
             return
         _done_ok()
 
+    def _file_import_ydk_flat_card_table(
+        self,
+        *,
+        info: Dict[str, Any],
+        fields: List[Dict[str, Any]],
+        card_fd: Dict[str, Any],
+        main_idx: List[int],
+        extra_idx: List[int],
+        saw_extra: bool,
+        se: Any,
+        path: str,
+        fmt_src: str,
+        entry_idx: int,
+    ) -> None:
+        """Import passwords into a ``[card:List]N`` table (normalized `` `ydk`…[card:List]N`` shorthand)."""
+        struct_name = str(info.get("name", "")).strip()
+        struct_size = int(info["struct_size"])
+        base_off = int(info["base_off"])
+        tbl_count = int(info["count"])
+        anchor = info["anchor"]
+        nm = len(main_idx)
+        ne = len(extra_idx)
+        need_rows = int(entry_idx) + nm
+
+        if saw_extra and ne > 0:
+            if not messagebox.askyesno(
+                "Import YDK — extra deck",
+                "This table only stores main-deck card slots (u16 per row). "
+                f"The YDK has {ne} extra-deck card(s), which will not be written.\n\n"
+                "Import main deck only?",
+            ):
+                return
+
+        if need_rows > tbl_count:
+            n_add = need_rows - tbl_count
+            fresh = self.find_struct_anchor_by_name(struct_name)
+            if not fresh:
+                messagebox.showerror("Import YDK", "Lost struct anchor (reload TOML?).")
+                return
+            ok_a, err_a = self.append_struct_table_rows(fresh, n_add)
+            if not ok_a:
+                messagebox.showerror(
+                    "Import YDK",
+                    err_a or f"Need {need_rows} card row(s) but the struct only has {tbl_count}.",
+                )
+                return
+            self._invalidate_struct_anchors_cache()
+            info2 = self.find_struct_anchor_by_name(struct_name)
+            if not info2:
+                messagebox.showerror("Import YDK", "Struct anchor missing after expanding rows.")
+                return
+            info = info2
+            fields = list(info.get("fields") or [])
+            fd2 = _struct_flat_ydk_card_table_field(fields)
+            if not fd2:
+                messagebox.showerror("Import YDK", "Internal: flat card field missing after expand.")
+                return
+            card_fd = fd2
+            tbl_count = int(info["count"])
+            base_off = int(info["base_off"])
+            struct_size = int(info["struct_size"])
+
+        anchor = info["anchor"]
+        bump = self._ydk_maybe_bump_anchor_literal_after_import(anchor, fmt_src, need_rows)
+        for i, vid in enumerate(main_idx):
+            row = int(entry_idx) + i
+            entry_base = base_off + row * struct_size
+            foff = se._struct_field_file_off(entry_base, card_fd)
+            if foff is None:
+                messagebox.showerror("Import YDK", f"Could not resolve file offset for card row {row}.")
+                return
+            self.write_bytes_at_extend(foff, int(vid).to_bytes(2, "little"))
+
+        self._invoke_anchor_refresh_callback()
+        try:
+            se._load_entry(entry_idx)
+        except (tk.TclError, AttributeError):
+            pass
+        msg_lines = [
+            f"Imported {path}",
+            f"Struct {struct_name!r}: wrote {nm} main card index(es) starting at row {entry_idx}.",
+        ]
+        if bump:
+            msg_lines.append(bump)
+        messagebox.showinfo("Import YDK", "\n".join(msg_lines))
+
     def file_import_ydk_deck(self) -> None:
         """Import a YDK deck into the selected `` `ydk` `` deck struct (``!``-terminated blob or pointer+``length``)."""
         parent = self.winfo_toplevel()
@@ -14557,32 +14703,40 @@ Format = "`f|u8`[u8 arg0]"
             return
         fields = list(info.get("fields") or [])
         fmt_src_early = str((info.get("anchor") or {}).get("Format", "") or "")
-        na_fd_term = _struct_per_row_terminator_nested_field(fields)
-        na_fd_pc = _struct_ydk_pointer_count_nested_field(fields)
-        if not na_fd_term and not (na_fd_pc and _struct_format_has_ydk_import_marker(fmt_src_early)):
-            messagebox.showerror(
-                "Import YDK",
-                "This struct must have either a per-row !-terminated nested card run, or a "
-                "`ydk` pointer+length deck (offset<[…]/length> with u16 cards).",
-            )
-            return
-        na_fd: Optional[Dict[str, Any]] = na_fd_term if na_fd_term else na_fd_pc
-        assert na_fd is not None
-        stride = int(na_fd["inner_stride"])
-        term = bytes(na_fd["terminator"]) if na_fd.get("terminator") is not None else b""
-        if stride < 1:
-            messagebox.showerror("Import YDK", "Invalid nested card stride.")
-            return
-        if na_fd_term:
-            if not term:
-                messagebox.showerror("Import YDK", "Invalid nested terminator.")
+        flat_card_fd = _struct_flat_ydk_card_table_field(fields)
+        flat_ydk = bool(flat_card_fd and _struct_format_has_ydk_import_marker(fmt_src_early))
+        na_fd_term: Optional[Dict[str, Any]] = None
+        na_fd_pc: Optional[Dict[str, Any]] = None
+        stride = 2
+        term = b""
+        na_fd: Optional[Dict[str, Any]] = None
+        if not flat_ydk:
+            na_fd_term = _struct_per_row_terminator_nested_field(fields)
+            na_fd_pc = _struct_ydk_pointer_count_nested_field(fields)
+            if not na_fd_term and not (na_fd_pc and _struct_format_has_ydk_import_marker(fmt_src_early)):
+                messagebox.showerror(
+                    "Import YDK",
+                    "This struct must have either a per-row !-terminated nested card run, a "
+                    "`ydk` [card:…] card table, or a `ydk` pointer+length deck (offset<[…]/length> with u16 cards).",
+                )
                 return
-        if stride != 2:
-            messagebox.showerror(
-                "Import YDK",
-                f"YDK import expects 2-byte card slots (u16); this struct uses inner stride {stride}.",
-            )
-            return
+            na_fd = na_fd_term if na_fd_term else na_fd_pc
+            assert na_fd is not None
+            stride = int(na_fd["inner_stride"])
+            term = bytes(na_fd["terminator"]) if na_fd.get("terminator") is not None else b""
+            if stride < 1:
+                messagebox.showerror("Import YDK", "Invalid nested card stride.")
+                return
+            if na_fd_term:
+                if not term:
+                    messagebox.showerror("Import YDK", "Invalid nested terminator.")
+                    return
+            if stride != 2:
+                messagebox.showerror(
+                    "Import YDK",
+                    f"YDK import expects 2-byte card slots (u16); this struct uses inner stride {stride}.",
+                )
+                return
 
         path = filedialog.askopenfilename(
             title="Import YDK deck",
@@ -14674,7 +14828,7 @@ Format = "`f|u8`[u8 arg0]"
         nm = len(main_idx)
         ne = len(extra_idx)
         warn_lines: List[str] = []
-        if na_fd_term:
+        if na_fd_term or flat_ydk:
             if nm < 40 or nm > 60:
                 warn_lines.append(f"Main deck has {nm} valid card(s) (expected 40–60).")
             if ne > 15:
@@ -14688,6 +14842,21 @@ Format = "`f|u8`[u8 arg0]"
             entry_idx = int(se._idx_var.get())
         except (ValueError, tk.TclError):
             entry_idx = 0
+
+        if flat_ydk and flat_card_fd:
+            self._file_import_ydk_flat_card_table(
+                info=info,
+                fields=fields,
+                card_fd=flat_card_fd,
+                main_idx=main_idx,
+                extra_idx=extra_idx,
+                saw_extra=saw_extra,
+                se=se,
+                path=path,
+                fmt_src=fmt_src_early,
+                entry_idx=entry_idx,
+            )
+            return
 
         if na_fd_pc:
             new_blob = b"".join(int(x).to_bytes(2, "little") for x in main_idx)

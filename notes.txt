@@ -1,7 +1,7 @@
 ydk import (decks)
 find
 lflist import (banlists) (change constant?)
-correct eds toml (packs)
+correct eds toml (pack pointers)
 triple backticks instead of quotes
 read the code
 python scripting
