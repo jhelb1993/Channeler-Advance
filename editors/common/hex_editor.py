@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import zlib
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
@@ -9489,6 +9490,8 @@ class HexEditorFrame(ttk.Frame):
         self._suppress_matched_word_propagate: bool = False
         # Cache for get_struct_anchors (ROM-derived packed row counts are expensive).
         self._struct_anchors_cache: Optional[List[Dict[str, Any]]] = None
+        # Skip redundant Capstone / pseudo-C work when viewport + ROM slice unchanged.
+        self._last_analysis_pane_key: Optional[Tuple[Any, ...]] = None
         # Set by the host editor after :class:`RomToolsShell` builds :class:`StructEditorFrame`.
         self._struct_editor_ref: Any = None
         # Optional: File menu refresh when the selected struct changes (e.g. enable banlist import).
@@ -10352,7 +10355,6 @@ class HexEditorFrame(ttk.Frame):
         self._schedule_xref_rebuild()
         self._hackmew_mode = False
         self._asm_frame.configure(text=" Disassembly ")
-        self._refresh_asm_selection()
         self._refresh_visible()
         messagebox.showinfo(
             "Compile Success",
@@ -10972,8 +10974,6 @@ class HexEditorFrame(ttk.Frame):
         self._ldr_pc_targets_valid = False
         self._schedule_xref_rebuild()
         self._refresh_visible()
-        if self._asm_pane_visible:
-            self._refresh_asm_selection()
         patch_ok, patch_msg = self._apply_c_inject_rom_patches()
         base_msg = (
             f"Wrote {len(blob)} bytes at file offset 0x{file_off:08X} "
@@ -11189,7 +11189,6 @@ class HexEditorFrame(ttk.Frame):
             if not self._asm_pane_visible:
                 self._asm_frame.grid(row=1, column=3, sticky="nsew", padx=(4, 0))
                 self._asm_pane_visible = True
-            self._refresh_asm_selection()
             if self._ensure_cursor_visible():
                 self._update_scrollbar()
             self._update_cursor_display()
@@ -11406,7 +11405,6 @@ class HexEditorFrame(ttk.Frame):
         self._visible_row_start = start // BYTES_PER_ROW
         self._refresh_visible()
         self._update_scrollbar()
-        self._update_cursor_display()
 
     def _on_asm_mode_change(self, event: Optional[tk.Event] = None) -> None:
         sel = self._asm_mode_var.get()
@@ -11566,7 +11564,6 @@ class HexEditorFrame(ttk.Frame):
         self._visible_row_start = min(cr, max_start)
         self._refresh_visible()
         self._update_scrollbar()
-        self._refresh_asm_selection()
 
     def _byte_to_char(self, b: int) -> str:
         if self._encoding == "pcs":
@@ -11628,7 +11625,6 @@ class HexEditorFrame(ttk.Frame):
             self._schedule_xref_rebuild()
             self._refresh_visible()
             self._update_scrollbar()
-            self._refresh_asm_selection()
             next_off = min(off + 1, len(self._data) - 1)
             next_idx = self._offset_to_ascii_index(next_off) if next_off != off else idx
             if next_idx:
@@ -11721,7 +11717,6 @@ class HexEditorFrame(ttk.Frame):
         self._ensure_cursor_visible()
         self._refresh_visible()
         self._update_scrollbar()
-        self._refresh_asm_selection()
         return "break"
 
     def _paste_insert(self, event: Optional[tk.Event] = None) -> Optional[str]:
@@ -11748,7 +11743,6 @@ class HexEditorFrame(ttk.Frame):
         self._ensure_cursor_visible()
         self._refresh_visible()
         self._update_scrollbar()
-        self._refresh_asm_selection()
         return "break"
 
     def _prevent_unwanted(self, event: tk.Event) -> Optional[str]:
@@ -11951,7 +11945,6 @@ class HexEditorFrame(ttk.Frame):
         self._ensure_cursor_visible()
         self._refresh_visible()
         self._update_scrollbar()
-        self._refresh_asm_selection()
 
     def _show_find_dialog(self, event: Optional[tk.Event] = None) -> Optional[str]:
         """Open Find dialog. Bound to Ctrl+F."""
@@ -12133,7 +12126,6 @@ class HexEditorFrame(ttk.Frame):
             self._ensure_cursor_visible()
             self._refresh_visible()
             self._update_scrollbar()
-            self._refresh_asm_selection()
             status_var.set("Replaced 1 occurrence.")
             idx = self._find_next(needle, True)
             if idx is not None:
@@ -12172,7 +12164,6 @@ class HexEditorFrame(ttk.Frame):
                 self._schedule_xref_rebuild()
                 self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
                 self._refresh_visible()
-                self._refresh_asm_selection()
             status_var.set(f"Replaced {count} occurrence(s)." if count else "No matches found.")
             messagebox.showinfo("Replace All", status_var.get(), parent=d)
 
@@ -12222,7 +12213,6 @@ class HexEditorFrame(ttk.Frame):
                 if old != new_count:
                     self._refresh_visible()
                     self._update_scrollbar()
-                    self._refresh_asm_selection()
 
     # ── File I/O ─────────────────────────────────────────────────────
 
@@ -12258,9 +12248,9 @@ class HexEditorFrame(ttk.Frame):
             except (tk.TclError, ValueError):
                 pass
             self._xref_rebuild_after_id = None
+        self._last_analysis_pane_key = None
         self._refresh_visible()
         self._update_scrollbar()
-        self._refresh_asm_selection()
         self._text.focus_set()
         self.after(200, self._xref_build_after_load)
         return True
@@ -16294,7 +16284,6 @@ Format = "`f|u8`[u8 arg0]"
         try:
             self._refresh_visible()
             self._update_scrollbar()
-            self._refresh_asm_selection()
         finally:
             self._syncing_scroll = False
 
@@ -16311,25 +16300,11 @@ Format = "`f|u8`[u8 arg0]"
         last = first + thumb_size
         self._scroll_y.set(first, min(last, 1.0))
 
-    def _refresh_asm_selection(self) -> None:
-        """Disassemble selected/highlighted bytes (or cursor instruction) into ASM panel."""
-        if not self._asm_pane_visible:
-            if self._pseudo_c_pane_visible:
-                self._refresh_pseudo_c_selection()
-            return
-        if self._hackmew_mode:
-            self._refresh_asm_hackmew()
-            if self._pseudo_c_pane_visible:
-                self._refresh_pseudo_c_selection()
-            return
-        self._text_asm.configure(state=tk.NORMAL)
-        self._text_asm.delete("1.0", tk.END)
-        if not self._data or not _CAPSTONE_AVAILABLE:
-            self._text_asm.insert(tk.END, "(No data or Capstone not available)")
-            self._text_asm.configure(state=tk.DISABLED)
-            return
-        mode = CS_MODE_THUMB if self._asm_mode == "thumb" else CS_MODE_ARM
+    def _get_disasm_bounds(self) -> Tuple[int, int]:
+        """Return ``[start, end)`` file offsets for ASM / pseudo-C (word-aligned start)."""
         align = 4
+        if not self._data:
+            return 0, 0
         if self._selection_start is not None and self._selection_end is not None:
             start = min(self._selection_start, self._selection_end)
             end = max(self._selection_start, self._selection_end) + 1
@@ -16339,97 +16314,156 @@ Format = "`f|u8`[u8 arg0]"
             vis_end = min(vis_start + self._visible_row_count * BYTES_PER_ROW, len(self._data))
             start = (vis_start // align) * align
             end = vis_end
-        if start >= len(self._data):
-            self._text_asm.insert(tk.END, "(No bytes selected)")
-            self._text_asm.configure(state=tk.DISABLED)
-            return
         end = min(end, len(self._data))
-        ldr_targets = self._get_ldr_pc_targets(mode)
-        chunk = bytes(self._data[start:end])
-        base = GBA_ROM_BASE + start
-        cs = Cs(CS_ARCH_ARM, mode)
-        cs.detail = True
-        insn_map: Dict[int, object] = {}
-        try:
-            for i in cs.disasm(chunk, base):
-                file_off = i.address - GBA_ROM_BASE
-                insn_map[file_off] = i
-        except Exception:
-            pass
-        branch_targets = self._collect_branch_targets(
-            start, end, mode, insn_map, ldr_targets
+        start = max(0, min(start, len(self._data)))
+        return start, end
+
+    def _analysis_pane_refresh_key(self) -> Tuple[Any, ...]:
+        """Fingerprint inputs for ASM / pseudo-C panes; used to avoid redundant disassembly."""
+        if not self._data:
+            return ("empty", self._asm_pane_visible, self._pseudo_c_pane_visible, self._hackmew_mode)
+        start, end = self._get_disasm_bounds()
+        chunk = self._data[start:end]
+        csum = zlib.adler32(chunk) & 0xFFFFFFFF
+        sel: Optional[Tuple[int, int]]
+        if self._selection_start is not None and self._selection_end is not None:
+            sel = (min(self._selection_start, self._selection_end), max(self._selection_start, self._selection_end))
+        else:
+            sel = None
+        return (
+            self._hackmew_mode,
+            self._asm_mode,
+            self._asm_pane_visible,
+            self._pseudo_c_pane_visible,
+            self._c_inject_mode,
+            self._ldr_pc_targets_valid,
+            self._visible_row_start,
+            self._visible_row_count,
+            start,
+            end,
+            sel,
+            csum,
         )
-        target_to_label: Dict[int, str] = {
-            fo: f"loc_{GBA_ROM_BASE + fo:08X}" for fo in branch_targets
-        }
 
-        def _replace_addrs(text: str) -> str:
-            def _repl(m: re.Match) -> str:
-                addr = int(m.group(1), 16)
-                fo = addr - GBA_ROM_BASE
-                return target_to_label.get(fo, m.group(0))
-            return re.sub(r"#0x([0-9A-Fa-f]+)\b", _repl, text)
+    def _refresh_asm_selection(self) -> None:
+        """Disassemble selected/highlighted bytes (or cursor instruction) into ASM panel."""
+        key = self._analysis_pane_refresh_key()
+        if key == self._last_analysis_pane_key:
+            return
+        if not self._asm_pane_visible:
+            if self._pseudo_c_pane_visible:
+                self._refresh_pseudo_c_selection()
+            self._last_analysis_pane_key = key
+            return
+        if self._hackmew_mode:
+            self._refresh_asm_hackmew()
+            if self._pseudo_c_pane_visible:
+                self._refresh_pseudo_c_selection()
+            self._last_analysis_pane_key = key
+            return
+        try:
+            self._text_asm.configure(state=tk.NORMAL)
+            self._text_asm.delete("1.0", tk.END)
+            if not self._data or not _CAPSTONE_AVAILABLE:
+                self._text_asm.insert(tk.END, "(No data or Capstone not available)")
+                self._text_asm.configure(state=tk.DISABLED)
+                return
+            mode = CS_MODE_THUMB if self._asm_mode == "thumb" else CS_MODE_ARM
+            align = 4
+            start, end = self._get_disasm_bounds()
+            if start >= len(self._data):
+                self._text_asm.insert(tk.END, "(No bytes selected)")
+                self._text_asm.configure(state=tk.DISABLED)
+                return
+            ldr_targets = self._get_ldr_pc_targets(mode)
+            chunk = bytes(self._data[start:end])
+            base = GBA_ROM_BASE + start
+            cs = Cs(CS_ARCH_ARM, mode)
+            cs.detail = True
+            insn_map: Dict[int, object] = {}
+            try:
+                for i in cs.disasm(chunk, base):
+                    file_off = i.address - GBA_ROM_BASE
+                    insn_map[file_off] = i
+            except Exception:
+                pass
+            branch_targets = self._collect_branch_targets(
+                start, end, mode, insn_map, ldr_targets
+            )
+            target_to_label: Dict[int, str] = {
+                fo: f"loc_{GBA_ROM_BASE + fo:08X}" for fo in branch_targets
+            }
 
-        offset = start
-        lines: List[str] = []
-        while offset < end:
-            file_off = offset
-            if file_off in target_to_label and lines:
-                lines.append("\n")
-            if file_off in target_to_label:
-                lines.append(f"{target_to_label[file_off]}:\n")
-            if file_off in ldr_targets and self._is_ldr_word_pool(file_off, ldr_targets):
-                b0 = self._data[file_off]
-                b1 = self._data[file_off + 1] if file_off + 1 < len(self._data) else 0
-                b2 = self._data[file_off + 2] if file_off + 2 < len(self._data) else 0
-                b3 = self._data[file_off + 3] if file_off + 3 < len(self._data) else 0
-                val = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-                hex_bytes = f"{b0:02x} {b1:02x} {b2:02x} {b3:02x}"
-                word_line = f".word #0x{val:08X}"
-                word_line = _replace_addrs(word_line)
-                lines.append(f"{GBA_ROM_BASE + file_off:08X}:  {hex_bytes:12s}  {word_line}\n")
-                offset += 4
-            elif file_off in insn_map:
-                insn = insn_map[file_off]
-                raw = insn.bytes
-                insn_end = file_off + len(raw)
-                overlaps_target = any(
-                    self._is_ldr_word_pool(t, ldr_targets)
-                    for t in range(file_off + 1, insn_end)
-                )
-                if overlaps_target:
-                    offset += align
-                    continue
-                mnemonic, op_str = insn.mnemonic, insn.op_str
-                hex_bytes = " ".join(f"{b:02x}" for b in raw)
-                operands = f" {op_str}" if op_str else ""
-                comment = self._get_ldr_pc_comment(insn, mode)
-                if comment:
-                    operands += f"  @ {comment}"
-                insn_text = _replace_addrs(f"{mnemonic}{operands}")
-                lines.append(f"{GBA_ROM_BASE + file_off:08X}:  {hex_bytes:12s}  {insn_text}\n")
-                offset += len(raw)
-            else:
-                if align == 2:
-                    b0 = self._data[offset]
-                    b1 = self._data[offset + 1] if offset + 1 < len(self._data) else 0
-                    hex_bytes = f"{b0:02x} {b1:02x}"
-                    lines.append(f"{GBA_ROM_BASE + offset:08X}:  {hex_bytes:12s}  .byte 0x{b0:02x}, 0x{b1:02x}\n")
-                else:
-                    b0 = self._data[offset]
-                    b1 = self._data[offset + 1] if offset + 1 < len(self._data) else 0
-                    b2 = self._data[offset + 2] if offset + 2 < len(self._data) else 0
-                    b3 = self._data[offset + 3] if offset + 3 < len(self._data) else 0
+            def _replace_addrs(text: str) -> str:
+                def _repl(m: re.Match) -> str:
+                    addr = int(m.group(1), 16)
+                    fo = addr - GBA_ROM_BASE
+                    return target_to_label.get(fo, m.group(0))
+                return re.sub(r"#0x([0-9A-Fa-f]+)\b", _repl, text)
+
+            offset = start
+            lines: List[str] = []
+            while offset < end:
+                file_off = offset
+                if file_off in target_to_label and lines:
+                    lines.append("\n")
+                if file_off in target_to_label:
+                    lines.append(f"{target_to_label[file_off]}:\n")
+                if file_off in ldr_targets and self._is_ldr_word_pool(file_off, ldr_targets):
+                    b0 = self._data[file_off]
+                    b1 = self._data[file_off + 1] if file_off + 1 < len(self._data) else 0
+                    b2 = self._data[file_off + 2] if file_off + 2 < len(self._data) else 0
+                    b3 = self._data[file_off + 3] if file_off + 3 < len(self._data) else 0
+                    val = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
                     hex_bytes = f"{b0:02x} {b1:02x} {b2:02x} {b3:02x}"
-                    lines.append(f"{GBA_ROM_BASE + offset:08X}:  {hex_bytes:12s}  .word 0x{b3:02x}{b2:02x}{b1:02x}{b0:02x}\n")
-                offset += align
-        content = "".join(lines) if lines else "(No instructions)"
-        self._text_asm.insert("1.0", content)
-        if lines:
-            self._apply_syntax_highlighting(self._text_asm, "asm")
-        self._text_asm.configure(state=tk.DISABLED)
-        if self._pseudo_c_pane_visible:
-            self._refresh_pseudo_c_selection()
+                    word_line = f".word #0x{val:08X}"
+                    word_line = _replace_addrs(word_line)
+                    lines.append(f"{GBA_ROM_BASE + file_off:08X}:  {hex_bytes:12s}  {word_line}\n")
+                    offset += 4
+                elif file_off in insn_map:
+                    insn = insn_map[file_off]
+                    raw = insn.bytes
+                    insn_end = file_off + len(raw)
+                    overlaps_target = any(
+                        self._is_ldr_word_pool(t, ldr_targets)
+                        for t in range(file_off + 1, insn_end)
+                    )
+                    if overlaps_target:
+                        offset += align
+                        continue
+                    mnemonic, op_str = insn.mnemonic, insn.op_str
+                    hex_bytes = " ".join(f"{b:02x}" for b in raw)
+                    operands = f" {op_str}" if op_str else ""
+                    comment = self._get_ldr_pc_comment(insn, mode)
+                    if comment:
+                        operands += f"  @ {comment}"
+                    insn_text = _replace_addrs(f"{mnemonic}{operands}")
+                    lines.append(f"{GBA_ROM_BASE + file_off:08X}:  {hex_bytes:12s}  {insn_text}\n")
+                    offset += len(raw)
+                else:
+                    if align == 2:
+                        b0 = self._data[offset]
+                        b1 = self._data[offset + 1] if offset + 1 < len(self._data) else 0
+                        hex_bytes = f"{b0:02x} {b1:02x}"
+                        lines.append(f"{GBA_ROM_BASE + offset:08X}:  {hex_bytes:12s}  .byte 0x{b0:02x}, 0x{b1:02x}\n")
+                    else:
+                        b0 = self._data[offset]
+                        b1 = self._data[offset + 1] if offset + 1 < len(self._data) else 0
+                        b2 = self._data[offset + 2] if offset + 2 < len(self._data) else 0
+                        b3 = self._data[offset + 3] if offset + 3 < len(self._data) else 0
+                        hex_bytes = f"{b0:02x} {b1:02x} {b2:02x} {b3:02x}"
+                        lines.append(f"{GBA_ROM_BASE + offset:08X}:  {hex_bytes:12s}  .word 0x{b3:02x}{b2:02x}{b1:02x}{b0:02x}\n")
+                    offset += align
+            content = "".join(lines) if lines else "(No instructions)"
+            self._text_asm.insert("1.0", content)
+            if lines:
+                self._apply_syntax_highlighting(self._text_asm, "asm")
+            self._text_asm.configure(state=tk.DISABLED)
+            if self._pseudo_c_pane_visible:
+                self._refresh_pseudo_c_selection()
+
+        finally:
+            self._last_analysis_pane_key = key
 
     def _refresh_asm_hackmew(self) -> None:
         """Show editable HackMew-style ASM in the ASM pane. Records region for Ctrl+I compile."""
@@ -16442,18 +16476,7 @@ Format = "`f|u8`[u8 arg0]"
         if not lines:
             self._text_asm.insert(tk.END, "(No instructions)")
             return
-        mode = CS_MODE_THUMB if self._asm_mode == "thumb" else CS_MODE_ARM
-        align = 4
-        if self._selection_start is not None and self._selection_end is not None:
-            start = min(self._selection_start, self._selection_end)
-            end = max(self._selection_start, self._selection_end) + 1
-            start = (start // align) * align
-        else:
-            vis_start = self._visible_row_start * BYTES_PER_ROW
-            vis_end = min(vis_start + self._visible_row_count * BYTES_PER_ROW, len(self._data))
-            start = (vis_start // align) * align
-            end = vis_end
-        end = min(end, len(self._data))
+        start, end = self._get_disasm_bounds()
         self._hackmew_asm_start = start
         self._hackmew_asm_end = end
         self._text_asm.insert("1.0", "\n".join(lines))
@@ -16474,20 +16497,11 @@ Format = "`f|u8`[u8 arg0]"
             self._text_pseudo_c.configure(state=tk.DISABLED)
             return
         align = 4
-        if self._selection_start is not None and self._selection_end is not None:
-            start = min(self._selection_start, self._selection_end)
-            end = max(self._selection_start, self._selection_end) + 1
-            start = (start // align) * align
-        else:
-            vis_start = self._visible_row_start * BYTES_PER_ROW
-            vis_end = min(vis_start + self._visible_row_count * BYTES_PER_ROW, len(self._data))
-            start = (vis_start // align) * align
-            end = vis_end
+        start, end = self._get_disasm_bounds()
         if start >= len(self._data):
             self._text_pseudo_c.insert(tk.END, "(No bytes selected)")
             self._text_pseudo_c.configure(state=tk.DISABLED)
             return
-        end = min(end, len(self._data))
         data_copy = bytes(self._data)
         if _ANGR_AVAILABLE:
             self._text_pseudo_c.insert(tk.END, "Decompiling with angr (CFG + Decompiler)...")
@@ -17879,7 +17893,6 @@ Format = "`f|u8`[u8 arg0]"
             self._ensure_cursor_visible()
             self._refresh_visible()
             self._update_scrollbar()
-            self._refresh_asm_selection()
             return "break"
         return None
 
@@ -17905,7 +17918,6 @@ Format = "`f|u8`[u8 arg0]"
         self._ensure_cursor_visible()
         self._refresh_visible()
         self._update_scrollbar()
-        self._refresh_asm_selection()
         return "break"
 
     def _on_backspace(self, event: tk.Event) -> Optional[str]:
@@ -17925,7 +17937,6 @@ Format = "`f|u8`[u8 arg0]"
             self._ensure_cursor_visible()
             self._refresh_visible()
             self._update_scrollbar()
-            self._refresh_asm_selection()
         return "break"
 
     # ── Cursor movement ──────────────────────────────────────────────
