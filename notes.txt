@@ -1,6 +1,7 @@
-! add x new
+jump to new offset after add new
 ydk import (decks)
-lflist import (banlists)
+lflist import (banlists) (change constant?)
+triple backticks instead of quotes
 read the code
 python scripting
 split hex_editor.py up into separate files

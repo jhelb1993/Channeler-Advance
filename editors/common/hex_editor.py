@@ -961,9 +961,37 @@ def encode_ascii_slot(text: str, width: int) -> bytearray:
     return out[:width]
 
 
+def _normalize_shorthand_bracket_terminator_format(s: str) -> str:
+    """
+    Expand legacy ``[fields]!HEX`` where ``!HEX`` starts the ``!``-terminated nested blob (not ``]count``).
+
+    Example: ``[rate:]!0000`` → ``[rows<[rate:]!0000>inline]1`` (one packed terminator table at ``Address``).
+    """
+    t = str(s or "").strip()
+    prefix = ""
+    if t.startswith("^"):
+        prefix = "^"
+        t = t[1:].strip()
+    if "<[" in t and "!>" in t:
+        return prefix + t
+    m = re.match(r"^\[([^\[\]]*)\]!([0-9a-fA-F]{2,})(?:\](\d+))?\s*$", t)
+    if not m:
+        return prefix + t
+    inner = (m.group(1) or "").strip()
+    hx = m.group(2)
+    count = m.group(3) if m.group(3) else "1"
+    if not inner:
+        return prefix + t
+    inner_one = inner
+    if not re.search(r"[.:]$", inner_one):
+        inner_one = inner_one + "."
+    nested = f"rows<[{inner_one}]!{hx}>inline"
+    return f"{prefix}[{nested}]{count}"
+
+
 def normalize_named_anchor_format(raw: Any) -> str:
-    """Whitespace-strip only. Do not strip quotes — ``Format`` may start with ``''`` for ASCII tables."""
-    return str(raw or "").strip()
+    """Whitespace-strip; expand ``[…]!HEX`` terminator shorthand for struct NamedAnchors."""
+    return _normalize_shorthand_bracket_terminator_format(str(raw or "").strip())
 
 
 def decode_ascii_slot(raw: bytes) -> str:
@@ -1386,6 +1414,184 @@ class _TableGrowRepointDialog:
             messagebox.showwarning(
                 "Repoint table",
                 "Pick a different offset than the current table start (or cancel and free space in place).",
+            )
+            return
+        self.result = (off, bool(self._fill_old_var.get()))
+        self._dlg.destroy()
+
+    def _on_cancel(self) -> None:
+        self._dlg.destroy()
+
+
+class _FillBytesPromptDialog:
+    """Ask for hex fill bytes (tiled) before expanding ``!``-terminated nested slots."""
+
+    def __init__(self, parent: tk.Misc) -> None:
+        self.result: Optional[str] = None
+        self._dlg = tk.Toplevel(parent)
+        self._dlg.title("Table slots — fill pattern")
+        self._dlg.transient(parent)
+        self._dlg.grab_set()
+        f = ttk.Frame(self._dlg, padding=10)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            f,
+            text=(
+                "New element bytes are filled by tiling this hex pattern (even length).\n"
+                "Examples: 00 → 0x00 per byte; 0000 → two-byte pattern for 16-bit slots.\n"
+                "Leave empty for 0x00."
+            ),
+            wraplength=420,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self._var = tk.StringVar(value="00")
+        ttk.Entry(f, textvariable=self._var, width=28, font=("Consolas", 9)).grid(row=1, column=0, sticky="ew")
+        btnf = ttk.Frame(f)
+        btnf.grid(row=2, column=0, sticky="e", pady=(12, 0))
+        ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
+        f.columnconfigure(0, weight=1)
+        self._dlg.bind("<Escape>", lambda e: self._on_cancel())
+        self._dlg.wait_window()
+
+    def _on_ok(self) -> None:
+        self.result = self._var.get()
+        self._dlg.destroy()
+
+    def _on_cancel(self) -> None:
+        self._dlg.destroy()
+
+
+class _PointedBlobRepointDialog:
+    """When a pointer-backed nested ``!`` blob cannot grow in place, pick a new allocation start (FF gap search)."""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        hex_editor: "HexEditorFrame",
+        need_bytes: int,
+        excl_lo: int,
+        excl_hi: int,
+        ptr_alloc_start: int,
+        ptr_field_name: str,
+        desc: str,
+    ) -> None:
+        self.result: Optional[Tuple[int, bool]] = None
+        self._need = int(need_bytes)
+        self._excl_lo = int(excl_lo)
+        self._excl_hi = int(excl_hi)
+        self._old_base = int(ptr_alloc_start)
+        self._hex = hex_editor
+        self._dlg = tk.Toplevel(parent)
+        self._dlg.title("Repoint pointer target — not enough free space")
+        self._dlg.transient(parent)
+        self._dlg.grab_set()
+        f = ttk.Frame(self._dlg, padding=10)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            f,
+            text=(
+                f"Not enough consecutive 0xFF space after the nested terminator to grow in place.\n\n"
+                f"{desc}\n"
+                f"Pointer field: {ptr_field_name!r} — allocation currently starts at file 0x{self._old_base:X}.\n"
+                f"Expanded blob needs 0x{self._need:X} byte(s) starting at that allocation base.\n\n"
+                "Choose a new **file offset** for the start of the pointed-to block (same address the pointer holds), "
+                "or search for an FF gap. All word-aligned ROM pointers to the old start will be updated.\n"
+            ),
+            wraplength=480,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(f, text="New allocation file offset:", font=("Consolas", 9)).grid(row=1, column=0, sticky="w")
+        self._off_var = tk.StringVar(value="")
+        ttk.Entry(f, textvariable=self._off_var, width=22, font=("Consolas", 9)).grid(
+            row=1, column=1, sticky="ew", pady=2
+        )
+        ttk.Label(f, text="FF gap search from / through:", font=("Consolas", 8), foreground="#666").grid(
+            row=2, column=0, sticky="nw", pady=(8, 0)
+        )
+        gap_f = ttk.Frame(f)
+        gap_f.grid(row=2, column=1, sticky="ew", pady=(8, 0))
+        self._from_var = tk.StringVar(value="")
+        self._to_var = tk.StringVar(value="")
+        ttk.Entry(gap_f, textvariable=self._from_var, width=14, font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Entry(gap_f, textvariable=self._to_var, width=14, font=("Consolas", 8)).pack(side=tk.LEFT)
+        ttk.Label(
+            f,
+            text="(leave both empty to search the whole ROM; end is inclusive)",
+            font=("Consolas", 7),
+            foreground="#666",
+        ).grid(row=3, column=1, sticky="w", pady=(2, 0))
+        ttk.Button(f, text="Search FF gap", command=self._on_search).grid(row=4, column=1, sticky="e", pady=(6, 0))
+        self._fill_old_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            f,
+            text="Fill old allocation range with 0xFF after moving (reclaim as free space)",
+            variable=self._fill_old_var,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        btnf = ttk.Frame(f)
+        btnf.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
+        f.columnconfigure(1, weight=1)
+        self._dlg.bind("<Escape>", lambda e: self._on_cancel())
+        self._dlg.wait_window()
+
+    def _on_search(self) -> None:
+        data = self._hex.get_data()
+        if not data:
+            messagebox.showerror("Repoint pointer target", "No ROM loaded.")
+            return
+        w_lo, w_hi_ex, w_err = parse_ff_gap_search_window_strings(
+            data, self._from_var.get(), self._to_var.get()
+        )
+        if w_err:
+            messagebox.showerror("Repoint pointer target", w_err)
+            return
+        gap = find_disjoint_ff_gap_start(
+            data,
+            self._need,
+            self._excl_lo,
+            self._excl_hi,
+            window_lo=w_lo,
+            window_hi=w_hi_ex,
+        )
+        if gap is None:
+            messagebox.showerror(
+                "Repoint pointer target",
+                f"No qualifying block of {self._need} consecutive 0xFF byte(s) was found. "
+                "Adjust the search range or enter an offset manually.",
+            )
+            return
+        self._off_var.set(f"0x{gap:X}")
+
+    def _on_ok(self) -> None:
+        data = self._hex.get_data()
+        if not data:
+            self._dlg.destroy()
+            return
+        s = self._off_var.get().strip()
+        if not s:
+            messagebox.showwarning(
+                "Repoint pointer target",
+                "Enter a file offset (hex or decimal), or use Search FF gap.",
+            )
+            return
+        try:
+            off = int(s, 0)
+        except ValueError:
+            messagebox.showwarning("Repoint pointer target", "Invalid offset (use decimal or 0x hex).")
+            return
+        if off < 0:
+            messagebox.showwarning("Repoint pointer target", "Offset must be ≥ 0.")
+            return
+        if GBA_ROM_BASE <= off <= GBA_ROM_MAX:
+            off -= GBA_ROM_BASE
+        ok_slot, err = self._hex._dest_accepts_table_write(off, self._need)
+        if not ok_slot:
+            messagebox.showerror("Repoint pointer target", err or "Destination is not free space.")
+            return
+        if off == self._old_base:
+            messagebox.showwarning(
+                "Repoint pointer target",
+                "Pick a different offset than the current allocation start, or cancel.",
             )
             return
         self.result = (off, bool(self._fill_old_var.get()))
@@ -4886,6 +5092,35 @@ def _packed_terminator_table_span_bytes(data: bytes, base_off: int, count: int, 
     return int(pos) - base_off
 
 
+def _count_packed_terminator_rows(data, base_off: int, na_fd: Dict[str, Any], *, max_rows: int = 100000) -> int:
+    """Count packed ``!HEX`` terminator rows in ROM starting at ``base_off`` (0 if none complete).
+
+    Capped at ``max_rows`` to avoid scanning the entire ROM when the terminator pattern
+    (e.g. ``0000``, ``FF``) appears ubiquitously in arbitrary ROM data."""
+    stride = int(na_fd["inner_stride"])
+    term = bytes(na_fd["terminator"])
+    if stride < 1 or not term:
+        return 0
+    pos = base_off
+    lim = len(data)
+    n = 0
+    while pos < lim and n < max_rows:
+        end = _terminator_nested_row_end_exclusive(data, pos, stride, term)
+        if end is None:
+            break
+        n += 1
+        pos = end
+    return n
+
+
+def _is_packed_terminator_shorthand_format(fmt_raw: str) -> bool:
+    """True for ``[inner]!HEX`` packed terminator shorthand (optional erroneous ``]N`` suffix is ignored)."""
+    s = fmt_raw.strip()
+    if s.startswith("^"):
+        s = s[1:].strip()
+    return re.match(r"^\[([^\[\]]*)\]!([0-9a-fA-F]{2,})(?:\](\d+))?\s*$", s) is not None
+
+
 def _struct_anchor_table_span_bytes(data: bytes, info: Dict[str, Any]) -> int:
     """Total ROM bytes covered by one struct NamedAnchor table (fixed stride or packed ``!HEX`` rows)."""
     if info.get("packed_terminator") and info.get("packed_terminator_fd"):
@@ -4976,6 +5211,172 @@ def _nested_array_implicit_row_pointer(fields: List[Dict[str, Any]], na_fd: Dict
         return False
     if not (ni < ci and ci == len(fields) - 1 and ni == 0):
         return False
+    return True
+
+
+def _nested_array_data_base_file(
+    entry_base: int,
+    na_fd: Dict[str, Any],
+    fields: List[Dict[str, Any]],
+    data: bytes,
+) -> Optional[int]:
+    """File offset where a nested array's elements live (same rules as ``_nested_array_data_base`` on the struct UI)."""
+    bpf = na_fd.get("base_ptr_field")
+    if _nested_array_implicit_row_pointer(fields, na_fd):
+        poff = entry_base
+        if poff + 4 > len(data):
+            return None
+        ptr = int.from_bytes(data[poff : poff + 4], "little")
+        if (ptr >> 24) not in (0x08, 0x09):
+            return None
+        fo = ptr - GBA_ROM_BASE
+        if fo < 0 or fo >= len(data):
+            return None
+        return fo
+    if na_fd.get("nested_ptr_is_self_field"):
+        poff = entry_base + int(na_fd["offset"])
+        if poff + 4 > len(data):
+            return None
+        ptr = int.from_bytes(data[poff : poff + 4], "little")
+        if (ptr >> 24) not in (0x08, 0x09):
+            return None
+        fo = ptr - GBA_ROM_BASE
+        if fo < 0 or fo >= len(data):
+            return None
+        return fo
+    if not bpf:
+        return entry_base + int(na_fd["offset"])
+    pfd = next((f for f in fields if str(f.get("name")) == str(bpf)), None)
+    if not pfd or pfd.get("type") not in ("ptr", "pcs_ptr"):
+        return None
+    poff = entry_base + int(pfd["offset"])
+    if poff + 4 > len(data):
+        return None
+    ptr = int.from_bytes(data[poff : poff + 4], "little")
+    if (ptr >> 24) not in (0x08, 0x09):
+        return None
+    fo = ptr - GBA_ROM_BASE
+    if fo < 0 or fo >= len(data):
+        return None
+    return fo + int(na_fd.get("base_ptr_delta") or 0)
+
+
+def _ptr_word_off_and_alloc_start(
+    entry_base: int,
+    na_fd: Dict[str, Any],
+    fields: List[Dict[str, Any]],
+    data: bytes,
+) -> Optional[Tuple[int, int, int]]:
+    """
+    For pointer-backed nested data: ``(ptr_word_file_off, ptr_alloc_file_start, na_base)``.
+    ``ptr_alloc_file_start`` is where the ROM pointer targets (start of allocation); ``na_base`` is where
+    the ``!``-terminated run begins (after ``*offset+N`` delta when applicable).
+    Returns ``None`` if the nested blob is not relocated via a u32 pointer (e.g. inline-only layout).
+    """
+    bpf = na_fd.get("base_ptr_field")
+    if _nested_array_implicit_row_pointer(fields, na_fd):
+        poff = entry_base
+        if poff + 4 > len(data):
+            return None
+        ptr = int.from_bytes(data[poff : poff + 4], "little")
+        if (ptr >> 24) not in (0x08, 0x09):
+            return None
+        fo = ptr - GBA_ROM_BASE
+        if fo < 0 or fo >= len(data):
+            return None
+        return poff, fo, fo
+    if na_fd.get("nested_ptr_is_self_field"):
+        poff = entry_base + int(na_fd["offset"])
+        if poff + 4 > len(data):
+            return None
+        ptr = int.from_bytes(data[poff : poff + 4], "little")
+        if (ptr >> 24) not in (0x08, 0x09):
+            return None
+        fo = ptr - GBA_ROM_BASE
+        if fo < 0 or fo >= len(data):
+            return None
+        return poff, fo, fo
+    if not bpf:
+        return None
+    pfd = next((f for f in fields if str(f.get("name")) == str(bpf)), None)
+    if not pfd or pfd.get("type") not in ("ptr", "pcs_ptr"):
+        return None
+    poff = entry_base + int(pfd["offset"])
+    if poff + 4 > len(data):
+        return None
+    ptr = int.from_bytes(data[poff : poff + 4], "little")
+    if (ptr >> 24) not in (0x08, 0x09):
+        return None
+    fo = ptr - GBA_ROM_BASE
+    if fo < 0 or fo >= len(data):
+        return None
+    na_base = fo + int(na_fd.get("base_ptr_delta") or 0)
+    return poff, fo, na_base
+
+
+def _struct_per_row_terminator_nested_field(fields: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """``!HEX`` nested data stored **per struct row** (under a pointer), not as the whole packed table at ``Address``."""
+    if _struct_is_packed_terminator_only(fields):
+        return None
+    non_h = [f for f in fields if f.get("type") != "helper"]
+    for fd in reversed(non_h):
+        if fd.get("type") == "nested_array" and fd.get("terminator"):
+            return fd
+    return None
+
+
+def _struct_supports_terminator_table_slots(info: Dict[str, Any]) -> bool:
+    """True if the struct has a ``!``-terminated nested run (packed at anchor base, or pointer-backed per row)."""
+    if info.get("packed_terminator") and info.get("packed_terminator_fd"):
+        return True
+    return _struct_per_row_terminator_nested_field(list(info.get("fields") or [])) is not None
+
+
+def _fill_bytes_from_spec(spec: str, total_len: int) -> Tuple[Optional[bytes], str]:
+    """Tile a hex byte pattern to at least ``total_len`` bytes (default unit ``00`` → ``0x00``).
+
+    If the pattern has more bytes than ``total_len`` (e.g. ``FFFF`` with one stride byte), the result is
+    lengthened to hold at least one full pattern cycle so multi-byte fills are not truncated."""
+    if total_len <= 0:
+        return b"", ""
+    s = (spec or "").strip()
+    if not s:
+        unit = b"\x00"
+        min_len = 1
+    else:
+        hx = re.sub(r"\s+", "", s).lower().replace("0x", "")
+        if len(hx) % 2 != 0:
+            return None, "Fill pattern hex must have an even number of digits (e.g. 00 or FFFF)."
+        try:
+            unit = bytes.fromhex(hx)
+        except ValueError:
+            return None, "Invalid hex in fill pattern."
+        if not unit:
+            unit = b"\x00"
+        min_len = len(unit)
+    eff_len = max(total_len, min_len)
+    out = bytearray()
+    while len(out) < eff_len:
+        out.extend(unit)
+    return bytes(out[:eff_len]), ""
+
+
+def _room_expand_terminator_run_inplace(
+    data: bytes, term_start: int, term: bytes, insert_len: int
+) -> bool:
+    """True if ``insert_len`` bytes of free space (0xFF / EOF) follow the terminator at ``term_start``."""
+    tl = len(term)
+    if term_start < 0 or tl <= 0 or insert_len < 0:
+        return False
+    if term_start + tl > len(data):
+        return False
+    if data[term_start : term_start + tl] != term:
+        return False
+    for i in range(term_start + tl, term_start + tl + insert_len):
+        if i >= len(data):
+            return True
+        if data[i] != 0xFF:
+            return False
     return True
 
 
@@ -5262,12 +5663,21 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
 
 
 def _parse_struct_count(fmt: str) -> Any:
-    """Extract the count part after the closing ] in '[fields]count'."""
+    """Extract the row count after ``[fields]`` — ``]count`` suffix, or ``[inner]!HEX`` shorthand.
+
+    For packed ``[inner]!HEX`` shorthand, returns ``1`` as a safe default.  The real row count
+    should be derived from ROM scanning at the point of use (struct editor navigation)."""
     s = fmt.strip()
     if s.startswith("^"):
         s = s[1:]
     if not s.startswith("["):
         return None
+    # ``[rate:]!0000`` or ``[rate:]!0000]3`` — terminator shorthand (default 1 if no ``]digits``).
+    m_short = re.match(r"^\[([^\[\]]*)\]!([0-9a-fA-F]{2,})(?:\](\d+))?\s*$", s)
+    if m_short:
+        if m_short.group(3):
+            return int(m_short.group(3))
+        return 1
     depth = 0
     for i, ch in enumerate(s):
         if ch == "[":
@@ -5510,7 +5920,8 @@ class StructEditorFrame(ttk.Frame):
         ttk.Spinbox(
             nav, from_=1, to=500, width=4, textvariable=self._struct_add_n_var, font=("Consolas", 8)
         ).grid(row=0, column=5, sticky="w")
-        ttk.Button(nav, text="new rows", command=self._on_struct_add_rows).grid(row=0, column=6, sticky="w", padx=(4, 0))
+        self._struct_new_rows_btn = ttk.Button(nav, text="new rows", command=self._on_struct_add_rows)
+        self._struct_new_rows_btn.grid(row=0, column=6, sticky="w", padx=(4, 0))
 
         self._entry_search_frame = ttk.Frame(nav)
         self._entry_search_frame.columnconfigure(1, weight=1)
@@ -5818,6 +6229,25 @@ class StructEditorFrame(ttk.Frame):
         self._tree.grid(row=0, column=0, sticky="nsew")
         sy.grid(row=0, column=1, sticky="ns")
         sx.grid(row=1, column=0, sticky="ew")
+        self._tree_expand_slots_frame = ttk.Frame(tree_f)
+        ttk.Label(self._tree_expand_slots_frame, text="Add", font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 4))
+        self._tree_expand_slots_n_var = tk.IntVar(value=1)
+        ttk.Spinbox(
+            self._tree_expand_slots_frame,
+            from_=1,
+            to=500,
+            width=4,
+            textvariable=self._tree_expand_slots_n_var,
+            font=("Consolas", 8),
+        ).pack(side=tk.LEFT)
+        self._tree_expand_slots_btn = ttk.Button(
+            self._tree_expand_slots_frame,
+            text="table slots",
+            command=self._on_struct_expand_table_slots,
+        )
+        self._tree_expand_slots_btn.pack(side=tk.LEFT, padx=(6, 0))
+        self._tree_expand_slots_frame.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self._tree_expand_slots_frame.grid_remove()
         self._tree.bind("<Return>", self._start_inline_edit)
         self._tree.bind("<F2>", self._start_inline_edit)
         self._tree.bind("<ButtonRelease-1>", self._on_tree_click)
@@ -6987,9 +7417,13 @@ class StructEditorFrame(ttk.Frame):
                 self._on_combo_select()
             else:
                 self._combo.set("")
+                self._tree_expand_slots_frame.grid_remove()
+                self._struct_new_rows_btn.grid_remove()
         else:
             self._combo.set("")
             self._tree.delete(*self._tree.get_children())
+            self._tree_expand_slots_frame.grid_remove()
+            self._struct_new_rows_btn.grid_remove()
 
     def _selected_struct_anchor(self) -> Optional[Dict[str, Any]]:
         name = self._combo.get().strip()
@@ -7000,6 +7434,8 @@ class StructEditorFrame(ttk.Frame):
     def _on_combo_select(self, event: Optional[tk.Event] = None) -> None:
         info = self._selected_struct_anchor()
         if not info:
+            self._tree_expand_slots_frame.grid_remove()
+            self._struct_new_rows_btn.grid_remove()
             return
         self._fields = info["fields"]
         self._entry_count = info["count"]
@@ -7025,6 +7461,23 @@ class StructEditorFrame(ttk.Frame):
             self._entry_search_frame.grid_remove()
         self._load_entry(0)
         self._sync_hex_cursor_to_current_struct_entry(0)
+        self._sync_struct_table_slots_row_buttons()
+
+    def _sync_struct_table_slots_row_buttons(self) -> None:
+        """Under the field tree: **table slots** for any ``!``-terminated nested run; nav **new rows** hidden for packed-only ``!`` tables."""
+        info = self._selected_struct_anchor()
+        if not info:
+            self._tree_expand_slots_frame.grid_remove()
+            self._struct_new_rows_btn.grid_remove()
+            return
+        if _struct_supports_terminator_table_slots(info):
+            self._tree_expand_slots_frame.grid()
+        else:
+            self._tree_expand_slots_frame.grid_remove()
+        if info.get("packed_terminator") and info.get("packed_terminator_fd"):
+            self._struct_new_rows_btn.grid_remove()
+        else:
+            self._struct_new_rows_btn.grid()
 
     def _on_struct_add_rows(self) -> None:
         try:
@@ -7044,6 +7497,39 @@ class StructEditorFrame(ttk.Frame):
         self._anchors = self._hex.get_struct_anchors()
         self._on_combo_select()
         self._idx_var.set(str(old_count))
+        self._on_spin_change()
+
+    def _on_struct_expand_table_slots(self) -> None:
+        try:
+            n = int(self._tree_expand_slots_n_var.get())
+        except (tk.TclError, ValueError):
+            n = 1
+        n = max(1, min(n, 500))
+        info = self._selected_struct_anchor()
+        if not info:
+            messagebox.showinfo("Struct", "Select a struct table first.")
+            return
+        fill_dlg = _FillBytesPromptDialog(self.winfo_toplevel())
+        if fill_dlg.result is None:
+            return
+        fill_spec = fill_dlg.result
+        try:
+            entry_i = int(self._idx_var.get())
+        except (ValueError, tk.TclError):
+            entry_i = 0
+        ok, err = self._hex.expand_struct_table_slots(
+            info,
+            n,
+            entry_i,
+            fill_spec=fill_spec,
+            repoint_parent=self.winfo_toplevel(),
+        )
+        if not ok:
+            messagebox.showerror("Struct", err)
+            return
+        self._anchors = self._hex.get_struct_anchors()
+        self._on_combo_select()
+        self._idx_var.set(str(entry_i))
         self._on_spin_change()
 
     def _on_spin_change(self) -> None:
@@ -7203,6 +7689,8 @@ class StructEditorFrame(ttk.Frame):
         self._entry_index_name_label.grid_remove()
         self._entry_label_pcs_frame.grid_remove()
         self._entry_search_frame.grid_remove()
+        self._tree_expand_slots_frame.grid_remove()
+        self._struct_new_rows_btn.grid_remove()
         self._entry_search_var.set("")
         self._entry_search_matches.clear()
         self._entry_search_match_pos = 0
@@ -8205,6 +8693,8 @@ class HexEditorFrame(ttk.Frame):
         # Hex pane: byte value before the current high-nibble edit (for MatchedWords delta propagation).
         self._hex_pair_snapshot_byte: Optional[int] = None
         self._suppress_matched_word_propagate: bool = False
+        # Cache for get_struct_anchors (ROM-derived packed row counts are expensive).
+        self._struct_anchors_cache: Optional[List[Dict[str, Any]]] = None
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -11041,6 +11531,7 @@ class HexEditorFrame(ttk.Frame):
 
     def _load_toml_bytes_from_path(self, toml_path: str) -> bool:
         """Read and parse TOML at ``toml_path`` into ``self._toml_data``. Returns False on failure."""
+        self._invalidate_struct_anchors_cache()
         loaded = False
         if _TOML_AVAILABLE:
             try:
@@ -12012,8 +12503,8 @@ Format = "`f|u8`[u8 arg0]"
             name = str(anchor.get("Name", "")).strip().strip("'\"")
             if name != ref:
                 continue
-            a_fmt = normalize_named_anchor_format(anchor.get("Format", ""))
-            cr = _parse_struct_count(a_fmt)
+            a_fmt_raw = str(anchor.get("Format", "")).strip()
+            cr = _parse_struct_count(a_fmt_raw)
             if isinstance(cr, int) and cr > 0:
                 return cr
             if isinstance(cr, str):
@@ -12022,23 +12513,23 @@ Format = "`f|u8`[u8 arg0]"
                     return c2
         return None
 
+    def _invalidate_struct_anchors_cache(self) -> None:
+        self._struct_anchors_cache = None
+
     def get_struct_anchors(self) -> List[Dict[str, Any]]:
         """Return NamedAnchors whose Format is a parseable struct (not pure PCS tables)."""
+        if self._struct_anchors_cache is not None:
+            return self._struct_anchors_cache
         result: List[Dict[str, Any]] = []
         pcs_names = {a["name"] for a in self._get_pcs_table_anchors()}
         for anchor in self._toml_data.get("NamedAnchors", []):
             name = str(anchor.get("Name", "")).strip().strip("'\"")
             if name in pcs_names:
                 continue
+            fmt_raw = str(anchor.get("Format", "")).strip()
             fmt = normalize_named_anchor_format(anchor.get("Format", ""))
             fields = _parse_struct_fields(fmt, blist_resolver=self._bit_count_for_blist_ref)
             if not fields:
-                continue
-            count_raw = _parse_struct_count(fmt)
-            if count_raw is None:
-                continue
-            count = count_raw if isinstance(count_raw, int) else self._resolve_struct_count(count_raw)
-            if count is None or count <= 0:
                 continue
             addr = anchor.get("Address")
             if addr is None:
@@ -12068,6 +12559,20 @@ Format = "`f|u8`[u8 arg0]"
                 struct_size = _struct_row_byte_size(fields)
                 if struct_size <= 0:
                     continue
+            explicit_count = anchor.get("Count")
+            if explicit_count is not None:
+                try:
+                    count = int(explicit_count)
+                except (ValueError, TypeError):
+                    count = None
+                count_raw = count
+            else:
+                count_raw = _parse_struct_count(fmt_raw)
+                if count_raw is None:
+                    continue
+                count = count_raw if isinstance(count_raw, int) else self._resolve_struct_count(count_raw)
+            if count is None or count <= 0:
+                continue
             entry_label_pcs: Optional[Dict[str, Any]] = None
             entry_label_list: Optional[str] = None
             if isinstance(count_raw, str):
@@ -12092,6 +12597,7 @@ Format = "`f|u8`[u8 arg0]"
                 "packed_terminator_fd": packed_fd,
             })
         result.sort(key=lambda x: str(x["name"]).lower())
+        self._struct_anchors_cache = result
         return result
 
     def _resolve_struct_count(self, ref: str) -> Optional[int]:
@@ -12114,10 +12620,14 @@ Format = "`f|u8`[u8 arg0]"
         for anchor in self._toml_data.get("NamedAnchors", []):
             a_name = str(anchor.get("Name", "")).strip().strip("'\"")
             if a_name == ref:
-                a_fmt = normalize_named_anchor_format(anchor.get("Format", ""))
-                a_count = _parse_struct_count(a_fmt)
+                a_fmt_raw = str(anchor.get("Format", "")).strip()
+                a_count = _parse_struct_count(a_fmt_raw)
                 if isinstance(a_count, int):
                     return a_count + offset
+                if isinstance(a_count, str):
+                    c3 = self._resolve_struct_count(a_count)
+                    if c3 is not None:
+                        return c3 + offset
         return None
 
     def get_lists(self) -> Dict[str, Dict[int, str]]:
@@ -12179,6 +12689,7 @@ Format = "`f|u8`[u8 arg0]"
                 self._data.append(b)
         self._modified = True
         self._ldr_pc_targets_valid = False
+        self._invalidate_struct_anchors_cache()
         self._schedule_xref_rebuild()
         self._invalidate_xref_index()
         self._total_rows = (len(self._data) + BYTES_PER_ROW - 1) // BYTES_PER_ROW
@@ -12214,6 +12725,42 @@ Format = "`f|u8`[u8 arg0]"
                 if i < len(self._data):
                     self._data[i] = 0xFF
         anchor["Address"] = _toml_named_anchor_address_hex_string(int(new_base))
+        return True, ""
+
+    def _repoint_pointed_allocation(
+        self,
+        old_alloc_lo: int,
+        old_alloc_hi: int,
+        new_blob: bytes,
+        new_alloc_lo: int,
+        fill_old_with_ff: bool,
+    ) -> Tuple[bool, str]:
+        """Write ``new_blob`` at ``new_alloc_lo``; repoint all u32 == old start; optionally FF-fill ``[old_alloc_lo, old_alloc_hi)``."""
+        if not self._data:
+            return False, "No ROM loaded."
+        old_lo = int(old_alloc_lo)
+        old_hi = int(old_alloc_hi)
+        new_lo = int(new_alloc_lo)
+        nb = bytes(new_blob)
+        need = len(nb)
+        if need <= 0:
+            return False, "Internal: empty payload."
+        old_gba = GBA_ROM_BASE + old_lo
+        new_gba = GBA_ROM_BASE + new_lo
+        self.write_bytes_at_extend(new_lo, nb)
+        excl = [
+            (old_lo, old_lo + max(old_hi - old_lo, 4)),
+            (new_lo, new_lo + need),
+        ]
+        self.replace_word_aligned_rom_pointers(old_gba, new_gba, exclude_ranges=excl)
+        if fill_old_with_ff:
+            for i in range(old_lo, old_hi):
+                if i < len(self._data):
+                    self._data[i] = 0xFF
+        self._modified = True
+        self._schedule_xref_rebuild()
+        self._invalidate_xref_index()
+        self._refresh_visible()
         return True, ""
 
     def _struct_list_name_for_append_labels(self, struct_info: Dict[str, Any]) -> Optional[str]:
@@ -12275,13 +12822,23 @@ Format = "`f|u8`[u8 arg0]"
         return True
 
     def _replace_struct_format_literal_count(self, anchor: Dict[str, Any], new_count: int) -> bool:
-        fmt = normalize_named_anchor_format(anchor.get("Format", ""))
-        cr = _parse_struct_count(fmt)
+        raw_in = str(anchor.get("Format", "")).strip()
+        has_caret = raw_in.startswith("^")
+        body = raw_in[1:].strip() if has_caret else raw_in
+        # Packed ``[inner]!HEX`` shorthand: persist count as explicit ``Count`` key — never append ``]N``.
+        m_short = re.match(r"^\[([^\[\]]*)\]!([0-9a-fA-F]{2,})(?:\](\d+))?\s*$", body)
+        if m_short:
+            inner, hx = m_short.group(1), m_short.group(2)
+            if int(new_count) <= 0:
+                return False
+            anchor["Format"] = ("^" if has_caret else "") + f"[{inner}]!{hx}"
+            anchor["Count"] = int(new_count)
+            return True
+        cr = _parse_struct_count(raw_in)
         if not isinstance(cr, int):
             return False
-        raw = fmt.strip()
-        has_caret = raw.startswith("^")
-        s = raw[1:] if has_caret else raw
+        # Standard ``[…]count`` (depth-balanced): replace trailing literal integer after outer ``]``.
+        s = body
         depth = 0
         for i, ch in enumerate(s):
             if ch == "[":
@@ -12410,19 +12967,244 @@ Format = "`f|u8`[u8 arg0]"
             ok, err = self.persist_toml_data()
             if not ok:
                 return False, err
+        self._do_goto(int(new_base))
         self._invoke_anchor_refresh_callback()
         return True, ""
 
+    def _append_packed_terminator_struct_rows(
+        self, struct_info: Dict[str, Any], n: int, fill_spec: str = "00"
+    ) -> Tuple[bool, str]:
+        """Grow a packed ``!HEX>inline`` table: append ``n`` rows after the last ``!`` (each row = fill × stride + terminator)."""
+        name = str(struct_info.get("name", "")).strip()
+        info = self.find_struct_anchor_by_name(name)
+        if not info:
+            return False, f"Struct {name!r} not found."
+        if not info.get("packed_terminator") or not info.get("packed_terminator_fd"):
+            return False, "Internal: expected a packed !HEX terminator table."
+        na_fd = info["packed_terminator_fd"]
+        term = bytes(na_fd["terminator"])
+        stride = int(na_fd["inner_stride"])
+        if not term or stride < 1:
+            return False, "Invalid terminator or inner stride in struct Format."
+        fill_row, ferr = _fill_bytes_from_spec(fill_spec, stride)
+        if fill_row is None:
+            return False, ferr or "Invalid fill pattern."
+        anchor = info["anchor"]
+        old_count = int(info["count"])
+        base_off = int(info["base_off"])
+        cr = info.get("count_ref")
+        fmt_raw = str(anchor.get("Format", "")).strip()
+        count_raw = _parse_struct_count(fmt_raw)
+
+        data = bytes(self._data)
+        span = _packed_terminator_table_span_bytes(data, base_off, old_count, na_fd)
+        if span is None:
+            return (
+                False,
+                "Could not measure packed table (missing terminators, truncated ROM, or incomplete last row).",
+            )
+        insert_off = base_off + int(span)
+        blob = (fill_row + term) * n
+        need = len(blob)
+        old_total = int(span)
+        total_expanded = old_total + need
+
+        def _apply_struct_metadata() -> Tuple[bool, str, bool]:
+            toml_changed = False
+            list_nm = self._struct_list_name_for_append_labels(info)
+            if list_nm:
+                ok, err = self._append_list_placeholders_mut(list_nm, n)
+                if not ok:
+                    return False, err, False
+                toml_changed = True
+            elif isinstance(cr, str):
+                base = _struct_count_ref_base_name(str(cr).strip())
+                if self._resolve_table_length(base) is not None:
+                    if not self._write_matched_word_numeric_value(base, old_count + n):
+                        return False, f"Could not update MatchedWord {base!r} in ROM.", False
+                elif any(str(p["name"]) == base for p in self._get_pcs_table_anchors()):
+                    return (
+                        False,
+                        "This struct's ]count references another PCS table. Add rows to that PCS table first, then reload.",
+                        False,
+                    )
+                elif isinstance(count_raw, str):
+                    return (
+                        False,
+                        f"Unsupported ]count reference {count_raw!r} for adding rows (use a List, literal count, or MatchedWord).",
+                        False,
+                    )
+            elif isinstance(count_raw, int):
+                if not self._replace_struct_format_literal_count(anchor, old_count + n):
+                    return False, "Could not update struct Format row count.", False
+                toml_changed = True
+            else:
+                return False, "Could not determine how this table's size is stored (List / literal / MatchedWord).", False
+            return True, "", toml_changed
+
+        parent = self.winfo_toplevel()
+        if self._room_for_table_grow(insert_off, need):
+            ok_m, err_m, toml_changed = _apply_struct_metadata()
+            if not ok_m:
+                return False, err_m
+            self.write_bytes_at_extend(insert_off, blob)
+            if toml_changed:
+                ok, err = self.persist_toml_data()
+                if not ok:
+                    return False, err
+            self._invoke_anchor_refresh_callback()
+            return True, ""
+
+        dlg = _TableGrowRepointDialog(
+            parent,
+            self,
+            total_expanded,
+            base_off,
+            base_off + old_total,
+            base_off,
+            f"Struct table {name!r} (packed !HEX)",
+        )
+        if dlg.result is None:
+            return False, "Cancelled."
+        new_base, fill_old = dlg.result
+        ok_m, err_m, toml_changed = _apply_struct_metadata()
+        if not ok_m:
+            return False, err_m
+        ok_r, err_r = self._repoint_anchor_table_for_grow(
+            anchor, base_off, old_total, blob, new_base, fill_old
+        )
+        if not ok_r:
+            return False, err_r
+        if toml_changed:
+            ok, err = self.persist_toml_data()
+            if not ok:
+                return False, err
+        self._do_goto(int(new_base))
+        self._invoke_anchor_refresh_callback()
+        return True, ""
+
+    def _append_per_row_terminator_slots(
+        self,
+        struct_info: Dict[str, Any],
+        n: int,
+        entry_idx: int,
+        fill_spec: str,
+        repoint_parent: Optional[tk.Misc],
+    ) -> Tuple[bool, str]:
+        """Per-row ``!`` nested blob: insert ``n`` element strides of fill bytes before the terminator."""
+        name = str(struct_info.get("name", "")).strip()
+        info = self.find_struct_anchor_by_name(name)
+        if not info:
+            return False, f"Struct {name!r} not found."
+        fields = list(info.get("fields") or [])
+        na_fd = _struct_per_row_terminator_nested_field(fields)
+        if not na_fd:
+            return False, "Internal: expected a per-row ! terminator nested field."
+        old_count = int(info["count"])
+        if old_count <= 0:
+            return False, "Struct has no rows."
+        ei = max(0, min(int(entry_idx), old_count - 1))
+        struct_size = int(info["struct_size"])
+        base_off = int(info["base_off"])
+        entry_base = base_off + ei * struct_size
+        term = bytes(na_fd["terminator"])
+        stride = int(na_fd["inner_stride"])
+        if not term or stride < 1:
+            return False, "Invalid terminator or inner stride in struct Format."
+        fill_chunk, ferr = _fill_bytes_from_spec(fill_spec, n * stride)
+        if fill_chunk is None:
+            return False, ferr or "Invalid fill pattern."
+        data = bytes(self._data)
+        na_base = _nested_array_data_base_file(entry_base, na_fd, fields, data)
+        if na_base is None:
+            return False, "Could not resolve nested list pointer (invalid GBA pointer?)."
+        end = _terminator_nested_row_end_exclusive(data, na_base, stride, term)
+        if end is None:
+            return False, "Could not find nested ! terminator for this row (truncated ROM?)."
+        term_start = end - len(term)
+        blob = fill_chunk + term
+        if _room_expand_terminator_run_inplace(data, term_start, term, len(fill_chunk)):
+            self.write_bytes_at_extend(term_start, blob)
+            self._invoke_anchor_refresh_callback()
+            return True, ""
+
+        reloc = _ptr_word_off_and_alloc_start(entry_base, na_fd, fields, data)
+        if reloc is None:
+            return (
+                False,
+                "Not enough 0xFF padding after the nested terminator to grow in place, and this layout has no "
+                "relocatable pointer (inline nested data). Free space or change the format.",
+            )
+        _poff, ptr_lo, na_chk = reloc
+        if na_chk != na_base:
+            return False, "Internal: nested base mismatch."
+        prefix = data[ptr_lo:na_base]
+        expanded = data[na_base:term_start] + fill_chunk + term
+        new_blob = prefix + expanded
+        need = len(new_blob)
+        if na_fd.get("base_ptr_field"):
+            ptr_label = str(na_fd["base_ptr_field"])
+        elif na_fd.get("nested_ptr_is_self_field"):
+            ptr_label = str(na_fd.get("name") or "pointer")
+        else:
+            ptr_label = "pointer"
+        desc = f"Struct {name!r}, row index {ei}."
+        par = repoint_parent if repoint_parent is not None else self.winfo_toplevel()
+        dlg = _PointedBlobRepointDialog(
+            par,
+            self,
+            need,
+            ptr_lo,
+            end,
+            ptr_lo,
+            ptr_label,
+            desc,
+        )
+        if dlg.result is None:
+            return False, "Cancelled."
+        new_off, fill_old = dlg.result
+        ok_r, err_r = self._repoint_pointed_allocation(ptr_lo, end, new_blob, new_off, fill_old)
+        if not ok_r:
+            return False, err_r
+        self._do_goto(int(new_off))
+        self._invoke_anchor_refresh_callback()
+        return True, ""
+
+    def expand_struct_table_slots(
+        self,
+        struct_info: Dict[str, Any],
+        n: int,
+        entry_idx: int = 0,
+        *,
+        fill_spec: str = "00",
+        repoint_parent: Optional[tk.Misc] = None,
+    ) -> Tuple[bool, str]:
+        """Grow a ``!``-terminated nested table: packed rows at the anchor base, or slots inside the selected row's blob."""
+        if n <= 0:
+            return False, "Count must be positive."
+        if not self._data:
+            return False, "No ROM loaded."
+        if not self._toml_path or not os.path.isfile(self._toml_path):
+            return False, "Save or load a structure TOML next to the ROM before editing."
+        if struct_info.get("packed_terminator") and struct_info.get("packed_terminator_fd"):
+            return self._append_packed_terminator_struct_rows(struct_info, n, fill_spec=fill_spec)
+        fields = list(struct_info.get("fields") or [])
+        if not _struct_per_row_terminator_nested_field(fields):
+            return False, "This struct has no !-terminated nested table to expand."
+        return self._append_per_row_terminator_slots(
+            struct_info, n, entry_idx, fill_spec, repoint_parent
+        )
+
     def append_struct_table_rows(self, struct_info: Dict[str, Any], n: int) -> Tuple[bool, str]:
-        """Add ``n`` zero-filled struct rows at the end; extend ``[[List]]`` when the table uses a List."""
+        """Add ``n`` top-level struct rows (fixed stride or packed ``!`` at the table base)."""
         if n <= 0:
             return False, "Count must be positive."
         if not self._data:
             return False, "No ROM loaded."
         if not self._toml_path or not os.path.isfile(self._toml_path):
             return False, "Save or load a structure TOML next to the ROM before adding rows."
-        if struct_info.get("packed_terminator"):
-            return False, "Adding rows is not supported for packed !HEX terminator tables yet."
+        if struct_info.get("packed_terminator") and struct_info.get("packed_terminator_fd"):
+            return self._append_packed_terminator_struct_rows(struct_info, n)
         name = str(struct_info.get("name", "")).strip()
         info = self.find_struct_anchor_by_name(name)
         if not info:
@@ -12432,8 +13214,8 @@ Format = "`f|u8`[u8 arg0]"
         struct_size = int(info["struct_size"])
         base_off = int(info["base_off"])
         cr = info.get("count_ref")
-        fmt_norm = normalize_named_anchor_format(anchor.get("Format", ""))
-        count_raw = _parse_struct_count(fmt_norm)
+        fmt_raw = str(anchor.get("Format", "")).strip()
+        count_raw = _parse_struct_count(fmt_raw)
         insert_off = base_off + old_count * struct_size
         blob = b"\x00" * (n * struct_size)
         need = len(blob)
@@ -12510,6 +13292,7 @@ Format = "`f|u8`[u8 arg0]"
             ok, err = self.persist_toml_data()
             if not ok:
                 return False, err
+        self._do_goto(int(new_base))
         self._invoke_anchor_refresh_callback()
         return True, ""
 
@@ -12956,6 +13739,7 @@ Format = "`f|u8`[u8 arg0]"
         self._anchor_refresh_callback = cb
 
     def _invoke_anchor_refresh_callback(self) -> None:
+        self._invalidate_struct_anchors_cache()
         if self._anchor_refresh_callback is None:
             return
         try:
