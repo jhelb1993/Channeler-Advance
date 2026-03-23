@@ -12704,119 +12704,9 @@ Address = 0x19D34C
 Format = '''`ydk`data.cards.passwords[card:cardinternalnumbers]40'''
 
 [[NamedAnchors]]
-Name = '''data.decks.tier1.tristantaylor.cards'''
-Address = 0x19D530
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier1.teagardner.cards'''
-Address = 0x19D3EC
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier1.joeywheeler.cards'''
-Address = 0x19D48C
-Format = '''[card:cardinternalnumbers]41'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier1.bakuraryou.cards'''
-Address = 0x19D5D0
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier2.rexraptor.cards'''
-Address = 0x19D670
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier2.esparoba.cards'''
-Address = 0x19D6C0
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier2.weevilunderwood.cards'''
-Address = 0x19D710
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier2.makotsunami.cards'''
-Address = 0x19D760
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier2.maivalentine.cards'''
-Address = 0x19D7B0
-Format = '''[card:cardinternalnumbers]41'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier3.rarehunter.cards'''
-Address = 0x19D802
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier3.arkana.cards'''
-Address = 0x19D852
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier3.string.cards'''
-Address = 0x19D8A2
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier3.umbraandlumis.cards'''
-Address = 0x19D8F2
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier3.marikishtar.cards'''
-Address = 0x19D942
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier4.setokaiba.cards'''
-Address = 0x19D992
-Format = '''[card:cardinternalnumbers]42'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier4.ishizuishtar.cards'''
-Address = 0x19D9E6
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier4.shadi.cards'''
-Address = 0x19DA36
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier4.yamibakura.cards'''
-Address = 0x19DA86
-Format = '''[card:cardinternalnumbers]41'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier4.yamiyugi.cards'''
-Address = 0x19DAD8
-Format = '''[card:cardinternalnumbers]41'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier5.duelcomputer.cards'''
-Address = 0x19DB2A
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier5.simon.cards'''
-Address = 0x19DB7A
-Format = '''[card:cardinternalnumbers]40'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier5.maximillionpegasus.cards'''
-Address = 0x19DBCA
-Format = '''[card:cardinternalnumbers]41'''
-
-[[NamedAnchors]]
-Name = '''data.decks.tier5.trusdale.cards'''
-Address = 0x19DC1C
-Format = '''[card:cardinternalnumbers]40'''
+Name = '''data.decks2'''
+Address = 0x19DC74
+Format = '''[offset<`ydk`data.cards.passwords[card:cardinternalnumbers]/length> length. padding:.]duelists'''
 
 [[NamedAnchors]]
 Name = '''data.specialpacks.weeklygiftpacka.cards.normal'''
@@ -13216,12 +13106,12 @@ Format = '''[card:cardinternalnumbers]5'''
 [[NamedAnchors]]
 Name = '''data.packs.geminielf.pointers'''
 Address = 0x1A4F0C
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.launcherspider.pointers'''
 Address = 0x1A4948
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.gateguardian.cards.normal'''
@@ -13296,127 +13186,127 @@ Format = '''[card:cardinternalnumbers]5'''
 [[NamedAnchors]]
 Name = '''data.packs.darkmagician.pointers'''
 Address = 0x1A457C
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.mysticalelf.pointers'''
 Address = 0x1A460C
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.redeyesblackdragon.pointers'''
 Address = 0x1A46B0
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.judgeman.pointers'''
 Address = 0x1A4DF4
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.blueeyeswhitedragon.pointers'''
 Address = 0x1A4A04
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.exodia.pointers'''
 Address = 0x1A4AC8
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.tigeraxe.pointers'''
 Address = 0x1A4E74
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.cyberharpie.pointers'''
 Address = 0x1A4754
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.gateguardian.pointers'''
 Address = 0x1A47F8
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.garoozis.pointers'''
 Address = 0x1A515C
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.greatmoth.pointers'''
 Address = 0x1A48A0
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.relinquished.pointers'''
 Address = 0x1A4B6C
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.blueeyestoondragon.pointers'''
 Address = 0x1A4C14
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.battleox.pointers'''
 Address = 0x1A51F0
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.blueeyesultimatedragon.pointers'''
 Address = 0x1A4D10
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.blacklustersoldier.pointers'''
 Address = 0x1A4D70
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.bluemillenniumpuzzle.pointers'''
 Address = 0x1A4F94
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.eyeofwdjat.pointers'''
 Address = 0x1A50BC
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.busterblader.pointers'''
 Address = 0x1A4CBC
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.greenmillenniumpuzzle.pointers'''
 Address = 0x1A5018
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.yellowmillenniumpuzzle.pointers'''
 Address = 0x1A5280
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.specialpacks.grandpa.pointers'''
 Address = 0x1A5598
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.specialpacks.magazine.pointers'''
 Address = 0x1A5490
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.specialpacks.weeklygiftpacka.pointers'''
 Address = 0x1A53E8
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.specialpacks.weeklygiftpackb.pointers'''
 Address = 0x1A5538
-Format = '''[deck<""> cardamount. padding:.]8'''
+Format = '''[deck<> cardamount. padding:.]8'''
 
 [[NamedAnchors]]
 Name = '''data.packs.blueeyeswhitedragon.cards.secret'''
@@ -17049,6 +16939,31 @@ Name = '''attributes'''
    '''WIND''',
 ]
 
-#################################
-#################################
-#################################
+[[List]]
+Name = '''duelists'''
+0 = [
+	'''tier1.yugimuto''',
+	'''tier1.tristantaylor''',
+	'''tier1.teagardner''',
+	'''tier1.joeywheeler''',
+	'''tier1.bakuraryou''',
+	'''tier2.rexraptor''',
+	'''tier2.esparoba''',
+	'''tier2.weevilunderwood''',
+	'''tier2.makotsunami''',
+	'''tier2.maivalentine''',
+	'''tier3.rarehunter''',
+	'''tier3.arkana''',
+	'''tier3.string''',
+	'''tier3.umbraandlumis''',
+	'''tier3.marikishtar''',
+	'''tier4.setokaiba''',
+	'''tier4.ishizuishtar''',
+	'''tier4.shadi''',
+	'''tier4.yamibakura''',
+	'''tier4.yamiyugi''',
+	'''tier5.duelcomputer''',
+	'''tier5.simon''',
+	'''tier5.maximillionpegasus''',
+	'''tier5.trusdale''',
+]

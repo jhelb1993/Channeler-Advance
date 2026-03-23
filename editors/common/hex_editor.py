@@ -961,6 +961,71 @@ def encode_ascii_slot(text: str, width: int) -> bytearray:
     return out[:width]
 
 
+def _normalize_offset_angle_open_bracket_before_ydk(t: str) -> str:
+    """Insert ``[`` after ``offset<`` when a `` `ydk` `` deck inner omits it.
+
+    Valid nested-array form is ``offset<[`ydk`Anchor[card:List]…``; TOML often has ``offset<`ydk`…`` with no
+    ``[`` between ``<`` and the backticks, which breaks bracket matching for the outer struct."""
+    return re.sub(r"offset<(?!\[)\s*(`ydk`)", r"offset<[\1", str(t or ""), flags=re.IGNORECASE)
+
+
+def _normalize_offset_inner_card_before_count_slash(t: str) -> str:
+    """Insert missing ``]`` before ``/countField>`` after ``[card:List]`` inside ``offset<[`…``.
+
+    Writers often use ``…[card:List]/length>``; the bracket that closes the ``offset<[`` slice must appear
+    **before** ``/length>``, i.e. ``…[card:List]]/length>``."""
+    return re.sub(
+        r"(\[card\s*:\s*[\w.]+\s*\])\s*/(\w+)>",
+        r"\1]/\2>",
+        str(t or ""),
+        flags=re.IGNORECASE,
+    )
+
+
+def _normalize_nested_array_slash_count_bracket_order(t: str) -> str:
+    """Fix mistaken ``…]/countField>]`` when the ``]`` that should close ``name<[`` was written *after* ``/countField>``.
+
+    Correct form is ``…]/countField>``. A common typo is ``[inner[card:x]/length>]`` (one ``]`` short before
+    ``/length>``); normalize to ``[inner[card:x]]/length>`` by rewriting the tail ``]/count>`` + extra ``]``.
+    """
+    return re.sub(r"(\])(/(\w+)>\s*\])", r"\1]/\3>", str(t or ""))
+
+
+def _normalize_ydk_deck_struct_shorthand_format(t: str) -> str:
+    """Expand minimal `` `ydk` `` deck lines into offset-style structs so :func:`_parse_struct_fields` accepts them.
+
+    * `` `ydk`anchor[card:List]N`` (no outer brackets) — common in TOML; struct loader requires ``[…]N``.
+    * ``[`ydk`anchor[card:List]!HEX>]N`` — inner body does not tokenize as fields; same expansion.
+
+    Both become ``[offset<padding:::: main: `ydk`…[card:…]!0000>]N`` (matches working ``offset<…>`` sugar).
+    """
+    s = str(t or "").strip()
+    if not s:
+        return s
+    m_wrapped = re.match(
+        r"^\[\s*`ydk`([\w.]+)\s*\[\s*card\s*:\s*([\w.]+)\s*\]\s*!([0-9a-fA-F]{2,})\s*>\s*\]\s*(\d+)\s*$",
+        s,
+        re.IGNORECASE,
+    )
+    if m_wrapped:
+        a, lst, hx, cnt = (
+            m_wrapped.group(1),
+            m_wrapped.group(2),
+            m_wrapped.group(3).lower(),
+            m_wrapped.group(4),
+        )
+        return f"[offset<padding:::: main: `ydk`{a}[card:{lst}]!{hx}>]{cnt}"
+    m_bare = re.match(
+        r"^\s*`ydk`([\w.]+)\s*\[\s*card\s*:\s*([\w.]+)\s*\]\s*(\d+)\s*$",
+        s,
+        re.IGNORECASE,
+    )
+    if m_bare:
+        a, lst, cnt = m_bare.group(1), m_bare.group(2), m_bare.group(3)
+        return f"[offset<padding:::: main: `ydk`{a}[card:{lst}]!0000>]{cnt}"
+    return s
+
+
 def _normalize_shorthand_bracket_terminator_format(s: str) -> str:
     """
     Expand legacy ``[fields]!HEX`` where ``!HEX`` starts the ``!``-terminated nested blob (not ``]count``).
@@ -972,6 +1037,10 @@ def _normalize_shorthand_bracket_terminator_format(s: str) -> str:
     if t.startswith("^"):
         prefix = "^"
         t = t[1:].strip()
+    t = _normalize_offset_angle_open_bracket_before_ydk(t)
+    t = _normalize_offset_inner_card_before_count_slash(t)
+    t = _normalize_nested_array_slash_count_bracket_order(t)
+    t = _normalize_ydk_deck_struct_shorthand_format(t)
     if "<[" in t and "!>" in t:
         return prefix + t
     m = re.match(r"^\[([^\[\]]*)\]!([0-9a-fA-F]{2,})(?:\](\d+))?\s*$", t)
@@ -989,9 +1058,19 @@ def _normalize_shorthand_bracket_terminator_format(s: str) -> str:
     return f"{prefix}[{nested}]{count}"
 
 
+def _strip_trailing_ydk_struct_format_tag(t: str) -> str:
+    """Drop trailing `` `ydk`Anchor`` after ``]rowCount`` so the struct parses while :func:`_struct_format_has_ydk_import_marker` still sees it in *fmt_raw*."""
+    s = str(t or "").strip()
+    m = re.match(r"^(.+?\]\s*[^\s\[\]]+)\s+(`ydk`[\w.]*)\s*$", s, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return s
+
+
 def normalize_named_anchor_format(raw: Any) -> str:
-    """Whitespace-strip; expand ``[…]!HEX`` terminator shorthand for struct NamedAnchors."""
-    return _normalize_shorthand_bracket_terminator_format(str(raw or "").strip())
+    """Whitespace-strip; expand ``[…]!HEX`` terminator shorthand and minimal `` `ydk` `` deck lines for struct NamedAnchors."""
+    t = _normalize_shorthand_bracket_terminator_format(str(raw or "").strip())
+    return _strip_trailing_ydk_struct_format_tag(t)
 
 
 def decode_ascii_slot(raw: bytes) -> str:
@@ -4928,6 +5007,29 @@ def _parse_struct_inner_content_to_fields(inner: str) -> Optional[List[Dict[str,
     return fields if fields else None
 
 
+def _parse_nested_array_inner_body_fields(inner_body: str) -> Optional[List[Dict[str, Any]]]:
+    """Parse ``inner`` for ``name<[inner]/count>``.
+
+    Flat tokens only. A bare `` `ydk`Anchor[card:List] `` fragment (same spelling as deck imports) names
+    the password table and card list but is treated like ``card:List`` for layout: packed little-endian u16
+    indices, stride 2, with the outer ``/count`` field giving the card count.
+    """
+    flat = _parse_struct_inner_content_to_fields(inner_body)
+    if flat is not None:
+        return flat
+    m = re.match(
+        r"^\s*`ydk`\s*([\w.]+)\s*\[\s*card\s*:\s*([\w.]+)\s*\]\s*$",
+        inner_body.strip(),
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    lst = (m.group(2) or "").strip()
+    if not lst:
+        return None
+    return _parse_struct_inner_content_to_fields(f"card:{lst}")
+
+
 def _struct_field_omitted_from_editor_tree(fd: Optional[Dict[str, Any]]) -> bool:
     """True for layout-only names ``padding`` / ``unused``: bytes still define struct layout; tree omits the row."""
     if not fd:
@@ -5149,8 +5251,15 @@ def _validate_nested_array_fields(fields: List[Dict[str, Any]]) -> bool:
             if i != len(fields) - 1:
                 return False
         elif ni < ci:
+            # Nested field before count: count uint is usually last (``[options<…/c> c::]``). Allow
+            # trailing fixed slots (e.g. ``padding:.``) after the count when they are plain uint/PCS/ASCII.
             if ci != len(fields) - 1:
-                return False
+                for j in range(ci + 1, len(fields)):
+                    fj = fields[j]
+                    if fj.get("type") == "helper":
+                        continue
+                    if fj.get("type") not in ("uint", "pcs", "ascii"):
+                        return False
         else:
             return False
         bpf = fd.get("base_ptr_field")
@@ -5690,7 +5799,7 @@ def _try_parse_nested_array_token(token: str) -> Optional[Dict[str, Any]]:
     if not inner_s.startswith("[") or not inner_s.endswith("]"):
         return None
     inner_body = inner_s[1:-1].strip()
-    inner_fields = _parse_struct_inner_content_to_fields(inner_body)
+    inner_fields = _parse_nested_array_inner_body_fields(inner_body)
     if not inner_fields:
         return None
     inner_stride = sum(
@@ -11779,10 +11888,15 @@ class HexEditorFrame(ttk.Frame):
     def _resolve_toml_path_for_rom(self, rom_path: str) -> Tuple[str, bool]:
         """Pick which TOML to load next to the ROM.
 
-        Prefer ``{ROM stem}.toml``. If missing, accept well-known project names
-        (``wct06.toml``, ``BPRE0.toml``) or a single ``*.toml`` in the same
-        folder — so a ROM with a different basename still picks up the repo
-        structure file.
+        Prefer ``{ROM stem}.toml``, then ``{ROM stem}_test.toml`` (common in this repo).
+
+        If those are missing, try well-known project files (``wct06_test.toml`` before ``wct06.toml`` so the
+        edited test TOML wins when both exist). ``EDS.toml`` is included for EDS projects whose ROM name does
+        not match ``EDS.toml`` — use **File → Load structure TOML** to force that file if another fallback
+        matches first.
+
+        If the folder has exactly one ``*.toml``, use it. Otherwise return ``{stem}.toml`` (may not exist) so
+        the caller can create a default.
 
         Returns (path, exists_on_disk).
         """
@@ -11791,7 +11905,17 @@ class HexEditorFrame(ttk.Frame):
         primary = os.path.join(rom_dir, stem + ".toml")
         if os.path.isfile(primary):
             return primary, True
-        for name in ("wct06.toml", "BPRE0.toml", "bpred.toml"):
+        stem_test = os.path.join(rom_dir, stem + "_test.toml")
+        if os.path.isfile(stem_test):
+            return stem_test, True
+        for name in (
+            "wct06_test.toml",
+            "wct06.toml",
+            "BPRE0_test.toml",
+            "BPRE0.toml",
+            "EDS.toml",
+            "bpred.toml",
+        ):
             alt = os.path.join(rom_dir, name)
             if os.path.isfile(alt):
                 return alt, True
@@ -12835,7 +12959,9 @@ Format = "`f|u8`[u8 arg0]"
                 struct_size = _struct_row_byte_size(fields)
                 if struct_size <= 0:
                     continue
-            count_raw = _parse_struct_count(fmt_raw)
+            # Use normalized Format for ]count — bare `` `ydk`…[card:…]N`` TOML has no leading ``[``, so
+            # :func:`_parse_struct_count` would return None on *fmt_raw* even when *fields* parsed from *fmt*.
+            count_raw = _parse_struct_count(fmt)
             if count_raw is None:
                 continue
             count = count_raw if isinstance(count_raw, int) else self._resolve_struct_count(count_raw)
@@ -13277,7 +13403,8 @@ Format = "`f|u8`[u8 arg0]"
         base_off = int(info["base_off"])
         cr = info.get("count_ref")
         fmt_raw = str(anchor.get("Format", "")).strip()
-        count_raw = _parse_struct_count(fmt_raw)
+        fmt_n = normalize_named_anchor_format(anchor.get("Format", ""))
+        count_raw = _parse_struct_count(fmt_n)
 
         data = bytes(self._data)
         span = _packed_terminator_table_span_bytes(data, base_off, old_count, na_fd)
@@ -13539,7 +13666,8 @@ Format = "`f|u8`[u8 arg0]"
         base_off = int(info["base_off"])
         cr = info.get("count_ref")
         fmt_raw = str(anchor.get("Format", "")).strip()
-        count_raw = _parse_struct_count(fmt_raw)
+        fmt_n = normalize_named_anchor_format(anchor.get("Format", ""))
+        count_raw = _parse_struct_count(fmt_n)
         insert_off = base_off + old_count * struct_size
         blob = b"\x00" * (n * struct_size)
         need = len(blob)
@@ -14206,7 +14334,7 @@ Format = "`f|u8`[u8 arg0]"
         struct_size = _struct_row_byte_size(fields)
         if struct_size <= 0:
             return None, f"Could not compute row size for {password_anchor_name!r}."
-        count_raw = _parse_struct_count(fmt_raw)
+        count_raw = _parse_struct_count(fmt)
         if count_raw is None:
             return None, f"Could not read row count for {password_anchor_name!r}."
         n = count_raw if isinstance(count_raw, int) else self._resolve_struct_count(str(count_raw))
