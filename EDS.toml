@@ -7849,661 +7849,6 @@ Address = 0x29DC20
 Format = '''''480'''
 
 [[NamedAnchors]]
-Name = '''data.cards.descriptions.twinheadedthunderdragon'''
-Address = 0x29DE00
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.twoheadedkingrex'''
-Address = 0x29DFE0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.twomouthdarkruler'''
-Address = 0x29E1C0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.twoprongedattack'''
-Address = 0x29E3A0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.tyhone'''
-Address = 0x29E580
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.tyhone2'''
-Address = 0x29E760
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.ufoturtle'''
-Address = 0x29E940
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.ultimateoffering'''
-Address = 0x29EB20
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.umi'''
-Address = 0x29ED00
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.umiiruka'''
-Address = 0x29EEE0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.unknownwarrioroffiend'''
-Address = 0x29F0C0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.upstartgoblin'''
-Address = 0x29F2A0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.uraby'''
-Address = 0x29F480
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.ushioni'''
-Address = 0x29F660
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.valkyrionthemagnawarrior'''
-Address = 0x29F840
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.vermillionsparrow'''
-Address = 0x29FA20
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.versagothedestroyer'''
-Address = 0x29FC00
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.vilegerms'''
-Address = 0x29FDE0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.violentrain'''
-Address = 0x29FFC0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.violetcrystal'''
-Address = 0x2A01A0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.vishwarrandi'''
-Address = 0x2A0380
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.vorseraider'''
-Address = 0x2A0560
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.waboku'''
-Address = 0x2A0740
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.wallofillusion'''
-Address = 0x2A0920
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.wallshadow'''
-Address = 0x2A0B00
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.warlionritual'''
-Address = 0x2A0CE0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.warriorelimination'''
-Address = 0x2A0EC0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.warrioroftradition'''
-Address = 0x2A10A0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.wasteland'''
-Address = 0x2A1280
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.waterelement'''
-Address = 0x2A1460
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.watergirl'''
-Address = 0x2A1640
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.watermagician'''
-Address = 0x2A1820
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.wateromotics'''
-Address = 0x2A1A00
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.waterdragonfairy'''
-Address = 0x2A1BE0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.weathercontrol'''
-Address = 0x2A1DC0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.weatherreport'''
-Address = 0x2A1FA0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.whiptailcrow'''
-Address = 0x2A2180
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.whitehole'''
-Address = 0x2A2360
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.whitemagicalhat'''
-Address = 0x2A2540
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.wickedmirror'''
-Address = 0x2A2720
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.widespreadruin'''
-Address = 0x2A2900
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.windstormofetaqua'''
-Address = 0x2A2AE0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.wingeggelf'''
-Address = 0x2A2CC0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.wingedcleaver'''
-Address = 0x2A2EA0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.wingeddragonguardianofthefortress1'''
-Address = 0x2A3080
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.wingsofwickedflame'''
-Address = 0x2A3260
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.witchoftheblackforest'''
-Address = 0x2A3440
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.witchsapprentice'''
-Address = 0x2A3620
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.wittyphantom'''
-Address = 0x2A3800
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.wodantheresidentoftheforest'''
-Address = 0x2A39E0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.woodremains'''
-Address = 0x2A3BC0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.worldsuppression'''
-Address = 0x2A3DA0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.wowwarrior'''
-Address = 0x2A3F80
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.wretchedghostoftheattic'''
-Address = 0x2A4160
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.yadokaru'''
-Address = 0x2A4340
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.yaibarobo'''
-Address = 0x2A4520
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.yamatanodragonscroll'''
-Address = 0x2A4700
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.yami'''
-Address = 0x2A48E0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.yaranzo'''
-Address = 0x2A4AC0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.zanki'''
-Address = 0x2A4CA0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.zeraritual'''
-Address = 0x2A4E80
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.zerathemant'''
-Address = 0x2A5060
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.zoa'''
-Address = 0x2A5240
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.zombiewarrior'''
-Address = 0x2A5420
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.zoneeater'''
-Address = 0x2A5600
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.themonarchy'''
-Address = 0x2A57E0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.setsailforthekingdom'''
-Address = 0x2A59C0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.gloryofthekingshand'''
-Address = 0x2A5BA0
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.obeliskthetormentor'''
-Address = 0x2A5D80
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.slifertheskydragon'''
-Address = 0x2A5F60
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.thewingeddragonofra'''
-Address = 0x2A6140
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.cards.descriptions.insectmonstertoken'''
-Address = 0x2A6320
-Format = '''''480'''
-
-[[NamedAnchors]]
-Name = '''data.packs.redeyesblackdragon.cards.secret'''
-Address = 0x1A464C
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.redeyesblackdragon.cards.ultra'''
-Address = 0x1A464E
-Format = '''[card:cardinternalnumbers]2'''
-
-[[NamedAnchors]]
-Name = '''data.packs.redeyesblackdragon.cards.super'''
-Address = 0x1A4652
-Format = '''[card:cardinternalnumbers]3'''
-
-[[NamedAnchors]]
-Name = '''data.packs.redeyesblackdragon.cards.rare'''
-Address = 0x1A4658
-Format = '''[card:cardinternalnumbers]5'''
-
-[[NamedAnchors]]
-Name = '''data.packs.redeyesblackdragon.cards.common'''
-Address = 0x1A4662
-Format = '''[card:cardinternalnumbers]39'''
-
-[[NamedAnchors]]
-Name = '''data.packs.cyberharpie.cards.common'''
-Address = 0x1A4708
-Format = '''[card:cardinternalnumbers]38'''
-
-[[NamedAnchors]]
-Name = '''data.packs.gateguardian.cards.rare'''
-Address = 0x1A47A4
-Format = '''[card:cardinternalnumbers]5'''
-
-[[NamedAnchors]]
-Name = '''data.packs.gateguardian.cards.common'''
-Address = 0x1A47AE
-Format = '''[card:cardinternalnumbers]37'''
-
-[[NamedAnchors]]
-Name = '''data.packs.greatmoth.cards.normal'''
-Address = 0x1A4838
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.greatmoth.cards.secret'''
-Address = 0x1A483A
-Format = '''[card:cardinternalnumbers]3'''
-
-[[NamedAnchors]]
-Name = '''data.packs.greatmoth.cards.ultra'''
-Address = 0x1A4840
-Format = '''[card:cardinternalnumbers]3'''
-
-[[NamedAnchors]]
-Name = '''data.packs.greatmoth.cards.super'''
-Address = 0x1A4846
-Format = '''[card:cardinternalnumbers]3'''
-
-[[NamedAnchors]]
-Name = '''data.packs.greatmoth.cards.rare'''
-Address = 0x1A484C
-Format = '''[card:cardinternalnumbers]5'''
-
-[[NamedAnchors]]
-Name = '''data.packs.greatmoth.cards.common'''
-Address = 0x1A4856
-Format = '''[card:cardinternalnumbers]37'''
-
-[[NamedAnchors]]
-Name = '''data.packs.launcherspider.cards.ultra'''
-Address = 0x1A48E4
-Format = '''[card:cardinternalnumbers]3'''
-
-[[NamedAnchors]]
-Name = '''data.packs.launcherspider.cards.super'''
-Address = 0x1A48EA
-Format = '''""'''
-
-[[NamedAnchors]]
-Name = '''data.packs.launcherspider.cards.rare'''
-Address = 0x1A48F2
-Format = '''[card:cardinternalnumbers]5'''
-
-[[NamedAnchors]]
-Name = '''data.packs.launcherspider.cards.common'''
-Address = 0x1A48FC
-Format = '''[card:cardinternalnumbers]38'''
-
-[[NamedAnchors]]
-Name = '''data.packs.relinquished.cards.ultra'''
-Address = 0x1A4B08
-Format = '''[card:cardinternalnumbers]3'''
-
-[[NamedAnchors]]
-Name = '''data.packs.relinquished.cards.super'''
-Address = 0x1A4B0E
-Format = '''[card:cardinternalnumbers]4'''
-
-[[NamedAnchors]]
-Name = '''data.packs.relinquished.cards.rare'''
-Address = 0x1A4B16
-Format = '''[card:cardinternalnumbers]4'''
-
-[[NamedAnchors]]
-Name = '''data.packs.relinquished.cards.common'''
-Address = 0x1A4B1E
-Format = '''[card:cardinternalnumbers]39'''
-
-[[NamedAnchors]]
-Name = '''data.packs.blueeyestoondragon.cards.common'''
-Address = 0x1A4BCC
-Format = '''[card:cardinternalnumbers]36'''
-
-[[NamedAnchors]]
-Name = '''data.packs.busterblader.cards.common'''
-Address = 0x1A4C70
-Format = '''[card:cardinternalnumbers]38'''
-
-[[NamedAnchors]]
-Name = '''data.packs.geminielf.cards.rare'''
-Address = 0x1A4EB4
-Format = '''[card:cardinternalnumbers]5'''
-
-[[NamedAnchors]]
-Name = '''data.packs.geminielf.cards.common'''
-Address = 0x1A4EBE
-Format = '''[card:cardinternalnumbers]38'''
-
-[[NamedAnchors]]
-Name = '''data.packs.eyeofwdjat.cards.secret'''
-Address = 0x1A5058
-Format = '''[card:cardinternalnumbers]16'''
-
-[[NamedAnchors]]
-Name = '''data.packs.eyeofwdjat.cards.ultra'''
-Address = 0x1A5078
-Format = '''[card:cardinternalnumbers]17'''
-
-[[NamedAnchors]]
-Name = '''data.packs.eyeofwdjat.cards.super'''
-Address = 0x1A509A
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.eyeofwdjat.cards.common'''
-Address = 0x1A509C
-Format = '''[card:cardinternalnumbers]16'''
-
-[[NamedAnchors]]
-Name = '''data.packs.garoozis.cards.common'''
-Address = 0x1A50FC
-Format = '''[card:cardinternalnumbers]47'''
-
-[[NamedAnchors]]
-Name = '''data.packs.battleox.cards.common'''
-Address = 0x1A519C
-Format = '''[card:cardinternalnumbers]42'''
-
-[[NamedAnchors]]
-Name = '''data.packs.darkmagician.cards.ultra'''
-Address = 0x1A452C
-Format = '''[card:cardinternalnumbers]2'''
-
-[[NamedAnchors]]
-Name = '''data.packs.darkmagician.cards.super'''
-Address = 0x1A4530
-Format = '''[card:cardinternalnumbers]3'''
-
-[[NamedAnchors]]
-Name = '''data.packs.darkmagician.cards.rare'''
-Address = 0x1A4536
-Format = '''[card:cardinternalnumbers]5'''
-
-[[NamedAnchors]]
-Name = '''data.packs.darkmagician.cards.common'''
-Address = 0x1A4540
-Format = '''[card:cardinternalnumbers]30'''
-
-[[NamedAnchors]]
-Name = '''data.packs.blueeyesultimatedragon.cards.common'''
-Address = 0x1A4CFC
-Format = '''[card:cardinternalnumbers]10'''
-
-[[NamedAnchors]]
-Name = '''data.packs.blacklustersoldier.cards.common'''
-Address = 0x1A4D50
-Format = '''[card:cardinternalnumbers]16'''
-
-[[NamedAnchors]]
-Name = '''data.packs.mysticalelf.cards.ultra'''
-Address = 0x1A45BC
-Format = '''[card:cardinternalnumbers]2'''
-
-[[NamedAnchors]]
-Name = '''data.packs.mysticalelf.cards.super'''
-Address = 0x1A45C0
-Format = '''[card:cardinternalnumbers]3'''
-
-[[NamedAnchors]]
-Name = '''data.packs.mysticalelf.cards.rare'''
-Address = 0x1A45C6
-Format = '''[card:cardinternalnumbers]5'''
-
-[[NamedAnchors]]
-Name = '''data.packs.mysticalelf.cards.common'''
-Address = 0x1A45D0
-Format = '''[card:cardinternalnumbers]30'''
-
-[[NamedAnchors]]
-Name = '''data.packs.yellowmilleniumpuzzle.cards.normal'''
-Address = 0x1A5230
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.yellowmilleniumpuzzle.cards.secret'''
-Address = 0x1A5232
-Format = '''[card:cardinternalnumbers]6'''
-
-[[NamedAnchors]]
-Name = '''data.packs.yellowmilleniumpuzzle.cards.ultra'''
-Address = 0x1A523E
-Format = '''[card:cardinternalnumbers]6'''
-
-[[NamedAnchors]]
-Name = '''data.packs.yellowmilleniumpuzzle.cards.super'''
-Address = 0x1A524A
-Format = '''[card:cardinternalnumbers]7'''
-
-[[NamedAnchors]]
-Name = '''data.packs.yellowmilleniumpuzzle.cards.rare'''
-Address = 0x1A5258
-Format = '''[card:cardinternalnumbers]6'''
-
-[[NamedAnchors]]
-Name = '''data.packs.yellowmilleniumpuzzle.cards.common'''
-Address = 0x1A5264
-Format = '''[card:cardinternalnumbers]14'''
-
-[[NamedAnchors]]
-Name = '''data.packs.greenmilleniumpuzzle.cards.normal'''
-Address = 0x1A4FD4
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.greenmilleniumpuzzle.cards.secret'''
-Address = 0x1A4FD6
-Format = '''[card:cardinternalnumbers]10'''
-
-[[NamedAnchors]]
-Name = '''data.packs.greenmilleniumpuzzle.cards.ultra'''
-Address = 0x1A4FEA
-Format = '''[card:cardinternalnumbers]5'''
-
-[[NamedAnchors]]
-Name = '''data.packs.greenmilleniumpuzzle.cards.super'''
-Address = 0x1A4FF4
-Format = '''[card:cardinternalnumbers]2'''
-
-[[NamedAnchors]]
-Name = '''data.packs.greenmilleniumpuzzle.cards.common'''
-Address = 0x1A4FF8
-Format = '''[card:cardinternalnumbers]15'''
-
-[[NamedAnchors]]
-Name = '''data.packs.bluemilleniumpuzzle.cards.normal'''
-Address = 0x1A4F4C
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.bluemilleniumpuzzle.cards.secret'''
-Address = 0x1A4F4E
-Format = '''[card:cardinternalnumbers]9'''
-
-[[NamedAnchors]]
-Name = '''data.packs.bluemilleniumpuzzle.cards.ultra'''
-Address = 0x1A4F60
-Format = '''[card:cardinternalnumbers]6'''
-
-[[NamedAnchors]]
-Name = '''data.packs.bluemilleniumpuzzle.cards.super'''
-Address = 0x1A4F6C
-Format = '''[card:cardinternalnumbers]6'''
-
-[[NamedAnchors]]
-Name = '''data.packs.bluemilleniumpuzzle.cards.rare'''
-Address = 0x1A4F78
-Format = '''[card:cardinternalnumbers]3'''
-
-[[NamedAnchors]]
-Name = '''data.packs.bluemilleniumpuzzle.cards.common'''
-Address = 0x1A4F7E
-Format = '''[card:cardinternalnumbers]11'''
-
-[[NamedAnchors]]
 Name = '''graphics.palettes.cards.7coloredfish'''
 Address = 0x6083E0
 Format = '''`ucp4:0123`'''
@@ -13054,322 +12399,153 @@ Address = 0x198798
 Format = '''[stats::|t|total::::|padding:|black::|red:::|green::|padding::::]1'''
 
 [[NamedAnchors]]
-Name = '''data.packs.judgeman.cards.secret'''
-Address = 0x1A4DB0
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.judgeman.cards.ultra'''
-Address = 0x1A4DB2
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.judgeman.cards.super'''
-Address = 0x1A4DB4
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.judgeman.cards.rare'''
-Address = 0x1A4DB6
-Format = '''[card:cardinternalnumbers]4'''
-
-[[NamedAnchors]]
-Name = '''data.packs.judgeman.cards.common'''
-Address = 0x1A4DBE
-Format = '''[card:cardinternalnumbers]26'''
-
-[[NamedAnchors]]
-Name = '''data.packs.cyberharpie.cards.secret'''
-Address = 0x1A46F0
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.cyberharpie.cards.ultra'''
-Address = 0x1A46F2
-Format = '''[card:cardinternalnumbers]3'''
-
-[[NamedAnchors]]
-Name = '''data.packs.cyberharpie.cards.super'''
-Address = 0x1A46F8
-Format = '''[card:cardinternalnumbers]3'''
-
-[[NamedAnchors]]
-Name = '''data.packs.cyberharpie.cards.rare'''
-Address = 0x1A46FE
-Format = '''[card:cardinternalnumbers]5'''
-
-[[NamedAnchors]]
 Name = '''data.packs.geminielf.pointers'''
 Address = 0x1A4F0C
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.launcherspider.pointers'''
 Address = 0x1A4948
-Format = '''[deck<> cardamount. padding:.]8'''
-
-[[NamedAnchors]]
-Name = '''data.packs.gateguardian.cards.normal'''
-Address = 0x1A4794
-Format = '''""'''
-
-[[NamedAnchors]]
-Name = '''data.packs.gateguardian.cards.super'''
-Address = 0x1A479E
-Format = '''[card:cardinternalnumbers]3'''
-
-[[NamedAnchors]]
-Name = '''data.packs.launcherspider.cards.normal'''
-Address = 0x1A48E0
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.launcherspider.cards.secret'''
-Address = 0x1A48E2
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.blueeyestoondragon.cards.normal'''
-Address = 0x1A4BAC
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.blueeyestoondragon.cards.secret'''
-Address = 0x1A4BAE
-Format = '''[card:cardinternalnumbers]2'''
-
-[[NamedAnchors]]
-Name = '''data.packs.blueeyestoondragon.cards.ultra'''
-Address = 0x1A4BB2
-Format = '''[card:cardinternalnumbers]3'''
-
-[[NamedAnchors]]
-Name = '''data.packs.blueeyestoondragon.cards.super'''
-Address = 0x1A4BB8
-Format = '''[card:cardinternalnumbers]4'''
-
-[[NamedAnchors]]
-Name = '''data.packs.blueeyestoondragon.cards.rare'''
-Address = 0x1A4BC0
-Format = '''[card:cardinternalnumbers]6'''
-
-[[NamedAnchors]]
-Name = '''data.packs.busterblader.cards.normal'''
-Address = 0x1A4C54
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.busterblader.cards.secret'''
-Address = 0x1A4C56
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.busterblader.cards.ultra'''
-Address = 0x1A4C58
-Format = '''[card:cardinternalnumbers]3'''
-
-[[NamedAnchors]]
-Name = '''data.packs.busterblader.cards.super'''
-Address = 0x1A4C5E
-Format = '''[card:cardinternalnumbers]4'''
-
-[[NamedAnchors]]
-Name = '''data.packs.busterblader.cards.rare'''
-Address = 0x1A4C66
-Format = '''[card:cardinternalnumbers]5'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.darkmagician.pointers'''
 Address = 0x1A457C
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.mysticalelf.pointers'''
 Address = 0x1A460C
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.redeyesblackdragon.pointers'''
 Address = 0x1A46B0
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.judgeman.pointers'''
 Address = 0x1A4DF4
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.blueeyeswhitedragon.pointers'''
 Address = 0x1A4A04
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.exodia.pointers'''
 Address = 0x1A4AC8
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.tigeraxe.pointers'''
 Address = 0x1A4E74
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.cyberharpie.pointers'''
 Address = 0x1A4754
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.gateguardian.pointers'''
 Address = 0x1A47F8
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.garoozis.pointers'''
 Address = 0x1A515C
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.greatmoth.pointers'''
 Address = 0x1A48A0
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.relinquished.pointers'''
 Address = 0x1A4B6C
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.blueeyestoondragon.pointers'''
 Address = 0x1A4C14
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.battleox.pointers'''
 Address = 0x1A51F0
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.blueeyesultimatedragon.pointers'''
 Address = 0x1A4D10
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.blacklustersoldier.pointers'''
 Address = 0x1A4D70
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.bluemillenniumpuzzle.pointers'''
 Address = 0x1A4F94
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.eyeofwdjat.pointers'''
 Address = 0x1A50BC
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.busterblader.pointers'''
 Address = 0x1A4CBC
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.greenmillenniumpuzzle.pointers'''
 Address = 0x1A5018
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.packs.yellowmillenniumpuzzle.pointers'''
 Address = 0x1A5280
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.specialpacks.grandpa.pointers'''
 Address = 0x1A5598
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.specialpacks.magazine.pointers'''
 Address = 0x1A5490
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.specialpacks.weeklygiftpacka.pointers'''
 Address = 0x1A53E8
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
 [[NamedAnchors]]
 Name = '''data.specialpacks.weeklygiftpackb.pointers'''
 Address = 0x1A5538
-Format = '''[deck<> cardamount. padding:.]8'''
+Format = '''[pack<[card:cardinternalnumbers]/cardamount> cardamount. padding:.]rarities'''
 
-[[NamedAnchors]]
-Name = '''data.packs.blueeyeswhitedragon.cards.secret'''
-Address = 0x1A4988
-Format = '''[card:cardinternalnumbers]1'''
+[[List]]
+Name = '''rarities'''
+0 = [
+    '''Unused''',
+    '''Unused''',
+    '''Normal''',
+    '''Secret''',
+    '''Ultra''',
+    '''Super''',
+    '''Rare''',
+    '''Common''',
+]
 
-[[NamedAnchors]]
-Name = '''data.packs.blueeyeswhitedragon.cards.ultra'''
-Address = 0x1A498A
-Format = '''[card:cardinternalnumbers]4'''
-
-[[NamedAnchors]]
-Name = '''data.packs.blueeyeswhitedragon.cards.super'''
-Address = 0x1A4992
-Format = '''[card:cardinternalnumbers]6'''
-
-[[NamedAnchors]]
-Name = '''data.packs.blueeyeswhitedragon.cards.rare'''
-Address = 0x1A499E
-Format = '''[card:cardinternalnumbers]11'''
-
-[[NamedAnchors]]
-Name = '''data.packs.blueeyeswhitedragon.cards.common'''
-Address = 0x1A49B4
-Format = '''[card:cardinternalnumbers]39'''
-
-[[NamedAnchors]]
-Name = '''data.packs.exodia.cards.secret'''
-Address = 0x1A4A44
-Format = '''[card:cardinternalnumbers]1'''
-
-[[NamedAnchors]]
-Name = '''data.packs.exodia.cards.ultra'''
-Address = 0x1A4A46
-Format = '''[card:cardinternalnumbers]8'''
-
-[[NamedAnchors]]
-Name = '''data.packs.exodia.cards.super'''
-Address = 0x1A4A56
-Format = '''[card:cardinternalnumbers]6'''
-
-[[NamedAnchors]]
-Name = '''data.packs.exodia.cards.rare'''
-Address = 0x1A4A62
-Format = '''[card:cardinternalnumbers]5'''
-
-[[NamedAnchors]]
-Name = '''data.packs.exodia.cards.common'''
-Address = 0x1A4A6C
-Format = '''[card:cardinternalnumbers]45'''
-
-[[NamedAnchors]]
-Name = '''data.packs.tigeraxe.cards.super'''
-Address = 0x1A4E34
-Format = '''[card:cardinternalnumbers]4'''
-
-[[NamedAnchors]]
-Name = '''data.packs.tigeraxe.cards.rare'''
-Address = 0x1A4E3C
-Format = '''[card:cardinternalnumbers]6'''
-
-[[NamedAnchors]]
-Name = '''data.packs.tigeraxe.cards.common'''
-Address = 0x1A4E48
-Format = '''[card:cardinternalnumbers]21'''
-
-#################################
-#################################
 [[MatchedWords]]
 Name = '''data.constants.packs.rarities.total'''
 Address = 0x062A1C

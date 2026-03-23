@@ -1000,12 +1000,14 @@ def _normalize_offset_angle_open_bracket_before_ydk(t: str) -> str:
 
 
 def _normalize_offset_inner_card_before_count_slash(t: str) -> str:
-    """Insert missing ``]`` before ``/countField>`` after ``[card:List]`` inside ``offset<[`…``.
+    """Insert missing ``]`` before ``/countField>`` when ``[card:List`` was written without closing ``]`` (typo).
 
-    Writers often use ``…[card:List]/length>``; the bracket that closes the ``offset<[`` slice must appear
-    **before** ``/length>``, i.e. ``…[card:List]]/length>``."""
+    Wrong: ``[card:ListName/countField>`` — no ``]`` between the list name and ``/``.
+    Right: ``[card:ListName]/countField>`` — must **not** add another ``]`` when that ``]`` is already present
+    (otherwise ``…[card:…]/count>`` becomes ``…[card:…]]/count>`` and breaks nested ``pack<[…/cardamount>`` layouts).
+    """
     return re.sub(
-        r"(\[card\s*:\s*[\w.]+\s*\])\s*/(\w+)>",
+        r"(\[card\s*:\s*[\w.]+)\s*/(\w+)>",
         r"\1]/\2>",
         str(t or ""),
         flags=re.IGNORECASE,
