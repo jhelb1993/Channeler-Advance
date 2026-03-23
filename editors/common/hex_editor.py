@@ -2577,11 +2577,13 @@ class PcsStringTableFrame(ttk.Frame):
         self._edit_entry: Optional[tk.Entry] = None
         self._edit_iid: Optional[str] = None
         self._pcs_filter_job: Optional[str] = None
+        self._pcs_row_find_matches: List[int] = []
+        self._pcs_row_find_pos: int = 0
         self._build()
 
     def _build(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
+        self.rowconfigure(3, weight=1)
         f = ttk.Frame(self)
         f.grid(row=0, column=0, sticky="ew", pady=(0, 2))
         f.columnconfigure(1, weight=1)
@@ -2602,8 +2604,24 @@ class PcsStringTableFrame(ttk.Frame):
         self._pcs_match_combo.grid(row=1, column=1, sticky="ew", pady=(2, 0))
         self._pcs_match_combo.bind("<<ComboboxSelected>>", self._on_pcs_match_combo_select)
         self._pcs_match_suppress = False
+
+        find_f = ttk.Frame(self)
+        find_f.grid(row=2, column=0, sticky="ew", pady=(0, 2))
+        find_f.columnconfigure(1, weight=1)
+        ttk.Label(find_f, text="Find:", font=("Consolas", 8)).grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self._pcs_row_find_var = tk.StringVar()
+        self._pcs_row_find_entry = ttk.Entry(find_f, textvariable=self._pcs_row_find_var, font=("Consolas", 8))
+        self._pcs_row_find_entry.grid(row=0, column=1, sticky="ew")
+        self._pcs_row_find_var.trace_add("write", lambda *_: self._on_pcs_row_find_text_change())
+        self._pcs_row_find_entry.bind("<Return>", lambda e: self._on_pcs_row_find_next())
+        ttk.Button(find_f, text="Next", command=self._on_pcs_row_find_next, width=6).grid(
+            row=0, column=2, sticky="e", padx=(4, 0)
+        )
+        self._pcs_row_find_result_label = ttk.Label(find_f, text="", font=("Consolas", 8), foreground="#666")
+        self._pcs_row_find_result_label.grid(row=0, column=3, sticky="w", padx=(6, 0))
+
         tree_f = ttk.Frame(self)
-        tree_f.grid(row=2, column=0, sticky="nsew")
+        tree_f.grid(row=3, column=0, sticky="nsew")
         tree_f.columnconfigure(0, weight=1)
         tree_f.rowconfigure(0, weight=1)
         self._tree = ttk.Treeview(tree_f, columns=("idx", "val"), show="headings", height=5, selectmode="browse")
@@ -2624,7 +2642,7 @@ class PcsStringTableFrame(ttk.Frame):
         self._tree.bind("<ButtonRelease-1>", self._on_tree_click)
 
         add_row = ttk.Frame(self)
-        add_row.grid(row=3, column=0, sticky="w", pady=(4, 0))
+        add_row.grid(row=4, column=0, sticky="w", pady=(4, 0))
         ttk.Label(add_row, text="Add", font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 4))
         self._pcs_add_n_var = tk.IntVar(value=1)
         ttk.Spinbox(add_row, from_=1, to=500, width=5, textvariable=self._pcs_add_n_var, font=("Consolas", 8)).pack(
@@ -2632,6 +2650,63 @@ class PcsStringTableFrame(ttk.Frame):
         )
         ttk.Label(add_row, text="new rows", font=("Consolas", 8)).pack(side=tk.LEFT, padx=(4, 0))
         ttk.Button(add_row, text="Apply", command=self._on_pcs_add_rows).pack(side=tk.LEFT, padx=(8, 0))
+
+    def _on_pcs_row_find_text_change(self) -> None:
+        """Clear stale match counts when the query is edited."""
+        self._pcs_row_find_matches.clear()
+        self._pcs_row_find_pos = 0
+        self._pcs_row_find_result_label.config(text="")
+
+    def _pcs_row_find_collect_matches(self, query_lc: str) -> List[int]:
+        """Row indices whose displayed text (and row #) contains ``query_lc``."""
+        matches: List[int] = []
+        if not query_lc or not self._tree:
+            return matches
+        for iid in self._tree.get_children():
+            vals = self._tree.item(iid, "values")
+            if len(vals) < 2:
+                continue
+            try:
+                idx = int(vals[0])
+            except (ValueError, TypeError):
+                continue
+            disp = str(vals[1])
+            blob = f"{idx} {disp}".lower()
+            if query_lc in blob:
+                matches.append(idx)
+        matches.sort()
+        return matches
+
+    def _on_pcs_row_find_next(self) -> None:
+        """Find rows in the current table whose string (or index) contains the query; cycle with Next / Enter."""
+        query = self._pcs_row_find_var.get().strip().lower()
+        if not query:
+            self._pcs_row_find_result_label.config(text="")
+            self._pcs_row_find_matches.clear()
+            self._pcs_row_find_pos = 0
+            return
+
+        matches = self._pcs_row_find_collect_matches(query)
+        if not matches:
+            self._pcs_row_find_result_label.config(text="0 matches")
+            self._pcs_row_find_matches.clear()
+            self._pcs_row_find_pos = 0
+            return
+
+        if matches == self._pcs_row_find_matches:
+            self._pcs_row_find_pos = (self._pcs_row_find_pos + 1) % len(matches)
+        else:
+            self._pcs_row_find_matches = list(matches)
+            self._pcs_row_find_pos = 0
+
+        target = self._pcs_row_find_matches[self._pcs_row_find_pos]
+        iid = f"pcs_{target}"
+        if self._tree.exists(iid):
+            self._tree.selection_set(iid)
+            self._tree.see(iid)
+            self._tree.focus_set()
+        pos_display = self._pcs_row_find_pos + 1
+        self._pcs_row_find_result_label.config(text=f"{pos_display}/{len(matches)}")
 
     def _schedule_pcs_combo_filter(self, event: Optional[tk.Event] = None) -> None:
         if self._pcs_filter_job is not None:
@@ -2863,12 +2938,14 @@ class PcsStringTableFrame(ttk.Frame):
         self._anchors = self._hex.get_pcs_table_anchors()
         self._combo.set("")
         self._combo_search_var.set("")
+        self._reset_pcs_row_find_ui()
         self._apply_pcs_combo_filter()
 
     def show_table(self, anchor_name: str, row_index: Optional[int] = None) -> None:
         if not self._anchors:
             self.refresh_anchors()
         self._combo_search_var.set("")
+        self._reset_pcs_row_find_ui()
         self._apply_pcs_combo_filter()
         want = anchor_name.strip()
         vals = list(self._combo["values"])
@@ -2888,6 +2965,9 @@ class PcsStringTableFrame(ttk.Frame):
 
     def _load_table(self) -> None:
         self._tree.delete(*self._tree.get_children())
+        self._pcs_row_find_matches.clear()
+        self._pcs_row_find_pos = 0
+        self._pcs_row_find_result_label.config(text="")
         if not self._anchors or not self._hex.get_data():
             return
         info = self._selected_pcs_anchor()
@@ -2924,6 +3004,12 @@ class PcsStringTableFrame(ttk.Frame):
                     chars.append(_PCS_BYTE_TO_CHAR.get(b, "·"))
                 disp = "".join(chars)
             self._tree.insert("", tk.END, values=(str(i), disp), iid=f"pcs_{i}")
+
+    def _reset_pcs_row_find_ui(self) -> None:
+        self._pcs_row_find_var.set("")
+        self._pcs_row_find_matches.clear()
+        self._pcs_row_find_pos = 0
+        self._pcs_row_find_result_label.config(text="")
 
 
 class GraphicsPreviewFrame(ttk.Frame):

@@ -1,6 +1,4 @@
-find
 triple backticks instead of quotes
-improve performance (carot loading)
 toml writing extra bug
 .hma scripts
 read the code
