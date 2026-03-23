@@ -7724,7 +7724,18 @@ class StructEditorFrame(ttk.Frame):
         fallback_entries: List[Tuple[str, str, Optional[int]]] = []
         label_anchor_names_hit: Set[str] = set()
         fallback_anchor_names_hit: Set[str] = set()
-        for a in self._anchors:
+        # Process the selected struct first so duplicate list labels (same string in deckinfo vs cardnames2,
+        # etc.) dedupe toward the struct the user is editing — not an alphabetically earlier anchor.
+        cur_key = normalize_named_anchor_lookup_key(cur) if cur else ""
+        anchors_ordered = list(self._anchors)
+        if cur_key:
+            anchors_ordered.sort(
+                key=lambda a: (
+                    0 if normalize_named_anchor_lookup_key(str(a.get("name", ""))) == cur_key else 1,
+                    str(a.get("name", "")).lower(),
+                )
+            )
+        for a in anchors_ordered:
             nm = str(a["name"])
             nm_l = nm.lower()
             count_ref_raw = str(a.get("count_ref") or "")
@@ -7744,8 +7755,13 @@ class StructEditorFrame(ttk.Frame):
             if cr_list_key and cr_list_key not in list_keys:
                 list_keys.append(cr_list_key)
 
+            # When a struct is selected, only scan row-label lists for that struct (e.g. ]deckinfo),
+            # not every anchor's ]count / entry_label_list — otherwise Find matches the same string in
+            # cardnames2, deckinfo, PCS tables, etc. at once.
+            allow_label_scan = (not cur_key) or (normalize_named_anchor_lookup_key(nm) == cur_key)
+
             found_label = False
-            if q:
+            if q and allow_label_scan:
                 for lk in list_keys:
                     lm = lists_map.get(lk) or {}
                     for idx in sorted(lm.keys()):
