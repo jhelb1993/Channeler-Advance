@@ -4,6 +4,39 @@ A ROM hacking tool for Game Boy Advance games, built with Python and Tkinter —
 
 **Releases & changelog:** [GitHub Releases — Channeler-Advance](https://github.com/Soul-8691/Channeler-Advance/releases) (e.g. demo **v0.1.0** notes).
 
+## Recent changes (since v0.1.1.1)
+
+Changes on `main` after tag **v0.1.1.1**. If [GitHub’s compare view](https://github.com/Soul-8691/Channeler-Advance/compare/v0.1.1.1...main) fails to load, use `git diff v0.1.1.1...main` locally.
+
+### Editor, navigation, and shortcuts
+
+- **Find** and **Goto / jump-to** behavior improved (struct search, anchors, and following pointers).
+- Global **Ctrl+S** (save) is documented with other hex shortcuts; **Ctrl+Shift+1–7** cover Tools slots **1–3**, pseudo-C inject (**4–6**), and the **Python script** pane (**7**).
+
+### Structure TOML
+
+- Saved **`Address`** values can omit unnecessary quoting (cleaner TOML).
+- **Format normalization** no longer corrupts valid **`[card:…]/countField>`** inside nested layouts such as **`pack<[card:…]/cardamount>…]`** (so pack pointer tables resolve in the struct list).
+
+### MatchedWords and repointing
+
+- Expanded **MatchedWords** handling and **dynamic repointing** when growing or relocating data.
+
+### YDK deck import (File → Import YDK deck…)
+
+- **Main / extra** decks: combined handling, size checks, and **0xFF padding** so imports do not blindly overwrite ROM past the current allocation when space is tight.
+- **Card IDs** use **`[[List]]` keys** (e.g. lists that start at a non-zero id), not raw 0…*n* indices — requires resolving the **`[card:ListName…]`** token even when extra fields follow (e.g. **`[card:cardnames copies:]`**).
+
+### Banlist import (File → Import banlist…)
+
+- **EDOPro**-style **`.conf`** / **`.lflist`** files: parse **`!`** name, **`#`** comments, **`$` / `~`** section markers, **`--`** line comments; import **forbidden / limited / semi-limited** (skip **unlimited** / status **3**).
+- Enabled when the selected struct’s **`Format`** includes **`ban`** and a **`[card:… copies:]`** row layout; updates **literal row counts**, **MatchedWord**-driven counts, and can **repoint** when the table outgrows free space.
+
+### Bundled / sample TOML
+
+- Large updates to **`wct06_test.toml`**; maintenance passes on **`EDS.toml`**.
+- Additional reference tables: **`WCT04.toml`**, **`WWE.toml`**.
+
 ## ROM and structure TOML
 
 - Use the bundled **`FireRed.toml`** when hacking FireRed, or **`WCT06.toml`** for *Yu-Gi-Oh! Ultimate Masters: World Championship Tournament 2006*.
