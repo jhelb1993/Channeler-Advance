@@ -81,47 +81,47 @@ Format = "[card:cardnames]40"
 [[NamedAnchors]]
 Name = "data.banlist.sept03"
 Address = 0x1E5EF30
-Format = "[card:cardnames copies:]17"
+Format = "`ban`[card:cardnames copies:]17"
 
 [[NamedAnchors]]
 Name = "data.banlist.mar04"
 Address = 0x1E5EF74
-Format = "[card:cardnames copies:]data.constants.banlist.mar04"
+Format = "`ban`[card:cardnames copies:]data.constants.banlist.mar04"
 
 [[NamedAnchors]]
 Name = "data.banlist.sept04"
 Address = 0x1E5EFE0
-Format = "[card:cardnames copies:]data.constants.banlist.sept04"
+Format = "`ban`[card:cardnames copies:]data.constants.banlist.sept04"
 
 [[NamedAnchors]]
 Name = "data.banlist.mar05"
 Address = 0x1E5F07C
-Format = "[card:cardnames copies:]data.constants.banlist.mar05"
+Format = "`ban`[card:cardnames copies:]data.constants.banlist.mar05"
 
 [[NamedAnchors]]
 Name = "data.banlist.sept05"
 Address = 0x1E5F150
-Format = "[card:cardnames copies:]data.constants.banlist.sept05"
+Format = "`ban`[card:cardnames copies:]data.constants.banlist.sept05"
 
 [[NamedAnchors]]
 Name = "data.banlist.mar06"
 Address = 0x1E5F234
-Format = "[card:cardnames copies:]data.constants.banlist.mar06"
+Format = "`ban`[card:cardnames copies:]data.constants.banlist.mar06"
 
 [[NamedAnchors]]
 Name = "data.banlist.sept06"
 Address = 0x1E5F32C
-Format = "[card:cardnames copies:]data.constants.banlist.sept06"
+Format = "`ban`[card:cardnames copies:]data.constants.banlist.sept06"
 
 [[NamedAnchors]]
 Name = "data.banlist.mar07"
 Address = 0x1E5F440
-Format = "[card:cardnames copies:]data.constants.banlist.mar07"
+Format = "`ban`[card:cardnames copies:]data.constants.banlist.mar07"
 
 [[NamedAnchors]]
 Name = "data.banlist.sept07"
 Address = 0x1E5F580
-Format = "[card:cardnames copies:]data.constants.banlist.sept07"
+Format = "`ban`[card:cardnames copies:]data.constants.banlist.sept07"
 
 [[NamedAnchors]]
 Name = "data.packs"

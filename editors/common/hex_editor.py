@@ -1054,6 +1054,19 @@ def _normalize_ydk_deck_struct_shorthand_format(t: str) -> str:
     return s
 
 
+def _normalize_ban_deck_struct_shorthand_format(t: str) -> str:
+    """Strip `` `ban` `` (+ optional password-anchor token) so ``[card:… copies:…]count`` parses as a struct table."""
+    s = str(t or "").strip()
+    if not s.startswith("`ban`"):
+        return s
+    rest = s[len("`ban`") :].lstrip()
+    if rest and not rest.startswith("["):
+        m = re.match(r"^[\w.]+", rest)
+        if m:
+            rest = rest[m.end() :].lstrip()
+    return rest
+
+
 def _normalize_shorthand_bracket_terminator_format(s: str) -> str:
     """
     Expand legacy ``[fields]!HEX`` where ``!HEX`` starts the ``!``-terminated nested blob (not ``]count``).
@@ -1069,6 +1082,7 @@ def _normalize_shorthand_bracket_terminator_format(s: str) -> str:
     t = _normalize_offset_angle_open_bracket_before_ydk(t)
     t = _normalize_offset_inner_card_before_count_slash(t)
     t = _normalize_nested_array_slash_count_bracket_order(t)
+    t = _normalize_ban_deck_struct_shorthand_format(t)
     t = _normalize_ydk_deck_struct_shorthand_format(t)
     if "<[" in t and "!>" in t:
         return prefix + t
@@ -1097,7 +1111,7 @@ def _strip_trailing_ydk_struct_format_tag(t: str) -> str:
 
 
 def normalize_named_anchor_format(raw: Any) -> str:
-    """Whitespace-strip; expand ``[…]!HEX`` terminator shorthand and minimal `` `ydk` `` deck lines for struct NamedAnchors."""
+    """Whitespace-strip; expand ``[…]!HEX`` terminator shorthand and `` `ban` `` / `` `ydk` `` deck lines for struct NamedAnchors."""
     t = _normalize_shorthand_bracket_terminator_format(str(raw or "").strip())
     return _strip_trailing_ydk_struct_format_tag(t)
 
@@ -4818,6 +4832,11 @@ def _struct_format_has_ydk_import_marker(fmt_raw: str) -> bool:
     return bool(re.search(r"`ydk`\s*[\w.]*\s*\[", str(fmt_raw or "")))
 
 
+def _struct_format_has_ban_import_marker(fmt_raw: str) -> bool:
+    """True when the Format includes `` `ban` `` before the ``[card:…]`` banlist table (EDOPro ``.conf`` / ``.lflist`` import)."""
+    return bool(re.search(r"`ban`\s*[\w.]*\s*\[", str(fmt_raw or "")))
+
+
 def _struct_format_ydk_password_anchor_name(fmt_raw: str) -> str:
     """NamedAnchor ``Name`` for 32-bit password lookup: text after `` `ydk` ``, up to the ``[`` that opens ``[card:…]``.
 
@@ -4847,13 +4866,16 @@ def _parse_bare_ydk_deck_shorthand_trailing_count(fmt_raw: str) -> Optional[int]
 
 
 def _struct_format_ydk_card_list_name(fmt_raw: str) -> Optional[str]:
-    """``[card:ListName]`` inside the `` `ydk` `` … ``!`` card run (e.g. ``[card:cardnames]``).
+    """First ``[card:ListName`` token in the Format (e.g. ``[card:cardnames]``, ``[card:cardnames copies:]``).
 
-    Deck u16 values use keys from this ``[[List]]``. When the password NamedAnchor uses a **different** ``]count``
-    list (e.g. ``]cardstatsnames``), row *i* takes the label from that index list and reverse-looks it up here.
-    If both lists are the same (or only this name is available), row *i* uses the *i*-th sorted key.
+    Deck u16 values use **[[List]] keys** (e.g. 4007), not 0-based row indices — so the list name must be found
+    even when more fields follow ``card:…`` before the closing ``]``.
+
+    When the password NamedAnchor uses a **different** ``]count`` list (e.g. ``]cardstatsnames``), row *i* takes the
+    label from that index list and reverse-looks it up here. If both lists are the same (or only this name is
+    available), row *i* uses the *i*-th sorted key.
     """
-    m = re.search(r"\[\s*card\s*:\s*([\w.]+)\s*\]", str(fmt_raw or ""), re.IGNORECASE)
+    m = re.search(r"\[\s*card\s*:\s*([\w.]+)", str(fmt_raw or ""), re.IGNORECASE)
     if not m:
         return None
     name = (m.group(1) or "").strip()
@@ -4898,6 +4920,24 @@ def _struct_flat_ydk_card_table_field(fields: List[Dict[str, Any]]) -> Optional[
     return fd
 
 
+def _struct_flat_ban_card_table_fields(
+    fields: List[Dict[str, Any]],
+) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """``[card:List copies:]count`` after ban normalization: u16 ``card`` + u16 restriction (``copies`` field)."""
+    if len(fields) != 2:
+        return None
+    c0, c1 = fields[0], fields[1]
+    if str(c0.get("name", "")).lower() != "card":
+        return None
+    if c0.get("type") != "uint" or int(c0.get("size") or 0) != 2 or not c0.get("enum"):
+        return None
+    if str(c1.get("name", "")).lower() != "copies":
+        return None
+    if c1.get("type") != "uint" or int(c1.get("size") or 0) != 2:
+        return None
+    return c0, c1
+
+
 def _struct_anchor_info_supports_ydk_import(info: Optional[Dict[str, Any]]) -> bool:
     """True if struct table row ``info`` from :meth:`HexEditorFrame.get_struct_anchors` is a YDK deck struct."""
     if not info:
@@ -4907,6 +4947,36 @@ def _struct_anchor_info_supports_ydk_import(info: Optional[Dict[str, Any]]) -> b
     anch = info.get("anchor") or {}
     fmt_raw = str(anch.get("Format", "") or "")
     return _struct_format_has_ydk_import_marker(fmt_raw)
+
+
+def _struct_format_ban_password_anchor_name(fmt_raw: str) -> str:
+    """NamedAnchor for 32-bit password lookup: optional name after `` `ban` ``, before ``[card:…]``."""
+    m = re.search(r"`ban`\s*([\w.]*?)\s*\[", str(fmt_raw or ""))
+    if not m:
+        return "data.cards.passwords"
+    name = (m.group(1) or "").strip()
+    return name if name else "data.cards.passwords"
+
+
+def _parse_ban_table_literal_row_count(fmt_raw: str) -> Optional[int]:
+    """If *fmt_raw* normalizes to ``[…]N`` with integer *N*, return *N*; else ``None`` (e.g. ``]MatchedWord``)."""
+    fmt_n = normalize_named_anchor_format(fmt_raw)
+    c = _parse_struct_count(fmt_n)
+    return int(c) if isinstance(c, int) else None
+
+
+def _struct_anchor_info_supports_ban_import(info: Optional[Dict[str, Any]]) -> bool:
+    """True when the struct Format includes `` `ban` `` and a ``[card:… copies:]`` row layout."""
+    if not info:
+        return False
+    if info.get("ban_import"):
+        return True
+    anch = info.get("anchor") or {}
+    fmt_raw = str(anch.get("Format", "") or "")
+    if not _struct_format_has_ban_import_marker(fmt_raw):
+        return False
+    fields = list(info.get("fields") or [])
+    return _struct_flat_ban_card_table_fields(fields) is not None
 
 
 def _strip_ydk_marker_from_offset_prefix(prefix: str) -> str:
@@ -4980,6 +5050,52 @@ def _parse_ydk_deck_text(text: str) -> Tuple[List[str], List[str], bool]:
         else:
             extra_toks.append(raw)
     return main_toks, extra_toks, saw_extra
+
+
+def _parse_banlist_conf_text(text: str) -> Tuple[str, List[Tuple[str, int]]]:
+    """Parse ``.conf`` / ``.lflist`` (EDOPro-style).
+
+    - First ``!name`` line sets the banlist name; later ``!`` lines are ignored.
+    - ``#`` begins a line comment: skip the whole line (including ``#forbidden``, ``#limited``, ``#semi-limited``, ``#whitelist``).
+    - ``$`` / ``~`` line prefixes (e.g. ``$whitelist``) are skipped as section markers.
+    - A line starting with ``--`` is skipped; otherwise ``--`` starts an inline comment (same as YDK).
+    - Card lines: ``password status`` with decimal status ``0``–``3``; ``3`` (unlimited / whitelist) is omitted.
+    """
+    name = ""
+    out: List[Tuple[str, int]] = []
+    name_from_bang = False
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            continue
+        if line.startswith("!"):
+            if not name_from_bang:
+                name = line[1:].strip()
+                name_from_bang = True
+            continue
+        if line.startswith("--"):
+            continue
+        if line.startswith("$") or line.startswith("~"):
+            continue
+        if "--" in line:
+            line = line.split("--", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            status = int(parts[1])
+        except ValueError:
+            continue
+        if status not in (0, 1, 2, 3):
+            continue
+        if status == 3:
+            continue
+        out.append((parts[0].strip(), status))
+    return name, out
 
 
 def _ydk_build_deck_blob(
@@ -8043,6 +8159,10 @@ class StructEditorFrame(ttk.Frame):
         """True when the struct Format has `` `ydk` `` (and optional password table name) before the card ``[…]``."""
         return _struct_anchor_info_supports_ydk_import(self._selected_struct_anchor())
 
+    def selected_struct_supports_ban_import(self) -> bool:
+        """True when the struct Format has `` `ban` `` and ``[card:… copies:]`` (EDOPro banlist import)."""
+        return _struct_anchor_info_supports_ban_import(self._selected_struct_anchor())
+
     def _on_combo_select(self, event: Optional[tk.Event] = None) -> None:
         info = self._selected_struct_anchor()
         if not info:
@@ -8074,6 +8194,12 @@ class StructEditorFrame(ttk.Frame):
         self._load_entry(0)
         self._sync_hex_cursor_to_current_struct_entry(0)
         self._sync_struct_table_slots_row_buttons()
+        cb = getattr(self._hex, "_file_menu_refresh_cb", None)
+        if callable(cb):
+            try:
+                cb()
+            except Exception:
+                pass
 
     def _sync_struct_table_slots_row_buttons(self) -> None:
         """Under the field tree: **table slots** for any ``!``-terminated nested run; nav **new rows** hidden for packed-only ``!`` tables."""
@@ -9363,6 +9489,8 @@ class HexEditorFrame(ttk.Frame):
         self._struct_anchors_cache: Optional[List[Dict[str, Any]]] = None
         # Set by the host editor after :class:`RomToolsShell` builds :class:`StructEditorFrame`.
         self._struct_editor_ref: Any = None
+        # Optional: File menu refresh when the selected struct changes (e.g. enable banlist import).
+        self._file_menu_refresh_cb: Optional[Callable[[], None]] = None
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -13279,6 +13407,15 @@ Format = "`f|u8`[u8 arg0]"
                     if _struct_format_has_ydk_import_marker(fmt_raw)
                     else None
                 ),
+                "ban_import": bool(
+                    _struct_format_has_ban_import_marker(fmt_raw)
+                    and _struct_flat_ban_card_table_fields(fields) is not None
+                ),
+                "ban_password_anchor": (
+                    _struct_format_ban_password_anchor_name(fmt_raw)
+                    if _struct_format_has_ban_import_marker(fmt_raw)
+                    else None
+                ),
             })
         result.sort(key=lambda x: str(x["name"]).lower())
         self._struct_anchors_cache = result
@@ -13558,6 +13695,22 @@ Format = "`f|u8`[u8 arg0]"
     ) -> Optional[str]:
         """Bare `` `ydk`…[card:…]N``: if the table needs more than *N* rows, raise the trailing count in TOML."""
         cur = _parse_bare_ydk_deck_shorthand_trailing_count(fmt_raw)
+        if cur is None or min_table_rows <= cur:
+            return None
+        if not self._toml_path or not os.path.isfile(self._toml_path):
+            return None
+        if not self._replace_struct_format_literal_count(anchor, min_table_rows):
+            return None
+        ok, err = self.persist_toml_data()
+        if not ok:
+            return f"Could not save TOML ({err})."
+        return f"Structure Format ]count: {cur} → {min_table_rows}."
+
+    def _ban_maybe_bump_anchor_literal_after_import(
+        self, anchor: Dict[str, Any], fmt_raw: str, min_table_rows: int
+    ) -> Optional[str]:
+        """`` `ban`…[card:… copies:]N``: if the table needs more than *N* rows, raise the trailing count in TOML."""
+        cur = _parse_ban_table_literal_row_count(fmt_raw)
         if cur is None or min_table_rows <= cur:
             return None
         if not self._toml_path or not os.path.isfile(self._toml_path):
@@ -14601,6 +14754,17 @@ Format = "`f|u8`[u8 arg0]"
         """Host editor wires the Struct tools pane so File → Import YDK can use the selected struct."""
         self._struct_editor_ref = ref
 
+    def set_file_menu_refresh_callback(self, cb: Optional[Callable[[], None]]) -> None:
+        """Called when the Struct combobox selection changes (host updates File → Import banlist, etc.)."""
+        self._file_menu_refresh_cb = cb
+
+    def selected_struct_supports_ban_import(self) -> bool:
+        """True when the tools Struct tab has a `` `ban` `` table with ``card`` + ``copies`` selected."""
+        se = self._struct_editor_ref
+        if se is None:
+            return False
+        return bool(getattr(se, "selected_struct_supports_ban_import", lambda: False)())
+
     def _build_card_password_index_map(
         self, password_anchor_name: str, *, card_list_name: Optional[str] = None
     ) -> Tuple[Optional[Dict[str, int]], str]:
@@ -15090,6 +15254,214 @@ Format = "`f|u8`[u8 arg0]"
         if bump:
             msg_lines.append(bump)
         messagebox.showinfo("Import YDK", "\n".join(msg_lines))
+
+    def _file_import_banlist_flat_table(
+        self,
+        *,
+        info: Dict[str, Any],
+        fields: List[Dict[str, Any]],
+        card_fd: Dict[str, Any],
+        copies_fd: Dict[str, Any],
+        rows: List[Tuple[int, int]],
+        se: Any,
+        path: str,
+        fmt_src: str,
+        entry_idx: int,
+    ) -> None:
+        """Import EDOPro ``.conf`` / ``.lflist`` rows into `` `ban`[card:… copies:]…`` (u16 card id + u16 restriction)."""
+        struct_name = str(info.get("name", "")).strip()
+        struct_size = int(info["struct_size"])
+        base_off = int(info["base_off"])
+        tbl_count = int(info["count"])
+        anchor = info["anchor"]
+        need_rows = int(entry_idx) + len(rows)
+
+        if need_rows > tbl_count:
+            n_add = need_rows - tbl_count
+            fresh = self.find_struct_anchor_by_name(struct_name)
+            if not fresh:
+                messagebox.showerror("Import banlist", "Lost struct anchor (reload TOML?).")
+                return
+            ok_a, err_a = self.append_struct_table_rows(fresh, n_add)
+            if not ok_a:
+                messagebox.showerror(
+                    "Import banlist",
+                    err_a or f"Need {need_rows} row(s) but the struct only has {tbl_count}.",
+                )
+                return
+            self._invalidate_struct_anchors_cache()
+            info2 = self.find_struct_anchor_by_name(struct_name)
+            if not info2:
+                messagebox.showerror("Import banlist", "Struct anchor missing after expanding rows.")
+                return
+            info = info2
+            fields = list(info.get("fields") or [])
+            pair = _struct_flat_ban_card_table_fields(fields)
+            if not pair:
+                messagebox.showerror("Import banlist", "Internal: ban fields missing after expand.")
+                return
+            card_fd, copies_fd = pair
+            tbl_count = int(info["count"])
+            base_off = int(info["base_off"])
+            struct_size = int(info["struct_size"])
+
+        anchor = info["anchor"]
+        bump = self._ban_maybe_bump_anchor_literal_after_import(anchor, fmt_src, need_rows)
+        for i, (cid, status) in enumerate(rows):
+            row = int(entry_idx) + i
+            entry_base = base_off + row * struct_size
+            f_card = se._struct_field_file_off(entry_base, card_fd)
+            f_cop = se._struct_field_file_off(entry_base, copies_fd)
+            if f_card is None or f_cop is None:
+                messagebox.showerror("Import banlist", f"Could not resolve file offset for banlist row {row}.")
+                return
+            self.write_bytes_at_extend(f_card, int(cid).to_bytes(2, "little"))
+            self.write_bytes_at_extend(f_cop, int(status).to_bytes(2, "little"))
+
+        self._invoke_anchor_refresh_callback()
+        try:
+            se._load_entry(entry_idx)
+        except (tk.TclError, AttributeError):
+            pass
+        msg_lines = [
+            f"Imported {path}",
+            f"Struct {struct_name!r}: wrote {len(rows)} banlist row(s) (card + copies) starting at row {entry_idx}.",
+        ]
+        if bump:
+            msg_lines.append(bump)
+        messagebox.showinfo("Import banlist", "\n".join(msg_lines))
+
+    def file_import_banlist_conf(self) -> None:
+        """Import an EDOPro ``.conf`` / ``.lflist`` into the selected `` `ban` `` struct (``card`` + ``copies``)."""
+        if not self._data:
+            messagebox.showwarning("Import banlist", "No ROM loaded.")
+            return
+        se = self._struct_editor_ref
+        if se is None:
+            messagebox.showinfo(
+                "Import banlist",
+                "Open the tools pane (Struct tab) once after loading so the import can see the selected struct.",
+            )
+            return
+        info = se._selected_struct_anchor()
+        if not _struct_anchor_info_supports_ban_import(info):
+            messagebox.showinfo(
+                "Import banlist",
+                "Select a struct whose Format includes `ban` before [card:… copies:…] (see Structure TOML).",
+            )
+            return
+        if not self._toml_path or not os.path.isfile(self._toml_path):
+            messagebox.showwarning("Import banlist", "Save or load a structure TOML next to the ROM before importing.")
+            return
+        if info.get("packed_terminator"):
+            messagebox.showerror(
+                "Import banlist",
+                "Banlist import applies to flat ``[card:… copies:]`` tables, not packed terminator-only layouts.",
+            )
+            return
+        fields = list(info.get("fields") or [])
+        pair = _struct_flat_ban_card_table_fields(fields)
+        if not pair:
+            messagebox.showerror(
+                "Import banlist",
+                "This struct must be `` `ban`[card:List copies:]count`` (two u16 fields per row).",
+            )
+            return
+        card_fd, copies_fd = pair
+        fmt_src = str((info.get("anchor") or {}).get("Format", "") or "")
+        pwd_anchor = str(
+            info.get("ban_password_anchor") or _struct_format_ban_password_anchor_name(fmt_src)
+        ).strip()
+        path = filedialog.askopenfilename(
+            title="Import banlist",
+            filetypes=[
+                ("EDOPro banlist", "*.conf"),
+                ("LFList", "*.lflist"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                conf_text = f.read()
+        except OSError as e:
+            messagebox.showerror("Import banlist", str(e))
+            return
+        _bl_name, entries = _parse_banlist_conf_text(conf_text)
+        if not entries:
+            messagebox.showinfo("Import banlist", "No forbidden / limited / semi-limited entries to import (status 3 omitted).")
+            return
+        pw_map, err = self._build_card_password_index_map(
+            pwd_anchor, card_list_name=_struct_format_ydk_card_list_name(fmt_src)
+        )
+        if pw_map is None:
+            messagebox.showerror("Import banlist", err or "Password table error.")
+            return
+
+        def _lookup_card_index(raw_tok: str) -> Tuple[Optional[int], Optional[str]]:
+            mk = _password_ydk_token_match_key(raw_tok)
+            if mk is None:
+                return None, None
+            ix = pw_map.get(mk)
+            if ix is not None and 0 <= ix <= 0xFFFF:
+                return int(ix), mk
+            try:
+                w = int(mk, 16) & 0xFFFFFFFF
+                alt = _password_rom_u32_match_key(int.from_bytes(w.to_bytes(4, "little"), "big"))
+                if alt != mk:
+                    ix = pw_map.get(alt)
+                    if ix is not None and 0 <= ix <= 0xFFFF:
+                        return int(ix), alt
+                alt2 = _password_rom_u32_match_key(int.from_bytes(w.to_bytes(4, "big"), "little"))
+                if alt2 not in (mk, alt):
+                    ix = pw_map.get(alt2)
+                    if ix is not None and 0 <= ix <= 0xFFFF:
+                        return int(ix), alt2
+            except (ValueError, OverflowError):
+                pass
+            return None, mk
+
+        out_rows: List[Tuple[int, int]] = []
+        invalid_pw: List[str] = []
+        for pw, status in entries:
+            ix, _mk = _lookup_card_index(pw)
+            if ix is None:
+                invalid_pw.append(pw)
+            else:
+                out_rows.append((ix, max(0, min(3, int(status)))))
+        if invalid_pw:
+            uniq_bad = sorted(set(invalid_pw))
+            preview = ", ".join(str(x) for x in uniq_bad[:12])
+            if len(uniq_bad) > 12:
+                preview += ", …"
+            if not messagebox.askyesno(
+                "Import banlist — unknown passwords",
+                f"{len(invalid_pw)} line(s) reference passwords not in this ROM (e.g. {preview}).\n\n"
+                "Skip those cards and import the rest?\n\n"
+                "No = cancel the whole import.",
+            ):
+                return
+            out_rows = []
+            for pw, status in entries:
+                ix, _mk = _lookup_card_index(pw)
+                if ix is not None:
+                    out_rows.append((ix, max(0, min(3, int(status)))))
+        try:
+            entry_idx = int(se._idx_var.get())
+        except (ValueError, tk.TclError):
+            entry_idx = 0
+        self._file_import_banlist_flat_table(
+            info=info,
+            fields=fields,
+            card_fd=card_fd,
+            copies_fd=copies_fd,
+            rows=out_rows,
+            se=se,
+            path=path,
+            fmt_src=fmt_src,
+            entry_idx=entry_idx,
+        )
 
     def file_import_ydk_deck(self) -> None:
         """Import a YDK deck into the selected `` `ydk` `` deck struct (``!``-terminated blob or pointer+``length``)."""

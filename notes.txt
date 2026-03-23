@@ -1,8 +1,8 @@
-lflist import (banlists) (change constant?)
 correct eds toml (pack pointers)
 find
 triple backticks instead of quotes
 improve performance (carot loading)
+toml writing extra bug
 read the code
 python scripting
 split hex_editor.py up into separate files

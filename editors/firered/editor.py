@@ -56,6 +56,11 @@ class FireRedEditor:
             command=self._on_file_import_ydk,
             state=tk.DISABLED,
         )
+        file_menu.add_command(
+            label="Import banlist (.conf / .lflist)...",
+            command=self._on_file_import_banlist,
+            state=tk.DISABLED,
+        )
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_exit)
         self._file_menu = file_menu
@@ -72,9 +77,14 @@ class FireRedEditor:
 
         self._tools_shell = RomToolsShell(self.root, self._main_paned, self._hex_editor)
         self._hex_editor.set_struct_editor_ref(self._tools_shell.struct_editor)
-        self._hex_editor.set_anchor_refresh_callback(
-            lambda: self._tools_shell.refresh_anchors() if self._tools_shell else None
-        )
+        self._hex_editor.set_file_menu_refresh_callback(self._refresh_banlist_import_menu_state)
+
+        def _on_structure_toml_refreshed() -> None:
+            if self._tools_shell:
+                self._tools_shell.refresh_anchors()
+            self._update_file_menu_state()
+
+        self._hex_editor.set_anchor_refresh_callback(_on_structure_toml_refreshed)
 
         self._update_file_menu_state()
         self.root.bind("<Control-s>", lambda e: self._on_save())
@@ -101,8 +111,15 @@ class FireRedEditor:
         ):
             self._file_menu.entryconfig(_imp, state=state)
         self._file_menu.entryconfig("Edit Matched Words…", state=state)
+        self._refresh_banlist_import_menu_state()
         if has_file and self._tools_shell:
             self._tools_shell.refresh_anchors()
+
+    def _refresh_banlist_import_menu_state(self) -> None:
+        st = tk.DISABLED
+        if self._hex_editor and self._hex_editor.has_data() and self._hex_editor.selected_struct_supports_ban_import():
+            st = tk.NORMAL
+        self._file_menu.entryconfig("Import banlist (.conf / .lflist)...", state=st)
 
     def _on_load_structure_toml(self) -> None:
         if not self._hex_editor or not self._hex_editor.has_data():
@@ -142,6 +159,10 @@ class FireRedEditor:
     def _on_file_import_ydk(self) -> None:
         if self._hex_editor:
             self._hex_editor.file_import_ydk_deck()
+
+    def _on_file_import_banlist(self) -> None:
+        if self._hex_editor:
+            self._hex_editor.file_import_banlist_conf()
 
     def _on_open_rom(self) -> None:
         path = filedialog.askopenfilename(
