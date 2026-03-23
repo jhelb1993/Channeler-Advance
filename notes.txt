@@ -1,4 +1,3 @@
-jump to new offset after add new
 ydk import (decks)
 lflist import (banlists) (change constant?)
 triple backticks instead of quotes

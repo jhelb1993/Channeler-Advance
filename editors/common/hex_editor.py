@@ -5092,6 +5092,33 @@ def _packed_terminator_table_span_bytes(data: bytes, base_off: int, count: int, 
     return int(pos) - base_off
 
 
+def _packed_grow_inserts_before_trailing_terminator(term: bytes) -> bool:
+    """If True, packed growth inserts new strides immediately before the last terminator (e.g. ``0000``), not after it."""
+    return len(term) >= 2
+
+
+def _room_overwrite_expand_at_terminator(
+    data: bytes, term_start: int, term: bytes, new_blob: bytes
+) -> bool:
+    """True if ``term`` at ``term_start`` can be replaced with longer ``new_blob`` using only 0xFF after the old term."""
+    tl = len(term)
+    if tl < 1 or len(new_blob) < tl or term_start < 0:
+        return False
+    if term_start + tl > len(data):
+        return False
+    if data[term_start : term_start + tl] != term:
+        return False
+    extra = len(new_blob) - tl
+    if extra <= 0:
+        return True
+    for i in range(term_start + tl, term_start + tl + extra):
+        if i >= len(data):
+            return True
+        if data[i] != 0xFF:
+            return False
+    return True
+
+
 def _count_packed_terminator_rows(data, base_off: int, na_fd: Dict[str, Any], *, max_rows: int = 100000) -> int:
     """Count packed ``!HEX`` terminator rows in ROM starting at ``base_off`` (0 if none complete).
 
@@ -7490,11 +7517,18 @@ class StructEditorFrame(ttk.Frame):
             messagebox.showinfo("Struct", "Select a struct table first.")
             return
         old_count = int(info["count"])
+        anchor_name = str(info.get("name", "")).strip()
         ok, err = self._hex.append_struct_table_rows(info, n)
         if not ok:
             messagebox.showerror("Struct", err)
             return
         self._anchors = self._hex.get_struct_anchors()
+        self._struct_search_var.set("")
+        self._apply_struct_combo_filter()
+        vals = list(self._combo["values"])
+        if anchor_name in vals:
+            self._combo.set(anchor_name)
+            self._combo.current(vals.index(anchor_name))
         self._on_combo_select()
         self._idx_var.set(str(old_count))
         self._on_spin_change()
@@ -7509,6 +7543,7 @@ class StructEditorFrame(ttk.Frame):
         if not info:
             messagebox.showinfo("Struct", "Select a struct table first.")
             return
+        anchor_name = str(info.get("name", "")).strip()
         fill_dlg = _FillBytesPromptDialog(self.winfo_toplevel())
         if fill_dlg.result is None:
             return
@@ -7528,6 +7563,12 @@ class StructEditorFrame(ttk.Frame):
             messagebox.showerror("Struct", err)
             return
         self._anchors = self._hex.get_struct_anchors()
+        self._struct_search_var.set("")
+        self._apply_struct_combo_filter()
+        vals = list(self._combo["values"])
+        if anchor_name in vals:
+            self._combo.set(anchor_name)
+            self._combo.current(vals.index(anchor_name))
         self._on_combo_select()
         self._idx_var.set(str(entry_i))
         self._on_spin_change()
@@ -12559,18 +12600,10 @@ Format = "`f|u8`[u8 arg0]"
                 struct_size = _struct_row_byte_size(fields)
                 if struct_size <= 0:
                     continue
-            explicit_count = anchor.get("Count")
-            if explicit_count is not None:
-                try:
-                    count = int(explicit_count)
-                except (ValueError, TypeError):
-                    count = None
-                count_raw = count
-            else:
-                count_raw = _parse_struct_count(fmt_raw)
-                if count_raw is None:
-                    continue
-                count = count_raw if isinstance(count_raw, int) else self._resolve_struct_count(count_raw)
+            count_raw = _parse_struct_count(fmt_raw)
+            if count_raw is None:
+                continue
+            count = count_raw if isinstance(count_raw, int) else self._resolve_struct_count(count_raw)
             if count is None or count <= 0:
                 continue
             entry_label_pcs: Optional[Dict[str, Any]] = None
@@ -12704,13 +12737,21 @@ Format = "`f|u8`[u8 arg0]"
         new_tail: bytes,
         new_base: int,
         fill_old_with_ff: bool,
+        *,
+        full_payload: Optional[bytes] = None,
     ) -> Tuple[bool, str]:
-        """Move expanded table: copy ``old_total`` bytes from ``old_base``, append ``new_tail``, write at ``new_base``."""
+        """Move expanded table: copy ``old_total`` bytes from ``old_base``, append ``new_tail``, write at ``new_base``.
+
+        If ``full_payload`` is set (e.g. multi-byte terminator: insert new strides *before* trailing ``0000``),
+        it is written as the whole new blob instead of ``old_chunk + new_tail``."""
         if not self._data:
             return False, "No ROM loaded."
-        total_new = old_total + len(new_tail)
         old_chunk = bytes(self._data[old_base : old_base + old_total]) if old_total > 0 else b""
-        payload = old_chunk + new_tail
+        if full_payload is not None:
+            payload = bytes(full_payload)
+        else:
+            payload = old_chunk + bytes(new_tail)
+        total_new = len(payload)
         old_gba = GBA_ROM_BASE + int(old_base)
         new_gba = GBA_ROM_BASE + int(new_base)
         self.write_bytes_at_extend(int(new_base), payload)
@@ -12825,14 +12866,14 @@ Format = "`f|u8`[u8 arg0]"
         raw_in = str(anchor.get("Format", "")).strip()
         has_caret = raw_in.startswith("^")
         body = raw_in[1:].strip() if has_caret else raw_in
-        # Packed ``[inner]!HEX`` shorthand: persist count as explicit ``Count`` key — never append ``]N``.
+        # Packed ``[inner]!HEX`` shorthand: strip any legacy ``]N``; do not add ``Count`` (row count stays in Format / ROM).
         m_short = re.match(r"^\[([^\[\]]*)\]!([0-9a-fA-F]{2,})(?:\](\d+))?\s*$", body)
         if m_short:
             inner, hx = m_short.group(1), m_short.group(2)
             if int(new_count) <= 0:
                 return False
             anchor["Format"] = ("^" if has_caret else "") + f"[{inner}]!{hx}"
-            anchor["Count"] = int(new_count)
+            anchor.pop("Count", None)
             return True
         cr = _parse_struct_count(raw_in)
         if not isinstance(cr, int):
@@ -12941,6 +12982,7 @@ Format = "`f|u8`[u8 arg0]"
                 if not ok:
                     return False, err
             self._invoke_anchor_refresh_callback()
+            self._do_goto(int(insert_off))
             return True, ""
 
         dlg = _TableGrowRepointDialog(
@@ -12967,8 +13009,8 @@ Format = "`f|u8`[u8 arg0]"
             ok, err = self.persist_toml_data()
             if not ok:
                 return False, err
-        self._do_goto(int(new_base))
         self._invoke_anchor_refresh_callback()
+        self._do_goto(int(new_base))
         return True, ""
 
     def _append_packed_terminator_struct_rows(
@@ -13003,11 +13045,21 @@ Format = "`f|u8`[u8 arg0]"
                 False,
                 "Could not measure packed table (missing terminators, truncated ROM, or incomplete last row).",
             )
-        insert_off = base_off + int(span)
-        blob = (fill_row + term) * n
-        need = len(blob)
         old_total = int(span)
-        total_expanded = old_total + need
+        tl = len(term)
+        term_start = base_off + old_total - tl
+        old_chunk = data[base_off : base_off + old_total]
+        can_before_trailing = (
+            _packed_grow_inserts_before_trailing_terminator(term)
+            and old_total >= tl
+            and term_start >= base_off
+            and term_start + tl <= len(data)
+            and data[term_start : term_start + tl] == term
+        )
+        blob_before = fill_row * n + term
+        full_payload_before: Optional[bytes] = (
+            old_chunk[:-tl] + blob_before if can_before_trailing and len(old_chunk) >= tl else None
+        )
 
         def _apply_struct_metadata() -> Tuple[bool, str, bool]:
             toml_changed = False
@@ -13043,16 +13095,41 @@ Format = "`f|u8`[u8 arg0]"
             return True, "", toml_changed
 
         parent = self.winfo_toplevel()
-        if self._room_for_table_grow(insert_off, need):
+        # Multi-byte terminators (e.g. 0000): insert new strides *before* the trailing terminator.
+        if (
+            full_payload_before is not None
+            and _room_overwrite_expand_at_terminator(data, term_start, term, blob_before)
+        ):
             ok_m, err_m, toml_changed = _apply_struct_metadata()
             if not ok_m:
                 return False, err_m
-            self.write_bytes_at_extend(insert_off, blob)
+            self.write_bytes_at_extend(term_start, blob_before)
             if toml_changed:
                 ok, err = self.persist_toml_data()
                 if not ok:
                     return False, err
             self._invoke_anchor_refresh_callback()
+            self._do_goto(int(term_start))
+            return True, ""
+
+        blob_append = (fill_row + term) * n
+        insert_off_append = base_off + old_total
+        if full_payload_before is not None:
+            total_expanded = len(full_payload_before)
+        else:
+            total_expanded = old_total + len(blob_append)
+
+        if full_payload_before is None and self._room_for_table_grow(insert_off_append, len(blob_append)):
+            ok_m, err_m, toml_changed = _apply_struct_metadata()
+            if not ok_m:
+                return False, err_m
+            self.write_bytes_at_extend(insert_off_append, blob_append)
+            if toml_changed:
+                ok, err = self.persist_toml_data()
+                if not ok:
+                    return False, err
+            self._invoke_anchor_refresh_callback()
+            self._do_goto(int(insert_off_append))
             return True, ""
 
         dlg = _TableGrowRepointDialog(
@@ -13070,17 +13147,22 @@ Format = "`f|u8`[u8 arg0]"
         ok_m, err_m, toml_changed = _apply_struct_metadata()
         if not ok_m:
             return False, err_m
-        ok_r, err_r = self._repoint_anchor_table_for_grow(
-            anchor, base_off, old_total, blob, new_base, fill_old
-        )
+        if full_payload_before is not None:
+            ok_r, err_r = self._repoint_anchor_table_for_grow(
+                anchor, base_off, old_total, b"", new_base, fill_old, full_payload=full_payload_before
+            )
+        else:
+            ok_r, err_r = self._repoint_anchor_table_for_grow(
+                anchor, base_off, old_total, blob_append, new_base, fill_old
+            )
         if not ok_r:
             return False, err_r
         if toml_changed:
             ok, err = self.persist_toml_data()
             if not ok:
                 return False, err
-        self._do_goto(int(new_base))
         self._invoke_anchor_refresh_callback()
+        self._do_goto(int(new_base))
         return True, ""
 
     def _append_per_row_terminator_slots(
@@ -13126,6 +13208,7 @@ Format = "`f|u8`[u8 arg0]"
         if _room_expand_terminator_run_inplace(data, term_start, term, len(fill_chunk)):
             self.write_bytes_at_extend(term_start, blob)
             self._invoke_anchor_refresh_callback()
+            self._do_goto(int(term_start))
             return True, ""
 
         reloc = _ptr_word_off_and_alloc_start(entry_base, na_fd, fields, data)
@@ -13166,8 +13249,8 @@ Format = "`f|u8`[u8 arg0]"
         ok_r, err_r = self._repoint_pointed_allocation(ptr_lo, end, new_blob, new_off, fill_old)
         if not ok_r:
             return False, err_r
-        self._do_goto(int(new_off))
         self._invoke_anchor_refresh_callback()
+        self._do_goto(int(new_off))
         return True, ""
 
     def expand_struct_table_slots(
@@ -13266,6 +13349,7 @@ Format = "`f|u8`[u8 arg0]"
                 if not ok:
                     return False, err
             self._invoke_anchor_refresh_callback()
+            self._do_goto(int(insert_off))
             return True, ""
 
         dlg = _TableGrowRepointDialog(
@@ -13292,8 +13376,8 @@ Format = "`f|u8`[u8 arg0]"
             ok, err = self.persist_toml_data()
             if not ok:
                 return False, err
-        self._do_goto(int(new_base))
         self._invoke_anchor_refresh_callback()
+        self._do_goto(int(new_base))
         return True, ""
 
     def update_toml_list_string_at_index(self, list_name: str, flat_index: int, new_label: str) -> bool:
