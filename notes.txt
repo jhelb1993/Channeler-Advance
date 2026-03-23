@@ -1,7 +1,9 @@
+update readme
 find
 triple backticks instead of quotes
 improve performance (carot loading)
 toml writing extra bug
+.hma scripts
 read the code
 python scripting
 split hex_editor.py up into separate files
