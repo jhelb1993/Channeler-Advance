@@ -4705,11 +4705,163 @@ _OFFSET_ANGLE_INLINE_NESTED_RUN_RE = re.compile(
 )
 
 
+def _struct_format_has_ydk_import_marker(fmt_raw: str) -> bool:
+    """True when the Format names a ``!``-terminated card run with `` `ydk` `` before the inner ``[`` (optional password table name in between)."""
+    return bool(re.search(r"`ydk`\s*[\w.]*\s*\[", str(fmt_raw or "")))
+
+
+def _struct_format_ydk_password_anchor_name(fmt_raw: str) -> str:
+    """NamedAnchor ``Name`` for 32-bit password lookup: text after `` `ydk` ``, else ``data.cards.passwords``."""
+    m = re.search(r"`ydk`\s*([\w.]*)", str(fmt_raw or ""))
+    if not m:
+        return "data.cards.passwords"
+    name = (m.group(1) or "").strip()
+    return name if name else "data.cards.passwords"
+
+
+def _struct_format_ydk_card_list_name(fmt_raw: str) -> Optional[str]:
+    """``[card:ListName]`` inside the `` `ydk` `` … ``!`` card run (e.g. ``[card:cardnames]``).
+
+    Deck u16 values use keys from this ``[[List]]``. When the password NamedAnchor uses a **different** ``]count``
+    list (e.g. ``]cardstatsnames``), row *i* takes the label from that index list and reverse-looks it up here.
+    If both lists are the same (or only this name is available), row *i* uses the *i*-th sorted key.
+    """
+    m = re.search(r"\[\s*card\s*:\s*([\w.]+)\s*\]", str(fmt_raw or ""), re.IGNORECASE)
+    if not m:
+        return None
+    name = (m.group(1) or "").strip()
+    return name if name else None
+
+
+def _password_anchor_index_list_name(fmt_raw: str) -> Optional[str]:
+    """``]ListName`` struct row-count suffix on the password table (e.g. ``[password::|h]cardstatsnames`` → ``cardstatsnames``)."""
+    c = _parse_struct_count(str(fmt_raw or "").strip())
+    if not isinstance(c, str):
+        return None
+    s = str(c).strip()
+    if not s or s.isdigit():
+        return None
+    base = _struct_count_ref_base_name(s).strip()
+    return base if base else None
+
+
+def _list_reverse_label_to_smallest_key(enum_map: Dict[int, str]) -> Dict[str, int]:
+    """Map trimmed label → smallest ``[[List]]`` key with that label (card id when names repeat)."""
+    out: Dict[str, int] = {}
+    for k in sorted(int(x) for x in enum_map.keys()):
+        lab = str(enum_map[int(k)]).strip()
+        if lab not in out:
+            out[lab] = int(k)
+    return out
+
+
+def _struct_anchor_info_supports_ydk_import(info: Optional[Dict[str, Any]]) -> bool:
+    """True if struct table row ``info`` from :meth:`HexEditorFrame.get_struct_anchors` is a YDK deck struct."""
+    if not info:
+        return False
+    if info.get("ydk_import"):
+        return True
+    anch = info.get("anchor") or {}
+    fmt_raw = str(anch.get("Format", "") or "")
+    return _struct_format_has_ydk_import_marker(fmt_raw)
+
+
+def _strip_ydk_marker_from_offset_prefix(prefix: str) -> str:
+    """Remove `` `ydk` `` and optional ``Name`` token so ``padding:::: main:`` still parses as uint fields."""
+    s = re.sub(r"`ydk`\s*[\w.]*", "", str(prefix or ""))
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _password_rom_u32_match_key(value: int) -> str:
+    """Lowercase hex (no ``0x``) for a ROM u32; leading zero digits stripped — matches YDK line semantics."""
+    return format(int(value) & 0xFFFFFFFF, "x").lstrip("0") or "0"
+
+
+def _password_ydk_token_match_key(token: str) -> Optional[str]:
+    """Normalize a YDK password token: strip ``0x``, keep hex digits only, lowercase, strip leading zeros.
+
+    Returns ``None`` if there are no hex digits (invalid line). No decimal↔hex conversion: ``9596126`` in the
+    file is compared to ``format(rom_u32,'x')`` stripped the same way (e.g. ROM ``0x09596126`` → ``9596126``).
+    """
+    t = str(token).strip().lower()
+    if t.startswith("0x"):
+        t = t[2:]
+    t = re.sub(r"[^0-9a-f]", "", t)
+    if not t:
+        return None
+    return t.lstrip("0") or "0"
+
+
+def _parse_ydk_deck_text(text: str) -> Tuple[List[str], List[str], bool]:
+    """Parse a YDK file: ``#main`` / ``#extra`` password lines; ``!side`` / ``#side`` ignored.
+
+    Returns ``(main_tokens, extra_tokens, saw_extra_header)`` — first field per line as raw string (for
+    password matching). If no ``#extra`` header appears, ``saw_extra_header`` is False.
+    """
+    main_toks: List[str] = []
+    extra_toks: List[str] = []
+    saw_extra = False
+    section: Optional[str] = None
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        low = line.lower()
+        if low.startswith("#main"):
+            section = "main"
+            continue
+        if low.startswith("#extra"):
+            section = "extra"
+            saw_extra = True
+            continue
+        if low.startswith("!side") or low.startswith("#side"):
+            section = "side"
+            continue
+        if low.startswith("#"):
+            continue
+        if section == "side":
+            continue
+        if section not in ("main", "extra"):
+            continue
+        if "--" in line:
+            line = line.split("--", 1)[0].strip()
+        parts = line.split()
+        if not parts:
+            continue
+        raw = parts[0].strip()
+        if not raw:
+            continue
+        if section == "main":
+            main_toks.append(raw)
+        else:
+            extra_toks.append(raw)
+    return main_toks, extra_toks, saw_extra
+
+
+def _ydk_build_deck_blob(
+    main_idx: List[int],
+    extra_idx: List[int],
+    saw_extra_section: bool,
+    term: bytes,
+) -> bytes:
+    """Little-endian ``u16`` card indices, optional ``u16`` extra count, then ``term`` (e.g. ``0000``)."""
+    parts: List[bytes] = []
+    for x in main_idx:
+        parts.append(int(x).to_bytes(2, "little"))
+    if saw_extra_section:
+        parts.append(int(len(extra_idx)).to_bytes(2, "little"))
+    for x in extra_idx:
+        parts.append(int(x).to_bytes(2, "little"))
+    parts.append(bytes(term))
+    return b"".join(parts)
+
+
 def _normalize_offset_padding_count_card_run(inner: str) -> str:
     """Expand sugar into ``offset<>`` + ``@offset+N`` payload fields + ``cards<…>inline*offset+N`` (payload at ``*offset``)."""
 
     def _repl(m: Any) -> str:
-        prefix = m.group(1).strip()
+        prefix = _strip_ydk_marker_from_offset_prefix(m.group(1).strip())
         bracket_inner = m.group(2).strip()
         hexterm = m.group(3)
         expanded = _prefix_tokens_to_at_offset_payload_fields(prefix)
@@ -5050,6 +5202,48 @@ def _terminator_nested_row_end_exclusive(
             return None
         pos += stride
     return None
+
+
+def _terminator_nested_row_end_exclusive_pointer_blob(
+    data: bytes, start: int, stride: int, terminator: bytes
+) -> Optional[int]:
+    """End offset for a **single** pointer-backed ``!HEX`` blob (e.g. deck at ``*offset``).
+
+    When ``stride == len(terminator)`` (typical u16 cards + ``0000``), a card index of **0** is the same two
+    bytes as the terminator. :func:`_terminator_nested_row_end_exclusive` would stop at the first card,
+    yielding a ~2-byte span and breaking grow/repoint/YDK import loops.
+
+    Here we take the **last** stride-aligned terminator in the blob whose suffix up to the next long ``0xFF``
+    padding run (or ROM end) is only ``0xFF`` — i.e. the real end-of-deck marker before free space.
+
+    For **packed** multi-row terminator tables (rows laid back-to-back without a padding gap), use
+    :func:`_terminator_nested_row_end_exclusive` instead.
+    """
+    if stride < 1 or not terminator:
+        return None
+    lim = len(data)
+    tl = len(terminator)
+    if start < 0 or start >= lim:
+        return None
+    # Bound the allocation: first stretch of 8×0xFF is usual GBA padding after a relocated blob.
+    blob_end = lim
+    hi = lim - 7
+    if start < hi:
+        for i in range(start, hi):
+            if data[i : i + 8] == b"\xff" * 8:
+                blob_end = i
+                break
+    last_exc: Optional[int] = None
+    pos = start
+    while pos + tl <= blob_end:
+        if data[pos : pos + tl] == terminator:
+            tail = pos + tl
+            if tail >= blob_end or all(data[j] == 0xFF for j in range(tail, blob_end)):
+                last_exc = tail
+        pos += stride
+    if last_exc is not None:
+        return last_exc
+    return _terminator_nested_row_end_exclusive(data, start, stride, terminator)
 
 
 def _struct_is_packed_terminator_only(fields: List[Dict[str, Any]]) -> bool:
@@ -7404,13 +7598,15 @@ class StructEditorFrame(ttk.Frame):
             match_entries = label_entries + fallback_entries
             anchor_names_hit = label_anchor_names_hit | fallback_anchor_names_hit
 
-        # De-duplicate repeated label hits coming from different anchors that
-        # share the same ]count list. Prefer current struct if available.
-        dedup: Dict[Tuple[str, Optional[int]], Tuple[str, str, Optional[int]]] = {}
+        # One row per display string: duplicate labels from shared ]count lists or
+        # multiple anchors were cluttering Matches / Find. Prefer the current struct when both match.
+        dedup: Dict[str, Tuple[str, str, Optional[int]]] = {}
         for disp, nm, idx in match_entries:
-            k = (disp.lower(), idx)
+            k = disp.lower()
             prev = dedup.get(k)
-            if prev is None or (cur and nm == cur and prev[1] != cur):
+            if prev is None:
+                dedup[k] = (disp, nm, idx)
+            elif cur and nm == cur and prev[1] != cur:
                 dedup[k] = (disp, nm, idx)
         match_entries = list(dedup.values())
         self._struct_match_entries = match_entries
@@ -7456,7 +7652,15 @@ class StructEditorFrame(ttk.Frame):
         name = self._combo.get().strip()
         if not name:
             return None
-        return next((a for a in self._anchors if str(a["name"]) == name), None)
+        want = normalize_named_anchor_lookup_key(name)
+        for a in self._anchors:
+            if normalize_named_anchor_lookup_key(str(a["name"])) == want:
+                return a
+        return None
+
+    def selected_struct_supports_ydk_import(self) -> bool:
+        """True when the struct Format has `` `ydk` `` (and optional password table name) before the card ``[…]``."""
+        return _struct_anchor_info_supports_ydk_import(self._selected_struct_anchor())
 
     def _on_combo_select(self, event: Optional[tk.Event] = None) -> None:
         info = self._selected_struct_anchor()
@@ -7593,10 +7797,16 @@ class StructEditorFrame(ttk.Frame):
             return
 
         matches: List[int] = []
+        seen_label: Set[str] = set()
         for idx in range(self._entry_count):
             label = self._entry_label_for_index(idx)
-            if label and query in label.lower():
-                matches.append(idx)
+            if not label or query not in label.lower():
+                continue
+            lk = label.casefold()
+            if lk in seen_label:
+                continue
+            seen_label.add(lk)
+            matches.append(idx)
 
         if not matches:
             self._entry_search_result_label.config(text="0 matches")
@@ -7722,6 +7932,12 @@ class StructEditorFrame(ttk.Frame):
         self._lists = self._hex.get_lists()
 
     def refresh_anchors(self) -> None:
+        """Reload struct/PCS lists from TOML. Preserves the selected struct name + row when still valid."""
+        saved_name = self._combo.get().strip()
+        try:
+            saved_entry = int(self._idx_var.get())
+        except (ValueError, tk.TclError):
+            saved_entry = 0
         self._anchors = self._hex.get_struct_anchors()
         self._reload_lists()
         self._entry_index_context_pcs = None
@@ -7744,6 +7960,14 @@ class StructEditorFrame(ttk.Frame):
         self._struct_search_var.set("")
         self._apply_struct_combo_filter()
         self._tree.delete(*self._tree.get_children())
+        vals = list(self._combo["values"])
+        if saved_name and saved_name in vals:
+            self._combo.set(saved_name)
+            self._combo.current(vals.index(saved_name))
+            self._on_combo_select()
+            ei = max(0, min(saved_entry, max(0, self._entry_count - 1)))
+            self._idx_var.set(str(ei))
+            self._on_spin_change()
 
     def show_struct(self, anchor_name: str, entry_idx: Optional[int] = None) -> None:
         if not self._anchors:
@@ -7774,9 +7998,18 @@ class StructEditorFrame(ttk.Frame):
             data = self._hex.get_data()
             if not data:
                 return 0
-            return _count_nested_elements_until_terminator(
-                bytes(data), na_base, int(na_fd["inner_stride"]), bytes(term)
-            )
+            raw = bytes(data)
+            st = int(na_fd["inner_stride"])
+            tb = bytes(term)
+            # Pointer-backed ``!`` blob: u16 index 0 is indistinguishable from ``0000`` terminator — use
+            # padding-aware end, then derive element count from span (not first-match terminator steps).
+            if na_fd.get("base_ptr_field") or na_fd.get("nested_ptr_is_self_field"):
+                end_exc = _terminator_nested_row_end_exclusive_pointer_blob(raw, na_base, st, tb)
+                if end_exc is not None:
+                    inner = end_exc - na_base - len(tb)
+                    if inner >= 0 and st > 0:
+                        return inner // st
+            return _count_nested_elements_until_terminator(raw, na_base, st, tb)
         return self._read_nested_array_count(entry_base, na_fd)
 
     def _struct_field_file_off(self, entry_base: int, fd: Dict[str, Any]) -> Optional[int]:
@@ -8736,6 +8969,8 @@ class HexEditorFrame(ttk.Frame):
         self._suppress_matched_word_propagate: bool = False
         # Cache for get_struct_anchors (ROM-derived packed row counts are expensive).
         self._struct_anchors_cache: Optional[List[Dict[str, Any]]] = None
+        # Set by the host editor after :class:`RomToolsShell` builds :class:`StructEditorFrame`.
+        self._struct_editor_ref: Any = None
         self._build_ui()
 
     # ── UI construction ──────────────────────────────────────────────
@@ -12628,6 +12863,12 @@ Format = "`f|u8`[u8 arg0]"
                 "entry_label_list": entry_label_list,
                 "packed_terminator": packed,
                 "packed_terminator_fd": packed_fd,
+                "ydk_import": _struct_format_has_ydk_import_marker(fmt_raw),
+                "ydk_password_anchor": (
+                    _struct_format_ydk_password_anchor_name(fmt_raw)
+                    if _struct_format_has_ydk_import_marker(fmt_raw)
+                    else None
+                ),
             })
         result.sort(key=lambda x: str(x["name"]).lower())
         self._struct_anchors_cache = result
@@ -13200,7 +13441,7 @@ Format = "`f|u8`[u8 arg0]"
         na_base = _nested_array_data_base_file(entry_base, na_fd, fields, data)
         if na_base is None:
             return False, "Could not resolve nested list pointer (invalid GBA pointer?)."
-        end = _terminator_nested_row_end_exclusive(data, na_base, stride, term)
+        end = _terminator_nested_row_end_exclusive_pointer_blob(data, na_base, stride, term)
         if end is None:
             return False, "Could not find nested ! terminator for this row (truncated ROM?)."
         term_start = end - len(term)
@@ -13916,6 +14157,299 @@ Format = "`f|u8`[u8 arg0]"
         self._modified = True
         self._schedule_xref_rebuild()
         self._refresh_visible()
+
+    def set_struct_editor_ref(self, ref: Any) -> None:
+        """Host editor wires the Struct tools pane so File → Import YDK can use the selected struct."""
+        self._struct_editor_ref = ref
+
+    def _build_card_password_index_map(
+        self, password_anchor_name: str, *, card_list_name: Optional[str] = None
+    ) -> Tuple[Optional[Dict[str, int]], str]:
+        """Map normalized password key (:func:`_password_rom_u32_match_key`) → **u16 card id** for the deck blob.
+
+        * *card_list_name* (deck ``[card:ListName]``): target ``[[List]]`` whose **keys** are written as u16.
+
+        * Password Format ``]indexList`` (e.g. ``]cardstatsnames``): row *i* reads the label from that list at
+          the *i*-th sorted key, then finds the **same** label in *card_list_name* and uses that list's key. This
+          matches tables like ``data.cards.passwords`` indexed by ``cardstatsnames`` but storing ``cardnames`` ids.
+
+        * If both list names are the same (or only *card_list_name* applies), row *i* uses the *i*-th sorted key
+          in that list.
+
+        * Otherwise fall back to row index *i*. First password row wins on duplicate ROM passwords.
+        """
+        want = normalize_named_anchor_lookup_key(password_anchor_name.strip())
+        anchor: Optional[Dict[str, Any]] = None
+        for a in self._toml_data.get("NamedAnchors", []):
+            if normalize_named_anchor_lookup_key(str(a.get("Name", ""))) == want:
+                anchor = a
+                break
+        if not anchor:
+            return None, f"NamedAnchor {password_anchor_name!r} was not found in the structure TOML."
+        if not self._data:
+            return None, "No ROM loaded."
+        fmt_raw = str(anchor.get("Format", "")).strip()
+        fmt = normalize_named_anchor_format(anchor.get("Format", ""))
+        fields = _parse_struct_fields(fmt, blist_resolver=self._bit_count_for_blist_ref)
+        if not fields:
+            return None, f"Could not parse Format for {password_anchor_name!r}."
+        addr = anchor.get("Address")
+        if addr is None:
+            return None, f"{password_anchor_name!r} has no Address."
+        try:
+            gba = int(addr) if isinstance(addr, (int, float)) else int(str(addr), 0)
+            if gba < GBA_ROM_BASE:
+                gba += GBA_ROM_BASE
+            base_off = gba - GBA_ROM_BASE
+        except (ValueError, TypeError):
+            return None, f"Bad Address for {password_anchor_name!r}."
+        struct_size = _struct_row_byte_size(fields)
+        if struct_size <= 0:
+            return None, f"Could not compute row size for {password_anchor_name!r}."
+        count_raw = _parse_struct_count(fmt_raw)
+        if count_raw is None:
+            return None, f"Could not read row count for {password_anchor_name!r}."
+        n = count_raw if isinstance(count_raw, int) else self._resolve_struct_count(str(count_raw))
+        if n is None or n <= 0:
+            return None, f"Invalid row count for {password_anchor_name!r}."
+        pw_f = next((f for f in fields if str(f.get("name")) == "password"), fields[0])
+        delta = int(pw_f.get("offset") or 0)
+
+        lists_all = _load_toml_lists(self._toml_data)
+        idx_list_raw = _password_anchor_index_list_name(fmt_raw)
+        n_card = normalize_named_anchor_lookup_key(str(card_list_name).strip()) if card_list_name else ""
+        n_idx = normalize_named_anchor_lookup_key(str(idx_list_raw).strip()) if idx_list_raw else ""
+        card_lm: Optional[Dict[int, str]] = lists_all.get(n_card) if n_card else None
+        stats_lm: Optional[Dict[int, str]] = lists_all.get(n_idx) if n_idx else None
+        sk_card: List[int] = sorted(int(k) for k in card_lm.keys()) if card_lm else []
+        sk_stats: List[int] = sorted(int(k) for k in stats_lm.keys()) if stats_lm else []
+
+        use_label_bridge = bool(
+            card_lm
+            and stats_lm
+            and n_idx
+            and n_card
+            and n_idx != n_card
+        )
+        rev_card: Optional[Dict[str, int]] = _list_reverse_label_to_smallest_key(card_lm) if use_label_bridge else None
+
+        def row_to_card_u16(i: int) -> int:
+            if use_label_bridge and rev_card is not None and i < len(sk_stats):
+                label = str(stats_lm[int(sk_stats[i])]).strip()  # type: ignore[index]
+                cid = rev_card.get(label)
+                if cid is not None:
+                    return int(cid)
+            if sk_card and i < len(sk_card):
+                return int(sk_card[i])
+            return int(i)
+
+        out: Dict[str, int] = {}
+        for i in range(int(n)):
+            ro = base_off + i * struct_size + delta
+            if ro + 4 > len(self._data):
+                break
+            v = int.from_bytes(self._data[ro : ro + 4], "little")
+            mk = _password_rom_u32_match_key(v)
+            if mk not in out:
+                card_u16 = max(0, min(0xFFFF, row_to_card_u16(i)))
+                out[mk] = card_u16
+        return out, ""
+
+    def file_import_ydk_deck(self) -> None:
+        """Import a YDK deck into the selected per-row ``!``-terminated deck blob (`` `ydk` `` formats)."""
+        parent = self.winfo_toplevel()
+        if not self._data:
+            messagebox.showwarning("Import YDK", "No ROM loaded.")
+            return
+        se = self._struct_editor_ref
+        if se is None:
+            messagebox.showinfo(
+                "Import YDK",
+                "Open the tools pane (Struct tab) once after loading so the deck import can see the selected struct.",
+            )
+            return
+        info = se._selected_struct_anchor()
+        if not _struct_anchor_info_supports_ydk_import(info):
+            messagebox.showinfo(
+                "Import YDK",
+                "Select a struct whose Format includes `ydk` (and optional password table Name) before the card field list "
+                "(e.g. offset<… main: `ydk`data.cards.passwords[card:cardnames]!0000> — see Structure TOML).",
+            )
+            return
+        if not self._toml_path or not os.path.isfile(self._toml_path):
+            messagebox.showwarning("Import YDK", "Save or load a structure TOML next to the ROM before importing.")
+            return
+        if info.get("packed_terminator"):
+            messagebox.showerror(
+                "Import YDK",
+                "YDK import applies to per-row `!`-terminated deck blobs, not packed-only terminator tables.",
+            )
+            return
+        fields = list(info.get("fields") or [])
+        na_fd = _struct_per_row_terminator_nested_field(fields)
+        if not na_fd:
+            messagebox.showerror("Import YDK", "This struct has no per-row !-terminated nested card run.")
+            return
+        stride = int(na_fd["inner_stride"])
+        term = bytes(na_fd["terminator"])
+        if stride < 1 or not term:
+            messagebox.showerror("Import YDK", "Invalid nested card stride or terminator.")
+            return
+        if stride != 2:
+            messagebox.showerror(
+                "Import YDK",
+                f"YDK import expects 2-byte card slots (u16); this struct uses inner stride {stride}.",
+            )
+            return
+
+        path = filedialog.askopenfilename(
+            title="Import YDK deck",
+            filetypes=[("YDK deck", "*.ydk"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                ydk_text = f.read()
+        except OSError as e:
+            messagebox.showerror("Import YDK", str(e))
+            return
+
+        fmt_src = str((info.get("anchor") or {}).get("Format", "") or "")
+        pwd_anchor = str(
+            info.get("ydk_password_anchor") or _struct_format_ydk_password_anchor_name(fmt_src)
+        ).strip()
+        main_pw, extra_pw, saw_extra = _parse_ydk_deck_text(ydk_text)
+        pw_map, err = self._build_card_password_index_map(
+            pwd_anchor, card_list_name=_struct_format_ydk_card_list_name(fmt_src)
+        )
+        if pw_map is None:
+            messagebox.showerror("Import YDK", err or "Password table error.")
+            return
+
+        def _lookup_card_index(raw_tok: str) -> Tuple[Optional[int], Optional[str]]:
+            mk = _password_ydk_token_match_key(raw_tok)
+            if mk is None:
+                return None, None
+            ix = pw_map.get(mk)
+            if ix is None or ix < 0 or ix > 0xFFFF:
+                return None, mk
+            return int(ix), mk
+
+        invalid_pw: List[str] = []
+        main_idx: List[int] = []
+        for p in main_pw:
+            ix, _mk = _lookup_card_index(p)
+            if ix is None:
+                invalid_pw.append(p)
+            else:
+                main_idx.append(ix)
+        extra_idx: List[int] = []
+        for p in extra_pw:
+            ix, _mk = _lookup_card_index(p)
+            if ix is None:
+                invalid_pw.append(p)
+            else:
+                extra_idx.append(ix)
+        if invalid_pw:
+            uniq_bad = sorted(set(invalid_pw))
+            preview = ", ".join(str(x) for x in uniq_bad[:12])
+            if len(uniq_bad) > 12:
+                preview += ", …"
+            if not messagebox.askyesno(
+                "Import YDK — unknown passwords",
+                f"{len(invalid_pw)} line(s) reference passwords not in this ROM (e.g. {preview}).\n\n"
+                "Skip those cards and import the rest?\n\n"
+                "No = cancel the whole import.",
+            ):
+                return
+            main_idx = []
+            for p in main_pw:
+                ix, _mk = _lookup_card_index(p)
+                if ix is not None:
+                    main_idx.append(ix)
+            extra_idx = []
+            for p in extra_pw:
+                ix, _mk = _lookup_card_index(p)
+                if ix is not None:
+                    extra_idx.append(ix)
+
+        nm = len(main_idx)
+        ne = len(extra_idx)
+        warn_lines: List[str] = []
+        if nm < 40 or nm > 60:
+            warn_lines.append(f"Main deck has {nm} valid card(s) (expected 40–60).")
+        if ne > 15:
+            warn_lines.append(f"Extra deck has {ne} card(s) (maximum 15).")
+        if warn_lines:
+            msg = "\n\n".join(warn_lines) + "\n\nContinue import anyway?"
+            if not messagebox.askyesno("Import YDK — deck size", msg):
+                return
+
+        new_blob = _ydk_build_deck_blob(main_idx, extra_idx, saw_extra, term)
+        struct_name = str(info.get("name", "")).strip()
+        try:
+            entry_idx = int(se._idx_var.get())
+        except (ValueError, tk.TclError):
+            entry_idx = 0
+        struct_size = int(info["struct_size"])
+        base_off = int(info["base_off"])
+        entry_base = base_off + entry_idx * struct_size
+
+        for _ in range(64):
+            data = bytes(self._data)
+            na_base = _nested_array_data_base_file(entry_base, na_fd, fields, data)
+            if na_base is None:
+                messagebox.showerror("Import YDK", "Could not resolve the deck blob pointer for this row.")
+                return
+            end = _terminator_nested_row_end_exclusive_pointer_blob(data, na_base, stride, term)
+            if end is None:
+                messagebox.showerror(
+                    "Import YDK",
+                    "Could not find the nested terminator for this deck (truncated ROM or invalid pointer?).",
+                )
+                return
+            current_span = end - na_base
+            if len(new_blob) <= current_span:
+                pad = b"\xFF" * (current_span - len(new_blob))
+                self.write_bytes_at_extend(na_base, new_blob + pad)
+                self._invoke_anchor_refresh_callback()
+                try:
+                    se._load_entry(entry_idx)
+                except (tk.TclError, AttributeError):
+                    pass
+                messagebox.showinfo(
+                    "Import YDK",
+                    f"Imported {path}\n"
+                    f"Struct {struct_name!r}, row {entry_idx}: "
+                    f"{len(main_idx)} main + {len(extra_idx)} extra card index(es).",
+                )
+                return
+            need_grow = len(new_blob) - current_span
+            n_slots = (need_grow + stride - 1) // stride
+            fresh = self.find_struct_anchor_by_name(struct_name)
+            if not fresh:
+                messagebox.showerror("Import YDK", "Lost struct anchor while expanding (reload TOML?).")
+                return
+            ok, err_exp = self.expand_struct_table_slots(
+                fresh, n_slots, entry_idx, fill_spec="00", repoint_parent=parent
+            )
+            if not ok:
+                messagebox.showerror("Import YDK", err_exp or "Could not expand the deck blob.")
+                return
+            self._invalidate_struct_anchors_cache()
+            info2 = self.find_struct_anchor_by_name(struct_name)
+            if not info2:
+                messagebox.showerror("Import YDK", "Struct anchor missing after expand.")
+                return
+            fields = list(info2.get("fields") or [])
+            na_fd2 = _struct_per_row_terminator_nested_field(fields)
+            if not na_fd2:
+                messagebox.showerror("Import YDK", "Nested deck field missing after expand.")
+                return
+            na_fd = na_fd2
+
+        messagebox.showerror("Import YDK", "Could not fit the deck after repeated expands (give up).")
 
     # ── File menu: static ROM imports (user-chosen offsets / FF gaps) ─
 

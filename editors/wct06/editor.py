@@ -54,6 +54,11 @@ class WCT06Editor:
             state=tk.DISABLED,
         )
         file_menu.add_command(label="Import Palette...", command=self._on_file_import_palette, state=tk.DISABLED)
+        file_menu.add_command(
+            label="Import YDK deck...",
+            command=self._on_file_import_ydk,
+            state=tk.DISABLED,
+        )
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_exit)
         self._file_menu = file_menu
@@ -69,6 +74,7 @@ class WCT06Editor:
         self._main_paned.add(self._hex_editor)
 
         self._tools_shell = RomToolsShell(self.root, self._main_paned, self._hex_editor)
+        self._hex_editor.set_struct_editor_ref(self._tools_shell.struct_editor)
         self._hex_editor.set_anchor_refresh_callback(
             lambda: self._tools_shell.refresh_anchors() if self._tools_shell else None
         )
@@ -87,7 +93,12 @@ class WCT06Editor:
             "Use ROM-paired TOML (clear override)",
             state=tk.NORMAL if ov else tk.DISABLED,
         )
-        for _imp in ("Import Sprite...", "Import Tilemap/Tileset...", "Import Palette..."):
+        for _imp in (
+            "Import Sprite...",
+            "Import Tilemap/Tileset...",
+            "Import Palette...",
+            "Import YDK deck...",
+        ):
             self._file_menu.entryconfig(_imp, state=state)
         self._file_menu.entryconfig("Edit Matched Words…", state=state)
         if has_file and self._tools_shell:
@@ -104,6 +115,10 @@ class WCT06Editor:
     def _on_file_import_palette(self) -> None:
         if self._hex_editor:
             self._hex_editor.file_import_palette_static()
+
+    def _on_file_import_ydk(self) -> None:
+        if self._hex_editor:
+            self._hex_editor.file_import_ydk_deck()
 
     def _on_load_structure_toml(self) -> None:
         if not self._hex_editor or not self._hex_editor.has_data():
