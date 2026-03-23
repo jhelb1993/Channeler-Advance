@@ -12701,7 +12701,7 @@ Format = '''[card:cardinternalnumbers]7'''
 [[NamedAnchors]]
 Name = '''data.decks2'''
 Address = 0x19DC74
-Format = '''[offset<`ydk`data.cards.passwords[card:cardinternalnumbers]/length> length. padding:.]duelists'''
+Format = '''[offset<`ydk`data.cards.passwords[card:cardinternalnumbers]/both> both. padding:.]duelists'''
 
 [[NamedAnchors]]
 Name = '''data.specialpacks.weeklygiftpacka.cards.normal'''

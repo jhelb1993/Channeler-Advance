@@ -226,7 +226,7 @@ Format = "[offset<padding:::: main: `ydk`data.cards.passwords[card:cardnames]!00
 [[NamedAnchors]]
 Name = "data.decks.offsets.unknown"
 Address = 0x1E64138
-Format = "[offset<[card:cardnames]!0000>]deckinfo"
+Format = "[offset<padding:::: main: `ydk`data.cards.passwords[card:cardnames]/main extra: [card:cardnames]/extra>]deckinfo"
 
 [[MatchedWords]]
 Name = "data.constants.cards.stats.limit"

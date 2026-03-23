@@ -8000,10 +8000,6 @@ class StructEditorFrame(ttk.Frame):
 
     def _entry_label_for_index(self, idx: int) -> Optional[str]:
         """Return the PCS or ``[[List]]`` label for struct entry *idx*, or ``None``."""
-        if self._entry_index_context_pcs:
-            row = self._entry_pcs_row_for_struct_index(idx)
-            if row is not None:
-                return self._pcs_decode_table_row(self._entry_index_context_pcs, row) or None
         if self._entry_index_context_list:
             ln = self._entry_index_context_list
             row = self._entry_list_row_for_struct_index(idx, ln)
@@ -8011,6 +8007,10 @@ class StructEditorFrame(ttk.Frame):
                 lm = self._hex.get_lists().get(ln) or {}
                 txt = lm.get(row, "")
                 return txt if txt else None
+        if self._entry_index_context_pcs:
+            row = self._entry_pcs_row_for_struct_index(idx)
+            if row is not None:
+                return self._pcs_decode_table_row(self._entry_index_context_pcs, row) or None
         return None
 
     def _pcs_decode_table_row(self, pcs_info: Dict[str, Any], row_idx: int) -> str:
@@ -8056,6 +8056,24 @@ class StructEditorFrame(ttk.Frame):
             return
         idx = max(0, min(idx, self._entry_count - 1))
 
+        if self._entry_index_context_list:
+            ln = self._entry_index_context_list
+            row = self._entry_list_row_for_struct_index(idx, ln)
+            lm = self._hex.get_lists().get(ln) or {}
+            if row is None:
+                self._entry_index_name_label.config(text="→ (outside [[List]] range)")
+                self._entry_index_name_label.grid()
+                self._entry_label_pcs_frame.grid_remove()
+                return
+            txt = lm.get(row, "")
+            if txt:
+                self._entry_index_name_label.config(text=f"→ {txt}")
+            else:
+                self._entry_index_name_label.config(text="→ (empty)")
+            self._entry_index_name_label.grid()
+            self._entry_label_pcs_frame.grid_remove()
+            return
+
         if self._entry_index_context_pcs:
             pcs_row = self._entry_pcs_row_for_struct_index(idx)
             if pcs_row is None:
@@ -8077,24 +8095,6 @@ class StructEditorFrame(ttk.Frame):
             self._entry_index_name_label.grid()
             self._entry_label_pcs_var.set(txt)
             self._entry_label_pcs_frame.grid()
-            return
-
-        if self._entry_index_context_list:
-            ln = self._entry_index_context_list
-            row = self._entry_list_row_for_struct_index(idx, ln)
-            lm = self._hex.get_lists().get(ln) or {}
-            if row is None:
-                self._entry_index_name_label.config(text="→ (outside [[List]] range)")
-                self._entry_index_name_label.grid()
-                self._entry_label_pcs_frame.grid_remove()
-                return
-            txt = lm.get(row, "")
-            if txt:
-                self._entry_index_name_label.config(text=f"→ {txt}")
-            else:
-                self._entry_index_name_label.config(text="→ (empty)")
-            self._entry_index_name_label.grid()
-            self._entry_label_pcs_frame.grid_remove()
             return
 
         self._entry_index_name_label.grid_remove()
@@ -13033,16 +13033,17 @@ Format = "`f|u8`[u8 arg0]"
             entry_label_pcs: Optional[Dict[str, Any]] = None
             entry_label_list: Optional[str] = None
             if isinstance(count_raw, str):
-                entry_label_pcs = _find_pcs_table_for_struct_suffix(
-                    self._get_pcs_table_anchors(), count_raw
-                )
-                # Keep [[List]] label lookup independent from PCS detection so
-                # Struct "Find/Matches" can search list contents even when a
-                # same-named PCS table exists.
+                # Prefer [[List]] row labels when the ]count suffix names a List (e.g. deckinfo). Only use a
+                # PCS table for entry labels when no List matches — otherwise PCS was winning in Find / row
+                # hints and could show the wrong table (e.g. another anchor's PCS) when both existed.
                 cref = _struct_count_ref_base_name(str(count_raw))
                 lk = normalize_named_anchor_lookup_key(cref)
                 if lk and lk in _load_toml_lists(self._toml_data):
                     entry_label_list = lk
+                else:
+                    entry_label_pcs = _find_pcs_table_for_struct_suffix(
+                        self._get_pcs_table_anchors(), count_raw
+                    )
             count_ref_str: Optional[str] = str(count_raw).strip() if isinstance(count_raw, str) else None
             result.append({
                 "name": name, "anchor": anchor, "fields": fields,
