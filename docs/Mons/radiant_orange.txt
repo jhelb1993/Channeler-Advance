@@ -1,0 +1,23 @@
+- 20 more TMs
+- Around 25 more Move Tutor moves available
+- Badge-scaling mart (that includes some TMs)
+- Battle Points system (and level 50s/100s 3v3/6v6 Battle Tower)
+- Catch map switching
+- Day/night system (along with D/N wild encounters/NPCs)
+- Dynamic Overworld Palettes
+- Egg Move Tutor
+- Every Pokemon that is related to a Gen 1 species in any way (including coding in their Abilities, even if it isn't in Gen 3 by default)
+- Exp All (yes, the one from Gen 1 - it's like a nerfed Gen 6 Exp Share, which I love)
+- Headbutt trees/sand encounters/overworld Pokemon sight encounters
+- Map name expansion
+- Orange Islands gym leader challenge and Pokedex completion
+- Orange Islands mandatory after beating Lt. Surge
+- Overworld expansion
+- Physical/Special split
+- Postgame Competitive Move Tutor/competitive IV/EV maximizer NPCs
+- Progress-scaling wild encounters on some maps (such as flags/vars set)
+- Select Gen 4-9 moves, items, and mechanics (probably about 25 moves and 10-20 competitive items [not counting super effective damage-reducing berries, new Balls, and the Link Cable])
+- Select trainers have VS Seeker rebattles that are based on how many steps you've taken since you defeated them last
+- Swarms (including a Swarm Finder item)
+- Town map switching
+- Triple Layer Blocks
