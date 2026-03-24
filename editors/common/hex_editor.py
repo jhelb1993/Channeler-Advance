@@ -11857,8 +11857,14 @@ class HexEditorFrame(ttk.Frame):
                     return gi
         return None
 
-    def _select_named_anchor_extent(self, info: Dict[str, Any]) -> None:
-        """Select all bytes of a NamedAnchor table/struct and place cursor at the start."""
+    def _select_named_anchor_extent(
+        self, info: Dict[str, Any], cursor_file_off: Optional[int] = None
+    ) -> None:
+        """Select all bytes of a NamedAnchor table/struct.
+
+        Default: cursor at the table start. If ``cursor_file_off`` is set and lies inside the span,
+        cursor stays on that byte (e.g. double-click on a row inside the table).
+        """
         t = info.get("type")
         if t == "graphics" or info.get("graphics_entry"):
             start = info["base_off"]
@@ -11881,12 +11887,18 @@ class HexEditorFrame(ttk.Frame):
         end = start + total_bytes - 1
         if end >= len(self._data):
             end = len(self._data) - 1
-        self._cursor_byte_offset = start
+        cur = start
+        if cursor_file_off is not None and start <= cursor_file_off <= end:
+            cur = cursor_file_off
+        self._cursor_byte_offset = cur
         self._selection_start = start
         self._selection_end = end
         self._visible_row_start = start // BYTES_PER_ROW
         self._refresh_visible()
         self._update_scrollbar()
+        if cursor_file_off is not None and self._ensure_cursor_visible():
+            self._refresh_visible()
+            self._update_scrollbar()
 
     def _on_asm_mode_change(self, event: Optional[tk.Event] = None) -> None:
         sel = self._asm_mode_var.get()
@@ -18085,12 +18097,20 @@ Format = "`f|u8`[u8 arg0]"
                 if self._follow_pointer_at(ptr_start):
                     return "break"
 
-        # Check if current offset falls within a NamedAnchor PCS table
+        # NamedAnchor PCS / struct / graphics: select span, sync tools to the row under the click
         anchor_info = self._find_named_anchor_at_offset(off)
         if anchor_info:
-            self._select_named_anchor_extent(anchor_info)
+            self._select_named_anchor_extent(anchor_info, cursor_file_off=off)
             if self._on_pointer_to_named_anchor_cb:
-                self.after(10, lambda ai=anchor_info: self._on_pointer_to_named_anchor_cb(ai))
+                snap = dict(anchor_info)
+                t = snap.get("type")
+                if t == "struct":
+                    snap["struct_entry_index"] = _struct_row_index_for_file_offset(
+                        bytes(self._data), snap, off
+                    )
+                elif t == "pcs":
+                    snap["pcs_row_index"] = _pcs_row_index_for_file_offset(snap, off)
+                self.after(10, lambda s=snap: self._on_pointer_to_named_anchor_cb(s))
             return "break"
 
         extent = self._find_function_extent(off)
