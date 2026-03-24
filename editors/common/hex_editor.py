@@ -3042,8 +3042,8 @@ class PcsStringTableFrame(ttk.Frame):
         if ent:
             ent.place_forget()
             ent.destroy()
-        if self._tree:
-            self._tree.focus_set()
+            if self._tree:
+                self._tree.focus_set()
         return "break"
 
     def _on_combo_select(self, event: Optional[tk.Event] = None) -> None:
@@ -9901,8 +9901,8 @@ class StructEditorFrame(ttk.Frame):
         if ent:
             ent.place_forget()
             ent.destroy()
-        if self._tree:
-            self._tree.focus_set()
+            if self._tree:
+                self._tree.focus_set()
         return "break"
 
 
@@ -10006,7 +10006,8 @@ class HexEditorFrame(ttk.Frame):
         self._goto_var = tk.StringVar(value="")
         self._goto_entry = ttk.Entry(top_row, textvariable=self._goto_var, width=10, font=("Consolas", 9))
         self._goto_entry.grid(row=0, column=6, sticky="w", padx=(0, 8))
-        self._goto_entry.bind("<KeyRelease>", self._on_goto_entry_change)
+        self._goto_entry.bind("<Return>", self._on_goto_commit)
+        self._goto_entry.bind("<KP_Enter>", self._on_goto_commit)
         self._goto_entry.bind("<FocusIn>", self._on_goto_focus_in)
         self._goto_entry.bind("<KeyPress>", self._on_goto_keypress, add=True)
         self._goto_entry.bind("<<Paste>>", self._on_goto_paste, add=True)
@@ -11948,7 +11949,6 @@ class HexEditorFrame(ttk.Frame):
             self._goto_entry.insert(0, filt)
         except tk.TclError:
             return None
-        self._on_goto_entry_change()
         return "break"
 
     def _goto_named_anchor_at_offset_with_tools(self, file_off: int, ai: Dict[str, Any]) -> None:
@@ -12002,27 +12002,23 @@ class HexEditorFrame(ttk.Frame):
                 return True
         return False
 
-    def _on_goto_entry_change(self, event: Optional[tk.Event] = None) -> None:
+    def _on_goto_commit(self, event: Optional[tk.Event] = None) -> Optional[str]:
+        """Jump to the address or anchor in the Goto field (runs when you press Enter)."""
         if not self._data:
-            return
-        if event and event.keysym in (
-            "Control_L", "Control_R", "Shift_L", "Shift_R",
-            "Alt_L", "Alt_R", "Caps_Lock", "Num_Lock",
-        ):
-            return
+            return "break"
         s = self._goto_var.get().strip()
         if not s:
-            return
+            return "break"
         if self._goto_resolve_and_maybe_open_tool(s):
-            return
+            return "break"
         sym_offset = self._get_function_anchor_offset_by_name(s)
         if sym_offset is not None and 0 <= sym_offset < len(self._data):
             self._do_goto(sym_offset)
-            return
+            return "break"
         if s.startswith("0x") or s.startswith("0X"):
             s = s[2:]
         if not s:
-            return
+            return "break"
         try:
             val = int(s, 16)
             if val >= GBA_ROM_BASE and val < GBA_ROM_BASE + len(self._data):
@@ -12031,6 +12027,7 @@ class HexEditorFrame(ttk.Frame):
                 self._do_goto(val)
         except ValueError:
             pass
+        return "break"
 
     def _do_goto(self, offset: int) -> None:
         """Jump to offset in hex editor. Puts target row at the very top of the view.
@@ -17840,11 +17837,21 @@ Format = "`f|u8`[u8 arg0]"
     # ── Cursor / selection display ───────────────────────────────────
 
     def _update_cursor_display(self) -> None:
+        preserve_goto = False
+        try:
+            preserve_goto = self.winfo_toplevel().focus_get() == self._goto_entry
+        except tk.TclError:
+            pass
         self._text.tag_remove("cursor_byte", "1.0", tk.END)
         self._text.tag_remove("sel_hex", "1.0", tk.END)
         self._text_ascii.tag_remove("cursor_byte", "1.0", tk.END)
         self._text_ascii.tag_remove("sel_ascii", "1.0", tk.END)
         if not self._data:
+            if preserve_goto:
+                try:
+                    self._goto_entry.focus_set()
+                except tk.TclError:
+                    pass
             return
         self._cursor_byte_offset = max(0, min(self._cursor_byte_offset, len(self._data) - 1))
         fo = self._cursor_byte_offset
@@ -17895,6 +17902,12 @@ Format = "`f|u8`[u8 arg0]"
         self._text_ascii.tag_raise("cursor_byte")
 
         self._refresh_asm_selection()
+
+        if preserve_goto:
+            try:
+                self._goto_entry.focus_set()
+            except tk.TclError:
+                pass
 
     # ── Mouse interaction ────────────────────────────────────────────
 
@@ -18716,6 +18729,19 @@ class RomToolsShell:
             return False
         return cls in ("TEntry", "Entry", "TSpinbox", "Spinbox", "TCombobox")
 
+    def _defer_focus_tool_widget(self, widget: Any) -> None:
+        """Move keyboard focus to a tools-pane widget after refresh, unless the user is still in an entry (e.g. Goto)."""
+
+        def _focus() -> None:
+            if self._focus_in_text_entry():
+                return
+            try:
+                widget.focus_set()
+            except tk.TclError:
+                pass
+
+        self._root.after(50, _focus)
+
     def _make_scroll_slot(self) -> Tuple[ttk.Frame, ttk.Frame]:
         """Canvas + vertical and horizontal scrollbars; inner frame scrolls (~1/3 screen wide / tall)."""
         third = max(200, self._root.winfo_screenwidth() // 3)
@@ -18857,7 +18883,7 @@ class RomToolsShell:
         if t == "graphics":
             self.graphics_preview.refresh_anchors()
             self.graphics_preview.show_anchor(name)
-            self._root.after(50, lambda: self.graphics_preview._combo.focus_set())
+            self._defer_focus_tool_widget(self.graphics_preview._combo)
         elif t == "struct":
             self.struct_editor.refresh_anchors()
             ei = anchor_info.get("struct_entry_index")
@@ -18865,7 +18891,7 @@ class RomToolsShell:
                 self.struct_editor.show_struct(name, entry_idx=ei)
             else:
                 self.struct_editor.show_struct(name)
-            self._root.after(50, lambda: self.struct_editor._tree.focus_set())
+            self._defer_focus_tool_widget(self.struct_editor._tree)
         else:
             self.pcs_table.refresh_anchors()
             pri = anchor_info.get("pcs_row_index")
@@ -18873,4 +18899,4 @@ class RomToolsShell:
                 self.pcs_table.show_table(name, row_index=pri)
             else:
                 self.pcs_table.show_table(name)
-            self._root.after(50, lambda: self.pcs_table._tree.focus_set())
+            self._defer_focus_tool_widget(self.pcs_table._tree)

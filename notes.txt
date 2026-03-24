@@ -1,5 +1,4 @@
-fix goto when in labeled bytes
-make tables jump to index
+make tables jump to index when double clicking on bytes inside
 triple backticks instead of quotes
 toml writing extra bug
 .hma scripts
