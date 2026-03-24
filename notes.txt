@@ -6,7 +6,7 @@ improve performance when loading tools
 horizontally resizable tools
 more games
 generate toml (other option)
-triple backticks instead of quotes
+triple single quotes instead of double quotes
 toml writing extra bug
 fix finnicky behaviors
 update readme (other ygo games, no outdated info)
