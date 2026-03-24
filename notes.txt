@@ -1,3 +1,7 @@
+data.stats.items uses name field
+improve performance when loading tools
+horizontally resizable tools
+fix invalid unicode symbols on linux
 more games
 generate toml (other option)
 testing
