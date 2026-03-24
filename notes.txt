@@ -1,13 +1,15 @@
 data.stats.items uses name field
+fix invalid unicode symbols on linux
+pcs macros
 improve performance when loading tools
 horizontally resizable tools
-fix invalid unicode symbols on linux
 more games
 generate toml (other option)
-testing
-fix finnicky behaviors
 triple backticks instead of quotes
 toml writing extra bug
+fix finnicky behaviors
+update readme
+testing
 .hma scripts
 read the code
 python scripting
