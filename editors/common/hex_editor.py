@@ -144,6 +144,40 @@ def _pseudo_c_diag(msg: str) -> None:
         return
     print(f"[Channeler pseudo-C] {msg}", file=sys.stderr, flush=True)
 
+
+def _ascii_safe_pseudo_c_display(text: str) -> str:
+    """Normalize Unicode punctuation for Tk Text + monospace fonts on macOS/Linux (angr output + our strings).
+
+    Replaces em/en dashes, ellipsis, arrows, multiplication sign, NBSP/ZWSP, and smart quotes with ASCII so
+    highlighting and glyphs do not drift or show as replacement/tofu characters.
+    """
+    if not text:
+        return text
+    out = text
+    for src, dst in (
+        ("\u2014", "-"),
+        ("\u2013", "-"),
+        ("\u2212", "-"),
+        ("\u2015", "-"),
+        ("\u2026", "..."),
+        ("\u00a0", " "),
+        ("\u200b", ""),
+        ("\u200c", ""),
+        ("\u200d", ""),
+        ("\ufeff", ""),
+        ("\u2192", "->"),
+        ("\u2190", "<-"),
+        ("\u21d2", "=>"),
+        ("\u00d7", "x"),
+        ("\u00b7", "."),
+        ("\u2018", "'"),
+        ("\u2019", "'"),
+        ("\u201c", '"'),
+        ("\u201d", '"'),
+    ):
+        out = out.replace(src, dst)
+    return out
+
 _CAPSTONE_AVAILABLE = False
 _CAPSTONE_IMPORT_ERROR: Optional[str] = None
 ARM_OP_IMM = None  # type: ignore[misc, assignment]
@@ -191,7 +225,7 @@ GBA_GAME_CODE_OFFSET = 0xAC
 
 
 def rom_bytes_use_pokefirered_sym(data: Optional[bytes]) -> bool:
-    """True when this ROM is Pokémon FireRed US (``BPRE``) — matches ``pokefirered.sym``."""
+    """True when this ROM is Pokémon FireRed US (``BPRE``) - matches ``pokefirered.sym``."""
     if not data or len(data) < GBA_GAME_CODE_OFFSET + 4:
         return False
     return bytes(data[GBA_GAME_CODE_OFFSET : GBA_GAME_CODE_OFFSET + 4]) == b"BPRE"
@@ -389,17 +423,17 @@ C_INJECT_PATCHES_TEMPLATE = """### hooks
 
 CHANNELER_SCRIPT_TEMPLATE = """# In-tool script (Ctrl+Shift+Enter). API: ch / channeler
 #  Why here: ch reads/writes the ROM open in this window (+ TOML); a .py on disk must reopen the .gba.
-#  ch.log("msg")          — append to output pane
-#  ch.toml                — copy of loaded TOML dict (FunctionAnchors / NamedAnchors / …)
-#  ch.resolve("name")      — (file_offset|None, err) for Goto / NamedAnchor / ]count [[List]] name
+#  ch.log("msg")          - append to output pane
+#  ch.toml                - copy of loaded TOML dict (FunctionAnchors / NamedAnchors / …)
+#  ch.resolve("name")      - (file_offset|None, err) for Goto / NamedAnchor / ]count [[List]] name
 #  ch.read_u32_le(off)     ch.write_bytes(off, bytes)
-#  ch.label_for_gba(0x08001234)  — merged pokefirered.sym + TOML name, or None
-#  ch.label_for_rom_pointer_word(w)  — word as symbol or hex
-#  ch.classify_gba(addr)   — "rom" | "ewram" | "iwram" | "other"
+#  ch.label_for_gba(0x08001234)  - merged pokefirered.sym + TOML name, or None
+#  ch.label_for_rom_pointer_word(w)  - word as symbol or hex
+#  ch.classify_gba(addr)   - "rom" | "ewram" | "iwram" | "other"
 #  ch.sym_name_to_addr()   full pokefirered.sym map
 #  GBA_ROM_BASE, GBA_ROM_MAX, GBA_EWRAM_* … in namespace
-#  hex_editor, gba_graphics — full modules; also common names at top level (parse_rom_file_offset, …)
-#  Optional: from hex_editor import SomeSymbol  — works like normal Python
+#  hex_editor, gba_graphics - full modules; also common names at top level (parse_rom_file_offset, …)
+#  Optional: from hex_editor import SomeSymbol  - works like normal Python
 
 ch.log("Hello from Channeler script")
 """
@@ -572,11 +606,11 @@ def _toml_palette_format_for_tilemap_bpp(bpp: int, rom_colors_8bpp: Optional[int
     return toml_format_ucp8_from_8bpp_rom_colors(nc)
 
 
-_GFX_COMBO_DISPLAY_SEP = "  —  "
+_GFX_COMBO_DISPLAY_SEP = "  -  "
 
 
 def _graphics_anchor_combo_display(info: Dict[str, Any]) -> str:
-    """Tools → Graphics combobox label; table anchors show row count + [[List]] index table."""
+    """Tools -> Graphics combobox label; table anchors show row count + [[List]] index table."""
     name = str(info.get("name", ""))
     if not info.get("graphics_table"):
         return name
@@ -1038,8 +1072,8 @@ def _normalize_offset_angle_open_bracket_before_ydk(t: str) -> str:
 def _normalize_offset_inner_card_before_count_slash(t: str) -> str:
     """Insert missing ``]`` before ``/countField>`` when ``[card:List`` was written without closing ``]`` (typo).
 
-    Wrong: ``[card:ListName/countField>`` — no ``]`` between the list name and ``/``.
-    Right: ``[card:ListName]/countField>`` — must **not** add another ``]`` when that ``]`` is already present
+    Wrong: ``[card:ListName/countField>`` - no ``]`` between the list name and ``/``.
+    Right: ``[card:ListName]/countField>`` - must **not** add another ``]`` when that ``]`` is already present
     (otherwise ``…[card:…]/count>`` becomes ``…[card:…]]/count>`` and breaks nested ``pack<[…/cardamount>`` layouts).
     """
     return re.sub(
@@ -1062,10 +1096,10 @@ def _normalize_nested_array_slash_count_bracket_order(t: str) -> str:
 def _normalize_ydk_deck_struct_shorthand_format(t: str) -> str:
     """Expand minimal `` `ydk` `` deck lines so :func:`_parse_struct_fields` accepts them.
 
-    * `` `ydk`anchor[card:List]N`` (no outer brackets) — common in TOML; struct loader requires ``[…]N``.
-    * ``[`ydk`anchor[card:List]!HEX>]N`` — same idea with an explicit ``!`` terminator hex (ignored for layout).
+    * `` `ydk`anchor[card:List]N`` (no outer brackets) - common in TOML; struct loader requires ``[…]N``.
+    * ``[`ydk`anchor[card:List]!HEX>]N`` - same idea with an explicit ``!`` terminator hex (ignored for layout).
 
-    Both normalize to ``[card:List]N``: **N** rows of **u16** ``card`` slots with the given ``[[List]]`` enum — the
+    Both normalize to ``[card:List]N``: **N** rows of **u16** ``card`` slots with the given ``[[List]]`` enum - the
     password table name stays only in the **raw** Format (for YDK import / password lookup), not in this expansion.
 
     For a pointer-based deck blob (``offset<… main: …``), write the full ``offset<…>`` form in TOML instead of this shorthand.
@@ -1109,7 +1143,7 @@ def _normalize_shorthand_bracket_terminator_format(s: str) -> str:
     """
     Expand legacy ``[fields]!HEX`` where ``!HEX`` starts the ``!``-terminated nested blob (not ``]count``).
 
-    Example: ``[rate:]!0000`` → ``[rows<[rate:]!0000>inline]1`` (one packed terminator table at ``Address``).
+    Example: ``[rate:]!0000`` -> ``[rows<[rate:]!0000>inline]1`` (one packed terminator table at ``Address``).
     """
     t = str(s or "").strip()
     prefix = ""
@@ -1464,7 +1498,7 @@ class _TableGrowRepointDialog:
         self._old_base = int(old_base)
         self._hex = hex_editor
         self._dlg = tk.Toplevel(parent)
-        self._dlg.title("Repoint table — not enough free space")
+        self._dlg.title("Repoint table - not enough free space")
         self._dlg.transient(parent)
         self._dlg.grab_set()
         f = ttk.Frame(self._dlg, padding=10)
@@ -1589,7 +1623,7 @@ class _FillBytesPromptDialog:
     def __init__(self, parent: tk.Misc) -> None:
         self.result: Optional[str] = None
         self._dlg = tk.Toplevel(parent)
-        self._dlg.title("Table slots — fill pattern")
+        self._dlg.title("Table slots - fill pattern")
         self._dlg.transient(parent)
         self._dlg.grab_set()
         f = ttk.Frame(self._dlg, padding=10)
@@ -1598,7 +1632,7 @@ class _FillBytesPromptDialog:
             f,
             text=(
                 "New element bytes are filled by tiling this hex pattern (even length).\n"
-                "Examples: 00 → 0x00 per byte; 0000 → two-byte pattern for 16-bit slots.\n"
+                "Examples: 00 -> 0x00 per byte; 0000 -> two-byte pattern for 16-bit slots.\n"
                 "Leave empty for 0x00."
             ),
             wraplength=420,
@@ -1642,7 +1676,7 @@ class _PointedBlobRepointDialog:
         self._old_base = int(ptr_alloc_start)
         self._hex = hex_editor
         self._dlg = tk.Toplevel(parent)
-        self._dlg.title("Repoint pointer target — not enough free space")
+        self._dlg.title("Repoint pointer target - not enough free space")
         self._dlg.transient(parent)
         self._dlg.grab_set()
         f = ttk.Frame(self._dlg, padding=10)
@@ -1652,7 +1686,7 @@ class _PointedBlobRepointDialog:
             text=(
                 f"Not enough consecutive 0xFF space after the nested terminator to grow in place.\n\n"
                 f"{desc}\n"
-                f"Pointer field: {ptr_field_name!r} — allocation currently starts at file 0x{self._old_base:X}.\n"
+                f"Pointer field: {ptr_field_name!r} - allocation currently starts at file 0x{self._old_base:X}.\n"
                 f"Expanded blob needs 0x{self._need:X} byte(s) starting at that allocation base.\n\n"
                 "Choose a new **file offset** for the start of the pointed-to block (same address the pointer holds), "
                 "or search for an FF gap. All word-aligned ROM pointers to the old start will be updated.\n"
@@ -2028,7 +2062,7 @@ class _StaticRomOffsetDialog:
 class _SpriteImportOptionsDialog:
     """Manual static sprite/tileset import: bpp, palette size, tile grid, LZ, TOML update."""
 
-    def __init__(self, parent: tk.Misc, png_path: str, *, title: str = "Import sprite — options") -> None:
+    def __init__(self, parent: tk.Misc, png_path: str, *, title: str = "Import sprite - options") -> None:
         # bpp, lz, w, h, pal_colors, toml_sprite, toml_palette, write_palette_rom, update_toml, rom_colors_8bpp_clip
         self.result: Optional[Tuple[int, bool, int, int, int, str, str, bool, bool, Optional[int]]] = None
         self._dlg = tk.Toplevel(parent)
@@ -2101,14 +2135,14 @@ class _SpriteImportOptionsDialog:
         ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Label(
             f,
-            text="Sprite NamedAnchor (TOML) — may be new; row is added if missing:",
+            text="Sprite NamedAnchor (TOML) - may be new; row is added if missing:",
             wraplength=420,
         ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self._toml_name = tk.StringVar(value="")
         ttk.Entry(f, textvariable=self._toml_name, width=48).grid(row=10, column=0, columnspan=2, sticky="ew")
         ttk.Label(
             f,
-            text="Palette NamedAnchor (optional — sprite Format gets |palette; row added if missing):",
+            text="Palette NamedAnchor (optional - sprite Format gets |palette; row added if missing):",
             wraplength=420,
         ).grid(row=11, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self._toml_pal_name = tk.StringVar(value="")
@@ -2214,7 +2248,7 @@ class _PaletteImportOptionsDialog:
         self.result: Optional[Tuple[int, bool, int]] = None  # bpp, lz, colors_8bpp (meaningful if bpp==8)
         self._is_png = is_png
         self._dlg = tk.Toplevel(parent)
-        self._dlg.title("Import palette — options")
+        self._dlg.title("Import palette - options")
         self._dlg.transient(parent)
         self._dlg.grab_set()
         f = ttk.Frame(self._dlg, padding=10)
@@ -2338,9 +2372,9 @@ class _TilemapImportModeDialog:
         ttk.Label(
             f,
             text=(
-                "• Raw binary — any .bin (e.g. exported map or tile bytes).\n"
-                "• PNG tilemap — full map image → map + tileset + palette (same as Tools graphics).\n"
-                "• PNG tileset — one sprite sheet → tile data only."
+                "• Raw binary - any .bin (e.g. exported map or tile bytes).\n"
+                "• PNG tilemap - full map image -> map + tileset + palette (same as Tools graphics).\n"
+                "• PNG tileset - one sprite sheet -> tile data only."
             ),
             wraplength=420,
             justify=tk.LEFT,
@@ -2349,7 +2383,7 @@ class _TilemapImportModeDialog:
         ttk.Radiobutton(f, text="Raw binary file", variable=self._mode, value="raw").grid(
             row=1, column=0, sticky="w", pady=(8, 0)
         )
-        ttk.Radiobutton(f, text="PNG tilemap (image → map + tiles + palette)", variable=self._mode, value="png_map").grid(
+        ttk.Radiobutton(f, text="PNG tilemap (image -> map + tiles + palette)", variable=self._mode, value="png_map").grid(
             row=2, column=0, sticky="w"
         )
         ttk.Radiobutton(f, text="PNG tileset (sprite sheet)", variable=self._mode, value="png_ts").grid(
@@ -2378,7 +2412,7 @@ class _TilemapPngDimsDialog:
         self.result: Optional[Tuple[int, int, int, int, bool, str, str, str, bool, Optional[int]]] = None
         self.skip_palette = False
         self._dlg = tk.Toplevel(parent)
-        self._dlg.title("PNG tilemap — options")
+        self._dlg.title("PNG tilemap - options")
         self._dlg.transient(parent)
         self._dlg.grab_set()
         f = ttk.Frame(self._dlg, padding=10)
@@ -2441,7 +2475,7 @@ class _TilemapPngDimsDialog:
         ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
         ttk.Label(
             f,
-            text="TOML names (optional) — new names get a new [[NamedAnchors]] row:",
+            text="TOML names (optional) - new names get a new [[NamedAnchors]] row:",
             wraplength=440,
         ).grid(row=7, column=0, columnspan=4, sticky="w", pady=(8, 0))
         ttk.Label(f, text="Tilemap:").grid(row=8, column=0, sticky="w")
@@ -2547,7 +2581,7 @@ class _TilemapPngDimsDialog:
         if upd and nm_map and not nm_ts:
             messagebox.showwarning(
                 "Import",
-                "Tilemap anchor Format is ucm…|tileset — enter the tileset NamedAnchor name.",
+                "Tilemap anchor Format is ucm…|tileset - enter the tileset NamedAnchor name.",
             )
             return
         self.result = (mw, mh, bpp, ncolors, skip, nm_map, nm_ts, nm_pal, upd, rom_clip_8)
@@ -3628,7 +3662,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         rows = self._gfx_table_list_all_rows
         if not rows:
             return
-        sep = " \u2014 "
+        sep = " - "
         q_raw = self._gfx_table_list_search_var.get().strip()
         q = q_raw.lower()
         filt_rows = [(i, lbl) for i, lbl in rows if not q or q in str(i) or q in lbl.lower()]
@@ -3673,10 +3707,12 @@ class GraphicsPreviewFrame(ttk.Frame):
         if self._gfx_table_list_suppress:
             return
         s = self._gfx_table_list_combo.get().strip()
-        sep = " \u2014 "
-        if sep not in s:
+        sep = " - "
+        legacy_sep = " \u2014 "
+        pick_sep = sep if sep in s else (legacy_sep if legacy_sep in s else None)
+        if pick_sep is None:
             return
-        part = s.split(sep, 1)[0]
+        part = s.split(pick_sep, 1)[0]
         try:
             idx = int(part.strip())
         except ValueError:
@@ -3806,7 +3842,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                         text=f"Chunks map to palette indices (hex digits): {hx}"
                     )
                 else:
-                    self._pal4_toml_hint.configure(text="Plain ucp4 → ROM chunk is index 0 only")
+                    self._pal4_toml_hint.configure(text="Plain ucp4 -> ROM chunk is index 0 only")
                 self._pal4_row.grid()
                 self._pal4_canvas.grid()
                 self._refresh_palette_4_swatches()
@@ -3908,7 +3944,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     logs.append(f"Preview palette override: {oerr}\n")
                 else:
                     override_pal_bytes = raw_ov
-                    src = "LZ77→" if ov_lz else "raw "
+                    src = "LZ77->" if ov_lz else "raw "
                     logs.append(
                         f"Preview palette: {src}file offset 0x{ov_off:X} ({ov_bpp}bpp, {len(raw_ov)} bytes); "
                         f"linked |palette ignored for preview.\n"
@@ -3973,7 +4009,7 @@ class GraphicsPreviewFrame(ttk.Frame):
             messagebox.showerror(
                 "Preview palette",
                 f"This sprite is {sp.bpp}bpp; set the palette mode to {sp.bpp}bpp "
-                f"(4→16 colors, 6→64, 8→256).",
+                f"(4->16 colors, 6->64, 8->256).",
             )
             return
         use_lz = str(self._sprite_pal_storage_var.get()).strip().lower() == "lz77"
@@ -3990,7 +4026,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         )
         self._sprite_pal_status.configure(
             text=(
-                f"{loc} — {pb}bpp preview ({len(raw)} bytes decoded). "
+                f"{loc} - {pb}bpp preview ({len(raw)} bytes decoded). "
                 "Import still writes uncompressed palette bytes unless the anchor uses LZ in TOML."
             ),
             foreground="#060",
@@ -4063,7 +4099,7 @@ class GraphicsPreviewFrame(ttk.Frame):
             )
         log += (
             f"{label}: updated {ptr_n} word-aligned pointer(s) "
-            f"0x{old_gba:08X} → 0x{new_gba:08X} (ROM scan; old/new blob regions excluded).\n"
+            f"0x{old_gba:08X} -> 0x{new_gba:08X} (ROM scan; old/new blob regions excluded).\n"
         )
         if named_anchor_for_reloc:
             ok, err = self._hex.update_named_anchor_gba_address(
@@ -4071,7 +4107,7 @@ class GraphicsPreviewFrame(ttk.Frame):
             )
             if ok:
                 log += (
-                    f"{label}: updated NamedAnchor {named_anchor_for_reloc!r} Address → "
+                    f"{label}: updated NamedAnchor {named_anchor_for_reloc!r} Address -> "
                     f"0x{new_off + GBA_ROM_BASE:08X}.\n"
                 )
             else:
@@ -4148,7 +4184,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         else:
             tile_bytes, flat_pal, err, tw, th = sprite_import_png(path, spec)
             log_intro = (
-                f"Import: PNG pixel size → {tw}×{th} tiles ({tw * 8}×{th * 8} px canvas); "
+                f"Import: PNG pixel size -> {tw}×{th} tiles ({tw * 8}×{th * 8} px canvas); "
                 f"not resized to match the TOML / preview window.\n"
             )
         if err:
@@ -4470,7 +4506,7 @@ class GraphicsPreviewFrame(ttk.Frame):
 
     def _import_tilemap_from_png(self, name: str, info: Dict[str, Any], spec: Any) -> None:
         """
-        Tilemap Studio–style import: one PNG (full map at 8 px/tile) → deduped tileset + non-affine map + palette.
+        Tilemap Studio–style import: one PNG (full map at 8 px/tile) -> deduped tileset + non-affine map + palette.
 
         Writes the tileset NamedAnchor blob, this tilemap blob, and the linked palette anchor when resolvable.
         """
@@ -4570,7 +4606,7 @@ class GraphicsPreviewFrame(ttk.Frame):
 
         logs: List[str] = [
             tbl_warn or "",
-            "Import tilemap: PNG → deduped tileset + non-affine map (Tilemap Studio–style image→tiles; "
+            "Import tilemap: PNG -> deduped tileset + non-affine map (Tilemap Studio–style image->tiles; "
             "see https://github.com/Rangi42/tilemap-studio ).\n",
             f"  Unique tiles after dedupe (incl. flips): {n_unique} (hardware limit 1024).\n",
         ]
@@ -4724,7 +4760,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                 if ok_toml:
                     if self._hex.reload_toml_from_disk():
                         logs.append(
-                            f"TOML: Tileset {ts_name!r} Format → {tw}×{th} tiles ({n_unique} unique); reloaded.\n"
+                            f"TOML: Tileset {ts_name!r} Format -> {tw}×{th} tiles ({n_unique} unique); reloaded.\n"
                         )
                     else:
                         logs.append("TOML: tileset Format saved but reload from disk failed.\n")
@@ -4757,8 +4793,8 @@ def _split_enum_field_ref(enum_ref: Optional[str]) -> Tuple[str, int]:
 
 
 def parse_struct_tree_iid(iid: str) -> Tuple[int, Any]:
-    """Parse tree row id: ``sf_3`` → (3, None); ``sf_3_b0`` → (3, 0);
-    ``sf_na_5_0_2`` → (5, (\"na\", 0, 2)); ``sf_nab_5_0_2_1`` → (5, (\"nab\", 0, 2, 1))."""
+    """Parse tree row id: ``sf_3`` -> (3, None); ``sf_3_b0`` -> (3, 0);
+    ``sf_na_5_0_2`` -> (5, (\"na\", 0, 2)); ``sf_nab_5_0_2_1`` -> (5, (\"nab\", 0, 2, 1))."""
     if not iid.startswith("sf_"):
         return -1, None
     rest = iid[3:]
@@ -4810,13 +4846,13 @@ def _parse_bitfield_segment_spec(seg: str) -> Optional[Tuple[str, int, Optional[
     (``.`` = 1 bit, ``:`` = 2 bits). The first ``\\w`` character after the width run starts the enum ref.
 
     Examples (name, bits, enum):
-      ``stars::``                          → (stars, 4, None)
-      ``defn::::.``                        → (defn, 9, None)
-      ``type:types``                       → (type, 2, types)
-      ``race::.races``                     → (race, 5, races)       — the ``.`` before ``races`` is 1 width bit
-      ``attribute:.attributes``            → (attribute, 3, attributes)
-      ``color:::.bodycolors``              → (color, 7, bodycolors)
-      ``move::::.data.pokemon.moves.names`` → (move, 9, data.pokemon.moves.names)
+      ``stars::``                          -> (stars, 4, None)
+      ``defn::::.``                        -> (defn, 9, None)
+      ``type:types``                       -> (type, 2, types)
+      ``race::.races``                     -> (race, 5, races)       - the ``.`` before ``races`` is 1 width bit
+      ``attribute:.attributes``            -> (attribute, 3, attributes)
+      ``color:::.bodycolors``              -> (color, 7, bodycolors)
+      ``move::::.data.pokemon.moves.names`` -> (move, 9, data.pokemon.moves.names)
 
     Third tuple element is the enum ref for :meth:`StructEditorFrame._resolve_enum`, or None."""
     seg = seg.strip()
@@ -4901,7 +4937,7 @@ def _parse_bitfield_token(token: str) -> Optional[Dict[str, Any]]:
 
 
 def _parse_helper_field_token(token: str) -> Optional[Dict[str, Any]]:
-    """Parse ``name|=a+b+…`` — computed sum of uint fields; no ROM bytes (size 0)."""
+    """Parse ``name|=a+b+…`` - computed sum of uint fields; no ROM bytes (size 0)."""
     m = re.match(r"^(\w+)\|=(.+)$", token.strip())
     if not m:
         return None
@@ -4944,7 +4980,7 @@ def _tokenize_struct_body(inner: str) -> List[str]:
     return tokens
 
 
-# ``offset<prefix [inner]!HEX>`` — table row is ``offset<>``; prefix + card run live at ``*offset`` (prefix via ``@offset+N``, cards via ``*offset+N``).
+# ``offset<prefix [inner]!HEX>`` - table row is ``offset<>``; prefix + card run live at ``*offset`` (prefix via ``@offset+N``, cards via ``*offset+N``).
 _OFFSET_ANGLE_INLINE_NESTED_RUN_RE = re.compile(
     r"offset<\s*(.*?)\s*\[\s*([^\]]+)\s*\]\s*!([0-9a-fA-F]+)\s*>",
     re.IGNORECASE | re.DOTALL,
@@ -4992,7 +5028,7 @@ def _parse_bare_ydk_deck_shorthand_trailing_count(fmt_raw: str) -> Optional[int]
 def _struct_format_ydk_card_list_name(fmt_raw: str) -> Optional[str]:
     """First ``[card:ListName`` token in the Format (e.g. ``[card:cardnames]``, ``[card:cardnames copies:]``).
 
-    Deck u16 values use **[[List]] keys** (e.g. 4007), not 0-based row indices — so the list name must be found
+    Deck u16 values use **[[List]] keys** (e.g. 4007), not 0-based row indices - so the list name must be found
     even when more fields follow ``card:…`` before the closing ``]``.
 
     When the password NamedAnchor uses a **different** ``]count`` list (e.g. ``]cardstatsnames``), row *i* takes the
@@ -5007,7 +5043,7 @@ def _struct_format_ydk_card_list_name(fmt_raw: str) -> Optional[str]:
 
 
 def _password_anchor_index_list_name(fmt_raw: str) -> Optional[str]:
-    """``]ListName`` struct row-count suffix on the password table (e.g. ``[password::|h]cardstatsnames`` → ``cardstatsnames``)."""
+    """``]ListName`` struct row-count suffix on the password table (e.g. ``[password::|h]cardstatsnames`` -> ``cardstatsnames``)."""
     c = _parse_struct_count(str(fmt_raw or "").strip())
     if not isinstance(c, str):
         return None
@@ -5019,7 +5055,7 @@ def _password_anchor_index_list_name(fmt_raw: str) -> Optional[str]:
 
 
 def _list_reverse_label_to_smallest_key(enum_map: Dict[int, str]) -> Dict[str, int]:
-    """Map trimmed label → smallest ``[[List]]`` key with that label (card id when names repeat)."""
+    """Map trimmed label -> smallest ``[[List]]`` key with that label (card id when names repeat)."""
     out: Dict[str, int] = {}
     for k in sorted(int(x) for x in enum_map.keys()):
         lab = str(enum_map[int(k)]).strip()
@@ -5111,7 +5147,7 @@ def _strip_ydk_marker_from_offset_prefix(prefix: str) -> str:
 
 
 def _password_rom_u32_match_key(value: int) -> str:
-    """Lowercase hex (no ``0x``) for a ROM u32; leading zero digits stripped — matches YDK line semantics."""
+    """Lowercase hex (no ``0x``) for a ROM u32; leading zero digits stripped - matches YDK line semantics."""
     return format(int(value) & 0xFFFFFFFF, "x").lstrip("0") or "0"
 
 
@@ -5119,7 +5155,7 @@ def _password_ydk_token_match_key(token: str) -> Optional[str]:
     """Normalize a YDK password token: strip ``0x``, keep hex digits only, lowercase, strip leading zeros.
 
     Returns ``None`` if there are no hex digits (invalid line). No decimal↔hex conversion: ``9596126`` in the
-    file is compared to ``format(rom_u32,'x')`` stripped the same way (e.g. ROM ``0x09596126`` → ``9596126``).
+    file is compared to ``format(rom_u32,'x')`` stripped the same way (e.g. ROM ``0x09596126`` -> ``9596126``).
     """
     t = str(token).strip().lower()
     if t.startswith("0x"):
@@ -5133,7 +5169,7 @@ def _password_ydk_token_match_key(token: str) -> Optional[str]:
 def _parse_ydk_deck_text(text: str) -> Tuple[List[str], List[str], bool]:
     """Parse a YDK file: ``#main`` / ``#extra`` password lines; ``!side`` / ``#side`` ignored.
 
-    Returns ``(main_tokens, extra_tokens, saw_extra_header)`` — first field per line as raw string (for
+    Returns ``(main_tokens, extra_tokens, saw_extra_header)`` - first field per line as raw string (for
     password matching). If no ``#extra`` header appears, ``saw_extra_header`` is False.
     """
     main_toks: List[str] = []
@@ -5508,7 +5544,7 @@ def _validate_base_ptr_chain_fields(fields: List[Dict[str, Any]]) -> bool:
 
 
 def _prefix_tokens_to_at_offset_payload_fields(prefix: str) -> Optional[Tuple[str, int]]:
-    """Expand ``padding:::: main:`` → ``padding@offset+0:::: main@offset+8:``; return (expanded, byte offset before card run)."""
+    """Expand ``padding:::: main:`` -> ``padding@offset+0:::: main@offset+8:``; return (expanded, byte offset before card run)."""
     if not prefix.strip():
         return "", 0
     tokens = _tokenize_struct_body(prefix.strip())
@@ -5597,10 +5633,10 @@ def _parse_struct_fields(
 def _finalize_nested_array_pointer_semantics(fields: List[Dict[str, Any]]) -> None:
     """Count-based ``name<[inner]/count>`` stores a 4-byte GBA pointer **at** ``name``; inner rows live at ``*ptr``.
 
-    Exception: **implicit row pointer** — ``[options<…/count> count::]`` (nested field first, count last) — keeps the
+    Exception: **implicit row pointer** - ``[options<…/count> count::]`` (nested field first, count last) - keeps the
     legacy layout: pointer at **row** offset 0, count after; no separate field name for the pointer.
 
-    Another exception: ``…*base_ptr`` — pointer is in the named ``ptr``/``pcs_ptr`` field, not at ``name``.
+    Another exception: ``…*base_ptr`` - pointer is in the named ``ptr``/``pcs_ptr`` field, not at ``name``.
 
     For ``!HEX>`` **without** the ``inline`` suffix: ``name`` is a **4-byte GBA pointer**; the terminator-delimited
     blob lives at ``*name`` (same idea as count-based ``name<[inner]/count>`` on ROM that store a pointer column).
@@ -5653,20 +5689,20 @@ def _assign_struct_field_offsets(fields: List[Dict[str, Any]]) -> None:
 
 def _validate_nested_array_fields(fields: List[Dict[str, Any]]) -> bool:
     """Each ``nested_array`` either names a ``/countField`` uint elsewhere in the same struct, or uses
-    ``!HEX>`` terminator bytes (even-length hex → raw bytes) and must be the **last** field.
+    ``!HEX>`` terminator bytes (even-length hex -> raw bytes) and must be the **last** field.
 
     Valid layouts:
     - **Count first:** ``count`` appears before ``name<[inner]/count>``, and the nested field must be **last**
-      (e.g. ``[cost:: … pack<[inner]/cardamount>]``) — ``pack`` holds a 4-byte pointer; inner rows at ``*pack``.
+      (e.g. ``[cost:: … pack<[inner]/cardamount>]``) - ``pack`` holds a 4-byte pointer; inner rows at ``*pack``.
     - **Count last:** ``name<[inner]/count>`` appears before ``count``, and the **count** field must be **last**
-      (e.g. ``[options<…/count> count::]``) — **implicit** pointer at row offset 0 unless ``*base_ptr`` is used.
+      (e.g. ``[options<…/count> count::]``) - **implicit** pointer at row offset 0 unless ``*base_ptr`` is used.
     """
     names = [str(f.get("name", "")) for f in fields]
     for i, fd in enumerate(fields):
         if fd.get("type") != "nested_array":
             continue
         if fd.get("terminator"):
-            # Delimited by a byte pattern; no count uint — must be the last field in the struct.
+            # Delimited by a byte pattern; no count uint - must be the last field in the struct.
             if i != len(fields) - 1:
                 return False
             continue
@@ -5676,7 +5712,7 @@ def _validate_nested_array_fields(fields: List[Dict[str, Any]]) -> bool:
         ci = names.index(cf_name)
         ni = names.index(str(fd["name"]))
         if ci < ni:
-            # ``[main: maindeck<…/main> …]`` — count immediately before its nested field.
+            # ``[main: maindeck<…/main> …]`` - count immediately before its nested field.
             if ni != ci + 1:
                 return False
             if ni < len(fields) - 1:
@@ -5774,7 +5810,7 @@ def _terminator_nested_row_end_exclusive_pointer_blob(
     yielding a ~2-byte span and breaking grow/repoint/YDK import loops.
 
     Here we take the **last** stride-aligned terminator in the blob whose suffix up to the next long ``0xFF``
-    padding run (or ROM end) is only ``0xFF`` — i.e. the real end-of-deck marker before free space.
+    padding run (or ROM end) is only ``0xFF`` - i.e. the real end-of-deck marker before free space.
 
     For **packed** multi-row terminator tables (rows laid back-to-back without a padding gap), use
     :func:`_terminator_nested_row_end_exclusive` instead.
@@ -5807,7 +5843,7 @@ def _terminator_nested_row_end_exclusive_pointer_blob(
 
 
 def _struct_is_packed_terminator_only(fields: List[Dict[str, Any]]) -> bool:
-    """True when the struct is only an **inline** ``!HEX>inline`` nested array — rows packed back-to-back in ROM."""
+    """True when the struct is only an **inline** ``!HEX>inline`` nested array - rows packed back-to-back in ROM."""
     non_h = [f for f in fields if f.get("type") != "helper"]
     return (
         len(non_h) == 1
@@ -5983,7 +6019,7 @@ def _nested_array_max_span_bytes(fd: Dict[str, Any], fields: List[Dict[str, Any]
 
 
 def _nested_array_implicit_row_pointer(fields: List[Dict[str, Any]], na_fd: Dict[str, Any]) -> bool:
-    """True for ``[options<…/count> count::]`` — row is implicit 4-byte GBA ptr @0 + ``count``; data at ``*ptr``."""
+    """True for ``[options<…/count> count::]`` - row is implicit 4-byte GBA ptr @0 + ``count``; data at ``*ptr``."""
     if na_fd.get("base_ptr_field") or na_fd.get("type") != "nested_array":
         return False
     names = [str(f.get("name", "")) for f in fields]
@@ -6148,7 +6184,7 @@ def _struct_supports_terminator_table_slots(info: Dict[str, Any]) -> bool:
 
 
 def _fill_bytes_from_spec(spec: str, total_len: int) -> Tuple[Optional[bytes], str]:
-    """Tile a hex byte pattern to at least ``total_len`` bytes (default unit ``00`` → ``0x00``).
+    """Tile a hex byte pattern to at least ``total_len`` bytes (default unit ``00`` -> ``0x00``).
 
     If the pattern has more bytes than ``total_len`` (e.g. ``FFFF`` with one stride byte), the result is
     lengthened to hold at least one full pattern cycle so multi-byte fills are not truncated."""
@@ -6227,7 +6263,7 @@ def _try_parse_nested_array_token(token: str) -> Optional[Dict[str, Any]]:
         head, tail = raw.rsplit("*", 1)
         h, t = head.strip(), tail.strip()
         m_tail = re.match(r"^(\w+)((?:\+\d+|\+\w+)+)?$", t)
-        # ``…!0000>inline`` ends with ``inline``, not ``>`` — same rule as below.
+        # ``…!0000>inline`` ends with ``inline``, not ``>`` - same rule as below.
         if m_tail and (h.endswith(">") or re.search(r">\s*inline\s*$", h)):
             raw = h
             base_ptr_field = m_tail.group(1)
@@ -6259,7 +6295,7 @@ def _try_parse_nested_array_token(token: str) -> Optional[Dict[str, Any]]:
     if close_bracket < 0:
         return None
     rest = raw[close_bracket + 1 :].strip()
-    # ``/countField>`` — length from a uint field; ``!HEX>`` — run until this byte pattern (even hex = bytes).
+    # ``/countField>`` - length from a uint field; ``!HEX>`` - run until this byte pattern (even hex = bytes).
     m_term = re.match(r"^!([0-9a-fA-F]+)>\s*(inline)?\s*$", rest)
     count_field: Optional[str] = None
     count_is_byte_length = False
@@ -6463,11 +6499,11 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
         nm = re.match(r'^(\w+)', token)
         return {"name": nm.group(1) if nm else token, "size": 4, "type": "ptr", "enum": None, "hex": True}
 
-    # ``card::`` counts as ``::`` → u32 (4 bytes); deck lines almost always mean ``card:`` (u16).
+    # ``card::`` counts as ``::`` -> u32 (4 bytes); deck lines almost always mean ``card:`` (u16).
     if re.match(r"^card::", token, re.I):
         token = re.sub(r"^card::", "card:", token, count=1, flags=re.I)
 
-    # e.g. unknown:cardgraphicsindexes+1 — optional trailing +N / -N after the table name
+    # e.g. unknown:cardgraphicsindexes+1 - optional trailing +N / -N after the table name
     m = re.match(r"^(\w+)([.:]+)([\w.]*)([+-]\d+)?$", token)
     if m:
         name = m.group(1)
@@ -6489,7 +6525,7 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
 
 
 def _parse_struct_count(fmt: str) -> Any:
-    """Extract the row count after ``[fields]`` — ``]count`` suffix, or ``[inner]!HEX`` shorthand.
+    """Extract the row count after ``[fields]`` - ``]count`` suffix, or ``[inner]!HEX`` shorthand.
 
     For packed ``[inner]!HEX`` shorthand, returns ``1`` as a safe default.  The real row count
     should be derived from ROM scanning at the point of use (struct editor navigation)."""
@@ -6498,7 +6534,7 @@ def _parse_struct_count(fmt: str) -> Any:
         s = s[1:]
     if not s.startswith("["):
         return None
-    # ``[rate:]!0000`` or ``[rate:]!0000]3`` — terminator shorthand (default 1 if no ``]digits``).
+    # ``[rate:]!0000`` or ``[rate:]!0000]3`` - terminator shorthand (default 1 if no ``]digits``).
     m_short = re.match(r"^\[([^\[\]]*)\]!([0-9a-fA-F]{2,})(?:\](\d+))?\s*$", s)
     if m_short:
         if m_short.group(3):
@@ -6667,7 +6703,7 @@ class StructEditorFrame(ttk.Frame):
     def _sync_hex_cursor_to_current_struct_entry(self, entry_idx: int) -> None:
         """Move hex view to the **struct row** in ROM (table base + index × row size).
 
-        Pointer payloads (e.g. ``offset<>`` + data at ``*offset``) are **not** auto-followed here — that was
+        Pointer payloads (e.g. ``offset<>`` + data at ``*offset``) are **not** auto-followed here - that was
         stealing focus from NamedAnchor / Goto, which must land on the table ``Address``. Use **Follow pointer**
         on the ``offset`` field to jump to the deck blob.
         """
@@ -6961,7 +6997,7 @@ class StructEditorFrame(ttk.Frame):
         # [[List]] enum: ROM dropdown + TOML label. PCS NamedAnchor table enum: ROM dropdown + PCS string in ROM.
         self._list_enum_frame = ttk.Frame(self)
         self._list_enum_frame.columnconfigure(0, weight=1)
-        ttk.Label(self._list_enum_frame, text="[ROM ▾]", font=("Consolas", 8, "bold")).grid(
+        ttk.Label(self._list_enum_frame, text="[ROM]", font=("Consolas", 8, "bold")).grid(
             row=0, column=0, sticky="nw", padx=(0, 4), pady=(0, 2)
         )
         ttk.Label(self._list_enum_frame, text="Pick index (writes ROM only):", font=("Consolas", 8)).grid(
@@ -6990,7 +7026,7 @@ class StructEditorFrame(ttk.Frame):
         )
         self._list_enum_toml_block = ttk.Frame(self._list_enum_frame)
         self._list_enum_toml_block.columnconfigure(0, weight=1)
-        ttk.Label(self._list_enum_toml_block, text="[TOML \u270e]", font=("Consolas", 8, "bold")).grid(
+        ttk.Label(self._list_enum_toml_block, text="[TOML]", font=("Consolas", 8, "bold")).grid(
             row=0, column=0, sticky="nw", padx=(0, 4), pady=(0, 2)
         )
         ttk.Label(
@@ -7013,7 +7049,7 @@ class StructEditorFrame(ttk.Frame):
 
         self._list_enum_pcs_block = ttk.Frame(self._list_enum_frame)
         self._list_enum_pcs_block.columnconfigure(0, weight=1)
-        ttk.Label(self._list_enum_pcs_block, text="[ROM PCS \u270e]", font=("Consolas", 8, "bold")).grid(
+        ttk.Label(self._list_enum_pcs_block, text="[ROM PCS]", font=("Consolas", 8, "bold")).grid(
             row=0, column=0, sticky="nw", padx=(0, 4), pady=(0, 2)
         )
         ttk.Label(
@@ -7344,7 +7380,7 @@ class StructEditorFrame(ttk.Frame):
                     log_extra += f"\nPreview palette override: {oerr}\n"
                 else:
                     override_pal_bytes = raw_ov
-                    src = "LZ77→" if ov_lz else "raw "
+                    src = "LZ77->" if ov_lz else "raw "
                     log_extra += (
                         f"\nPreview palette: {src}file offset 0x{ov_off:X} ({ov_bpp}bpp, {len(raw_ov)} bytes); "
                         f"linked palette ignored for preview.\n"
@@ -7445,7 +7481,7 @@ class StructEditorFrame(ttk.Frame):
             messagebox.showerror(
                 "Preview palette",
                 f"This sprite field is {spec.bpp}bpp; set the palette mode to {spec.bpp}bpp "
-                f"(4→16 colors, 6→64, 8→256).",
+                f"(4->16 colors, 6->64, 8->256).",
             )
             return
         use_lz = str(self._gfx_struct_sprite_pal_storage_var.get()).strip().lower() == "lz77"
@@ -7462,7 +7498,7 @@ class StructEditorFrame(ttk.Frame):
         )
         self._gfx_struct_sprite_pal_status.configure(
             text=(
-                f"{loc} — {pb}bpp ({len(raw)} bytes decoded). "
+                f"{loc} - {pb}bpp ({len(raw)} bytes decoded). "
                 "Decode uses this instead of the linked palette."
             ),
             foreground="#060",
@@ -7582,7 +7618,7 @@ class StructEditorFrame(ttk.Frame):
             return None, None, f"Offsets must lie within the ROM file (0 … 0x{n - 1:X})."
         if hi < lo:
             return None, None, "End offset must be ≥ start offset."
-        # Inclusive end → half-open [lo, hi + 1)
+        # Inclusive end -> half-open [lo, hi + 1)
         return lo, hi + 1, None
 
     def _apply_pcs_ptr_string_write(
@@ -7797,7 +7833,7 @@ class StructEditorFrame(ttk.Frame):
                 self._list_enum_all_indices.append(idx)
                 short = lab.replace("\n", " ")
                 if len(short) > 52:
-                    short = short[:49] + "\u2026"
+                    short = short[:49] + "..."
                 self._list_enum_all_display.append(f"{idx}: {short}")
             self._list_enum_idx_by_combo = list(self._list_enum_all_indices)
             display_vals = list(self._list_enum_all_display)
@@ -7808,11 +7844,11 @@ class StructEditorFrame(ttk.Frame):
                 if mx_bf is not None and list_row in lm:
                     self._list_enum_rom_combo.set(
                         f"(list row {list_row} needs ROM {list_row - delta}; "
-                        f"subfield allows 0\u2013{mx_bf} \u2014 widen Format or trim [[List]])"
+                        f"subfield allows 0-{mx_bf} - widen Format or trim [[List]])"
                     )
                 else:
                     self._list_enum_rom_combo.set(
-                        f"(ROM {cur} \u2192 list row {list_row} \u2014 not in [[List]] {list_base!r})"
+                        f"(ROM {cur} -> list row {list_row} - not in [[List]] {list_base!r})"
                     )
             else:
                 self._list_enum_rom_combo.current(pos)
@@ -7836,7 +7872,7 @@ class StructEditorFrame(ttk.Frame):
             self._list_enum_all_indices.append(idx)
             short = lab.replace("\n", " ")
             if len(short) > 52:
-                short = short[:49] + "\u2026"
+                short = short[:49] + "..."
             self._list_enum_all_display.append(f"{idx}: {short}")
         self._list_enum_idx_by_combo = list(self._list_enum_all_indices)
         display_vals = list(self._list_enum_all_display)
@@ -7847,11 +7883,11 @@ class StructEditorFrame(ttk.Frame):
             if mx_bf_pcs is not None and 0 <= list_row < count:
                 self._list_enum_rom_combo.set(
                     f"(PCS row {list_row} needs ROM {list_row - delta}; "
-                    f"subfield allows 0\u2013{mx_bf_pcs} \u2014 widen Format or trim PCS table)"
+                    f"subfield allows 0-{mx_bf_pcs} - widen Format or trim PCS table)"
                 )
             else:
                 self._list_enum_rom_combo.set(
-                    f"(ROM {cur} \u2192 PCS row {list_row} \u2014 past table or negative)"
+                    f"(ROM {cur} -> PCS row {list_row} - past table or negative)"
                 )
         else:
             self._list_enum_rom_combo.current(pos)
@@ -8158,7 +8194,7 @@ class StructEditorFrame(ttk.Frame):
         label_anchor_names_hit: Set[str] = set()
         fallback_anchor_names_hit: Set[str] = set()
         # Process the selected struct first so duplicate list labels (same string in deckinfo vs cardnames2,
-        # etc.) dedupe toward the struct the user is editing — not an alphabetically earlier anchor.
+        # etc.) dedupe toward the struct the user is editing - not an alphabetically earlier anchor.
         cur_key = normalize_named_anchor_lookup_key(cur) if cur else ""
         anchors_ordered = list(self._anchors)
         if cur_key:
@@ -8189,7 +8225,7 @@ class StructEditorFrame(ttk.Frame):
                 list_keys.append(cr_list_key)
 
             # When a struct is selected, only scan row-label lists for that struct (e.g. ]deckinfo),
-            # not every anchor's ]count / entry_label_list — otherwise Find matches the same string in
+            # not every anchor's ]count / entry_label_list - otherwise Find matches the same string in
             # cardnames2, deckinfo, PCS tables, etc. at once.
             allow_label_scan = (not cur_key) or (normalize_named_anchor_lookup_key(nm) == cur_key)
 
@@ -8520,15 +8556,15 @@ class StructEditorFrame(ttk.Frame):
             row = self._entry_list_row_for_struct_index(idx, ln)
             lm = self._hex.get_lists().get(ln) or {}
             if row is None:
-                self._entry_index_name_label.config(text="→ (outside [[List]] range)")
+                self._entry_index_name_label.config(text="-> (outside [[List]] range)")
                 self._entry_index_name_label.grid()
                 self._entry_label_pcs_frame.grid_remove()
                 return
             txt = lm.get(row, "")
             if txt:
-                self._entry_index_name_label.config(text=f"→ {txt}")
+                self._entry_index_name_label.config(text=f"-> {txt}")
             else:
-                self._entry_index_name_label.config(text="→ (empty)")
+                self._entry_index_name_label.config(text="-> (empty)")
             self._entry_index_name_label.grid()
             self._entry_label_pcs_frame.grid_remove()
             return
@@ -8540,17 +8576,17 @@ class StructEditorFrame(ttk.Frame):
                 delta = int(self._entry_count) - pcs_count
                 raw = idx - delta
                 if raw < 0:
-                    self._entry_index_name_label.config(text="→ (before PCS table)")
+                    self._entry_index_name_label.config(text="-> (before PCS table)")
                 else:
-                    self._entry_index_name_label.config(text="→ (past PCS table)")
+                    self._entry_index_name_label.config(text="-> (past PCS table)")
                 self._entry_index_name_label.grid()
                 self._entry_label_pcs_frame.grid_remove()
                 return
             txt = self._pcs_decode_table_row(self._entry_index_context_pcs, pcs_row)
             if txt:
-                self._entry_index_name_label.config(text=f"→ {txt}")
+                self._entry_index_name_label.config(text=f"-> {txt}")
             else:
-                self._entry_index_name_label.config(text="→ (empty)")
+                self._entry_index_name_label.config(text="-> (empty)")
             self._entry_index_name_label.grid()
             self._entry_label_pcs_var.set(txt)
             self._entry_label_pcs_frame.grid()
@@ -8632,7 +8668,7 @@ class StructEditorFrame(ttk.Frame):
             raw = bytes(data)
             st = int(na_fd["inner_stride"])
             tb = bytes(term)
-            # Pointer-backed ``!`` blob: u16 index 0 is indistinguishable from ``0000`` terminator — use
+            # Pointer-backed ``!`` blob: u16 index 0 is indistinguishable from ``0000`` terminator - use
             # padding-aware end, then derive element count from span (not first-match terminator steps).
             if na_fd.get("base_ptr_field") or na_fd.get("nested_ptr_is_self_field"):
                 end_exc = _terminator_nested_row_end_exclusive_pointer_blob(raw, na_base, st, tb)
@@ -9065,10 +9101,10 @@ class StructEditorFrame(ttk.Frame):
                     ei = int(self._idx_var.get())
                     entry_base = self._entry_file_offset(ei)
                 except (ValueError, TypeError):
-                    return "(—)"
+                    return "(-)"
             data = self._hex.get_data()
             if not data:
-                return "(—)"
+                return "(-)"
             return self._format_helper_value(fd, data, entry_base)
         if ftype == "pcs":
             chars = []
@@ -9085,8 +9121,8 @@ class StructEditorFrame(ttk.Frame):
                 if (ptr >> 24) in (0x08, 0x09):
                     preview = self._read_pcs_at_pointer(ptr - GBA_ROM_BASE)
                     if len(preview) > 48:
-                        preview = preview[:45] + "…"
-                    return f"0x{ptr:08X} → {preview}"
+                        preview = preview[:45] + "..."
+                    return f"0x{ptr:08X} -> {preview}"
                 return f"0x{ptr:08X}"
             return ""
         if ftype == "ptr":
@@ -9112,7 +9148,7 @@ class StructEditorFrame(ttk.Frame):
             label = self._resolve_enum(val_u, enum_ref)
             if label is not None:
                 if self._is_enum_panel_field(fd):
-                    return f"{label}  ▾"
+                    return f"{label}  [v]"
                 return label
         if fd.get("signed"):
             val_s = int.from_bytes(raw, "little", signed=True)
@@ -9277,11 +9313,18 @@ class StructEditorFrame(ttk.Frame):
                 if (ptr >> 24) in (0x08, 0x09):
                     raw_val = self._read_pcs_at_pointer(ptr - GBA_ROM_BASE)
                 else:
-                    raw_val = vals[1].split(" → ", 1)[0].strip() if " → " in vals[1] else vals[1]
+                    if " -> " in vals[1]:
+                        raw_val = vals[1].split(" -> ", 1)[0].strip()
+                    elif " -> " in vals[1]:
+                        raw_val = vals[1].split(" -> ", 1)[0].strip()
+                    else:
+                        raw_val = vals[1]
         elif fd["type"] == "gfx_sprite":
             raw_val = vals[1].split()[0].strip() if vals[1] else vals[1]
-        elif " → " in raw_val:
-            raw_val = raw_val.split(" → ", 1)[0].strip()
+        elif " -> " in raw_val:
+            raw_val = raw_val.split(" -> ", 1)[0].strip()
+        elif " -> " in raw_val:
+            raw_val = raw_val.split(" -> ", 1)[0].strip()
         self._edit_entry.insert(0, raw_val)
         self._edit_entry.select_range(0, tk.END)
         self._edit_entry.focus_set()
@@ -9601,7 +9644,7 @@ class HexEditorFrame(ttk.Frame):
         self._toml_data: Dict[str, Any] = {}
         # When set, this file is loaded instead of auto-resolving {ROM}.toml (until cleared).
         self._toml_manual_override: Optional[str] = None
-        # Row index for ``[format]count`` graphics / palette tables (spinbox in Tools → Graphics).
+        # Row index for ``[format]count`` graphics / palette tables (spinbox in Tools -> Graphics).
         self.graphics_table_row_var = tk.IntVar(value=0)
         self._script_pane_visible = False
         self._script_ui_saved: Optional[Dict[str, Any]] = None
@@ -9746,7 +9789,7 @@ class HexEditorFrame(ttk.Frame):
         self._pseudo_c_frame.columnconfigure(1, weight=5)
         self._pseudo_c_frame.rowconfigure(2, weight=1)
         self._c_inject_offset_var = tk.StringVar(value="")
-        self._c_inject_size_var = tk.StringVar(value="—")
+        self._c_inject_size_var = tk.StringVar(value="-")
         self._c_inject_rom_window_from_var = tk.StringVar(value="")
         self._c_inject_rom_window_to_var = tk.StringVar(value="")
         pc_toolbar = ttk.Frame(self._pseudo_c_frame)
@@ -9768,7 +9811,7 @@ class HexEditorFrame(ttk.Frame):
             c_inj_opts.columnconfigure(col, weight=1)
         ttk.Label(
             c_inj_opts,
-            text="Optional ROM window (file offsets): limits ### repointall; same range for FF gap → Inject @.",
+            text="Optional ROM window (file offsets): limits ### repointall; same range for FF gap -> Inject @.",
             font=("Consolas", 8),
             foreground="#555",
             wraplength=520,
@@ -9786,7 +9829,7 @@ class HexEditorFrame(ttk.Frame):
         self._c_inject_rom_window_to.grid(row=2, column=1, sticky="ew", padx=(0, 6))
         ttk.Button(
             c_inj_opts,
-            text="FF gap → Inject @",
+            text="FF gap -> Inject @",
             command=self._c_inject_search_ff_gap_to_inject_offset,
         ).grid(row=2, column=2, sticky="ew")
 
@@ -9817,7 +9860,7 @@ class HexEditorFrame(ttk.Frame):
 
         self._c_inject_patches_label = ttk.Label(
             self._pseudo_c_right,
-            text=" ROM hooks & repoints — ### hooks / repointall / repoints / routinepointers ",
+            text=" ROM hooks & repoints - ### hooks / repointall / repoints / routinepointers ",
             font=("Consolas", 8),
         )
         self._scroll_c_inject_patches = tk.Scrollbar(self._pseudo_c_right)
@@ -9918,7 +9961,7 @@ class HexEditorFrame(ttk.Frame):
         _stb.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         ttk.Label(
             _stb,
-            text="Ctrl+Shift+Enter — run   |   Ctrl+Shift+7 — close",
+            text="Ctrl+Shift+Enter - run   |   Ctrl+Shift+7 - close",
             font=("Consolas", 8),
             foreground="#555",
         ).pack(side=tk.LEFT)
@@ -10272,7 +10315,7 @@ class HexEditorFrame(ttk.Frame):
                     widget.tag_add(tag, f"1.0+{match.start(1)}c", f"1.0+{match.end(1)}c")
             except (ValueError, TypeError):
                 pass
-        # sub_XXXXXXXX / sub_XXXXXXX — ROM function names (neon green)
+        # sub_XXXXXXXX / sub_XXXXXXX - ROM function names (neon green)
         for match in re.finditer(r"\bsub_([0-9A-Fa-f]{7,8})\b", text):
             try:
                 val = int(match.group(1), 16)
@@ -10280,10 +10323,10 @@ class HexEditorFrame(ttk.Frame):
                     widget.tag_add("addr_rom", f"1.0+{match.start(0)}c", f"1.0+{match.end(0)}c")
             except (ValueError, TypeError):
                 pass
-        # loc_XXXXXXXX — branch labels (red)
+        # loc_XXXXXXXX - branch labels (red)
         for match in re.finditer(r"\bloc_[0-9A-Fa-f]{7,8}\b", text):
             widget.tag_add("loc_label", f"1.0+{match.start(0)}c", f"1.0+{match.end(0)}c")
-        # g_XXXXXXX — EWRAM / IWRAM global variable names
+        # g_XXXXXXX - EWRAM / IWRAM global variable names
         for match in re.finditer(r"\bg_([0-9A-Fa-f]{7,8})\b", text):
             try:
                 val = int(match.group(1), 16)
@@ -10814,7 +10857,7 @@ class HexEditorFrame(ttk.Frame):
             except ValueError:
                 return False, f"hooks: bad register {reg_tok!r}"
             if not (0 <= reg <= 7):
-                return False, f"hooks: register must be 0–7, got {reg}"
+                return False, f"hooks: register must be 0-7, got {reg}"
             hook_at = hfo
             if hook_at & 1:
                 hook_at -= 1
@@ -10823,7 +10866,7 @@ class HexEditorFrame(ttk.Frame):
                 return False, f"hooks: hook at 0x{hook_at:X} needs {ins_len} bytes past ROM end."
             _gba_thumb_hook_write(self._data, hfo, dest_fo, reg)
             log.append(
-                f"hooks: 0x{GBA_ROM_BASE + hfo:08X} → {sym_tok} (r{reg}), {ins_len} bytes"
+                f"hooks: 0x{GBA_ROM_BASE + hfo:08X} -> {sym_tok} (r{reg}), {ins_len} bytes"
             )
 
         for raw in sections["repoints"]:
@@ -10885,7 +10928,7 @@ class HexEditorFrame(ttk.Frame):
             if scan_limit:
                 win_note = f", scan 0x{scan_limit[0]:X}..0x{scan_limit[1]:X}"
             log.append(
-                f"repointall: {n} word(s) → ptr to {sym} (no +1), sample 0x{GBA_ROM_BASE + sfo:08X}{win_note}"
+                f"repointall: {n} word(s) -> ptr to {sym} (no +1), sample 0x{GBA_ROM_BASE + sfo:08X}{win_note}"
             )
 
         self._modified = True
@@ -11182,7 +11225,7 @@ class HexEditorFrame(ttk.Frame):
     def _get_pokefirered_sym_browser_items(self) -> List[Tuple[str, Optional[int]]]:
         """List ROM symbols from ``pokefirered.sym`` with optional substring filter."""
         if not getattr(self, "_rom_use_pokefirered_sym", False):
-            return [("(pokefirered.sym only when ROM game code is BPRE — FireRed US)", -2)]
+            return [("(pokefirered.sym only when ROM game code is BPRE - FireRed US)", -2)]
         self._ensure_sym_browser_rom_list()
         filt = (self._anchor_sym_filter_var.get() or "").strip().lower()
         if not os.path.isfile(_pokefirered_sym_default_path()):
@@ -11271,7 +11314,7 @@ class HexEditorFrame(ttk.Frame):
         self._listbox_anchor.delete(0, tk.END)
         items: List[Tuple[str, Optional[int]]] = []
         if self._anchor_browser_path:
-            items.append(("\u2190 Back", -1))
+            items.append(("<- Back", -1))
         for display, addr in self._get_anchor_browser_items():
             items.append((display, addr))
         for display, _ in items:
@@ -11922,7 +11965,7 @@ class HexEditorFrame(ttk.Frame):
 
         **Multi-token:** each token is ``xx``/``XX`` or an even-length hex run (e.g. ``00 11`` or ``00 DEAD``).
 
-        **Single token, no wildcard:** legacy parse — all hex digits are paired (``DEADBEEF``), spaces ignored.
+        **Single token, no wildcard:** legacy parse - all hex digits are paired (``DEADBEEF``), spaces ignored.
 
         Result is ``List[Optional[int]]`` where ``None`` = wildcard byte.
         """
@@ -12425,7 +12468,7 @@ class HexEditorFrame(ttk.Frame):
 
         If those are missing, try well-known project files (``wct06_test.toml`` before ``wct06.toml`` so the
         edited test TOML wins when both exist). ``EDS.toml`` is included for EDS projects whose ROM name does
-        not match ``EDS.toml`` — use **File → Load structure TOML** to force that file if another fallback
+        not match ``EDS.toml`` - use **File -> Load structure TOML** to force that file if another fallback
         matches first.
 
         If the folder has exactly one ``*.toml``, use it. Otherwise return ``{stem}.toml`` (may not exist) so
@@ -12790,7 +12833,7 @@ Format = "`f|u8`[u8 arg0]"
         """Anchor used to shape angr pseudo-C: ``[[FunctionAnchors]]`` only, plus ``[[NamedAnchors]]`` that have a real ``Format`` function spec.
 
         Generic NamedAnchors (e.g. free-space labels like ``gFreeSpace1`` with non-function Format) must not
-        override signatures or rewrite parameters — that produced wrong names (e.g. ``gFreeSpace1``) for injected code.
+        override signatures or rewrite parameters - that produced wrong names (e.g. ``gFreeSpace1``) for injected code.
         """
         if not self._toml_data:
             return None
@@ -12852,7 +12895,7 @@ Format = "`f|u8`[u8 arg0]"
         return re.sub(r"\bsub_([0-9a-fA-F]+)\b", repl, text)
 
     def get_pokefirered_sym_name_to_addr(self) -> Dict[str, int]:
-        """``pokefirered.sym`` name → address when the loaded ROM is FireRed (``BPRE``); else empty."""
+        """``pokefirered.sym`` name -> address when the loaded ROM is FireRed (``BPRE``); else empty."""
         if not getattr(self, "_rom_use_pokefirered_sym", False):
             return {}
         return load_pokefirered_sym_name_to_addr()
@@ -13365,9 +13408,9 @@ Format = "`f|u8`[u8 arg0]"
         Resolve palette spec + ROM offset for graphics ``|paletteRef`` when the main anchor is a graphics **table**
         (same row index for sprite and palette).
 
-        If ``paletteRef`` is a palette NamedAnchor → use it (or its table row).
+        If ``paletteRef`` is a palette NamedAnchor -> use it (or its table row).
 
-        If it is a **lookup** struct (e.g. ``[index.foo.palettes]count``) → read row ``table_row_idx``, then either
+        If it is a **lookup** struct (e.g. ``[index.foo.palettes]count``) -> read row ``table_row_idx``, then either
         follow a ``gfx_palette`` pointer or a uint ``index`` into another NamedAnchor's palette table.
         """
         notes = ""
@@ -13434,7 +13477,7 @@ Format = "`f|u8`[u8 arg0]"
                 continue
             pal_idx = int.from_bytes(row[fo : fo + fsz], "little")
             ps, pb, n2 = self.resolve_palette_table_row(target_tbl, pal_idx)
-            return ps, pb, notes + n2 + f"Index {pal_idx} ({ref!r}.{f.get('name')}) → {target_tbl!r}.\n"
+            return ps, pb, notes + n2 + f"Index {pal_idx} ({ref!r}.{f.get('name')}) -> {target_tbl!r}.\n"
 
         return None, None, notes + f"Lookup struct {ref!r} has no uint index or gfx_palette field.\n"
 
@@ -13509,7 +13552,7 @@ Format = "`f|u8`[u8 arg0]"
                 struct_size = _struct_row_byte_size(fields)
                 if struct_size <= 0:
                     continue
-            # Use normalized Format for ]count — bare `` `ydk`…[card:…]N`` TOML has no leading ``[``, so
+            # Use normalized Format for ]count - bare `` `ydk`…[card:…]N`` TOML has no leading ``[``, so
             # :func:`_parse_struct_count` would return None on *fmt_raw* even when *fields* parsed from *fmt*.
             count_raw = _parse_struct_count(fmt)
             if count_raw is None:
@@ -13521,7 +13564,7 @@ Format = "`f|u8`[u8 arg0]"
             entry_label_list: Optional[str] = None
             if isinstance(count_raw, str):
                 # Prefer [[List]] row labels when the ]count suffix names a List (e.g. deckinfo). Only use a
-                # PCS table for entry labels when no List matches — otherwise PCS was winning in Find / row
+                # PCS table for entry labels when no List matches - otherwise PCS was winning in Find / row
                 # hints and could show the wrong table (e.g. another anchor's PCS) when both existed.
                 cref = _struct_count_ref_base_name(str(count_raw))
                 lk = normalize_named_anchor_lookup_key(cref)
@@ -13802,7 +13845,7 @@ Format = "`f|u8`[u8 arg0]"
             anchor["Format"] = ("^" if has_caret else "") + f"[{inner}]!{hx}"
             anchor.pop("Count", None)
             return True
-        # Bare YDK deck line: `` `ydk`Anchor[card:List]N`` (no outer ``[``) — common in TOML before normalization.
+        # Bare YDK deck line: `` `ydk`Anchor[card:List]N`` (no outer ``[``) - common in TOML before normalization.
         m_bare_ydk = re.match(
             r"^(\s*`ydk`\s*[\w.]+\s*\[\s*card\s*:\s*[\w.]+\s*\])(\d+)\s*$",
             body,
@@ -13843,7 +13886,7 @@ Format = "`f|u8`[u8 arg0]"
         ok, err = self.persist_toml_data()
         if not ok:
             return f"Could not save TOML ({err})."
-        return f"Structure Format ]count: {cur} → {min_table_rows}."
+        return f"Structure Format ]count: {cur} -> {min_table_rows}."
 
     def _ban_maybe_bump_anchor_literal_after_import(
         self, anchor: Dict[str, Any], fmt_raw: str, min_table_rows: int
@@ -13859,7 +13902,7 @@ Format = "`f|u8`[u8 arg0]"
         ok, err = self.persist_toml_data()
         if not ok:
             return f"Could not save TOML ({err})."
-        return f"Structure Format ]count: {cur} → {min_table_rows}."
+        return f"Structure Format ]count: {cur} -> {min_table_rows}."
 
     def _write_matched_word_numeric_value(self, mw_name: str, value: int) -> bool:
         """Write little-endian integer to the MatchedWord row named ``mw_name`` in ROM."""
@@ -14649,7 +14692,7 @@ Format = "`f|u8`[u8 arg0]"
         if not self._toml_path or not os.path.isfile(self._toml_path):
             messagebox.showwarning(
                 "Matched words",
-                "No structure TOML file on disk — use Load structure TOML or open a ROM with a paired .toml first.",
+                "No structure TOML file on disk - use Load structure TOML or open a ROM with a paired .toml first.",
             )
             return
         parent = self.winfo_toplevel()
@@ -14890,11 +14933,11 @@ Format = "`f|u8`[u8 arg0]"
         self._refresh_visible()
 
     def set_struct_editor_ref(self, ref: Any) -> None:
-        """Host editor wires the Struct tools pane so File → Import YDK can use the selected struct."""
+        """Host editor wires the Struct tools pane so File -> Import YDK can use the selected struct."""
         self._struct_editor_ref = ref
 
     def set_file_menu_refresh_callback(self, cb: Optional[Callable[[], None]]) -> None:
-        """Called when the Struct combobox selection changes (host updates File → Import banlist, etc.)."""
+        """Called when the Struct combobox selection changes (host updates File -> Import banlist, etc.)."""
         self._file_menu_refresh_cb = cb
 
     def selected_struct_supports_ban_import(self) -> bool:
@@ -14907,7 +14950,7 @@ Format = "`f|u8`[u8 arg0]"
     def _build_card_password_index_map(
         self, password_anchor_name: str, *, card_list_name: Optional[str] = None
     ) -> Tuple[Optional[Dict[str, int]], str]:
-        """Map normalized password key (:func:`_password_rom_u32_match_key`) → **u16 card id** for the deck blob.
+        """Map normalized password key (:func:`_password_rom_u32_match_key`) -> **u16 card id** for the deck blob.
 
         * *card_list_name* (deck ``[card:ListName]``): target ``[[List]]`` whose **keys** are written as u16.
 
@@ -15107,12 +15150,12 @@ Format = "`f|u8`[u8 arg0]"
             _done_ok()
             return
         if not messagebox.askyesno(
-            "Import YDK — not enough free space",
+            "Import YDK - not enough free space",
             f"The deck needs {need_bytes} bytes ({grow} more than the previous {old_span} bytes).\n"
             f"Growing in place would overwrite non-padding data:\n{err_pad}\n\n"
             "Repoint the allocation pointer to a new free area? This opens the repoint dialog.\n\n"
-            "Yes — continue.\n"
-            "No — cancel import.",
+            "Yes - continue.\n"
+            "No - cancel import.",
         ):
             return
         hdr_len = data_lo - int(alloc_lo)
@@ -15284,13 +15327,13 @@ Format = "`f|u8`[u8 arg0]"
 
         if combined_grows:
             if not messagebox.askyesno(
-                "Import YDK — deck grew",
+                "Import YDK - deck grew",
                 f"Main+extra card total increased from {om_old + oe_old} to {nm + ne} "
                 f"(was {om_old}+{oe_old}, now {nm}+{ne}).\n\n"
                 "Repoint the deck pointer to a new free ROM allocation? "
                 "(Recommended when the deck grows.)\n\n"
-                "Yes — open the repoint dialog.\n"
-                "No — cancel this import.",
+                "Yes - open the repoint dialog.\n"
+                "No - cancel this import.",
             ):
                 return
             _repoint_dialog_and_write(after_growth_prompt=True)
@@ -15575,7 +15618,7 @@ Format = "`f|u8`[u8 arg0]"
             if len(uniq_bad) > 12:
                 preview += ", …"
             if not messagebox.askyesno(
-                "Import banlist — unknown passwords",
+                "Import banlist - unknown passwords",
                 f"{len(invalid_pw)} line(s) reference passwords not in this ROM (e.g. {preview}).\n\n"
                 "Skip those cards and import the rest?\n\n"
                 "No = cancel the whole import.",
@@ -15620,7 +15663,7 @@ Format = "`f|u8`[u8 arg0]"
             messagebox.showinfo(
                 "Import YDK",
                 "Select a struct whose Format includes `ydk` (and optional password table Name) before the card field list "
-                "(e.g. offset<… main: `ydk`data.cards.passwords[card:cardnames]!0000> — see Structure TOML).",
+                "(e.g. offset<… main: `ydk`data.cards.passwords[card:cardnames]!0000> - see Structure TOML).",
             )
             return
         if not self._toml_path or not os.path.isfile(self._toml_path):
@@ -15741,7 +15784,7 @@ Format = "`f|u8`[u8 arg0]"
             if len(uniq_bad) > 12:
                 preview += ", …"
             if not messagebox.askyesno(
-                "Import YDK — unknown passwords",
+                "Import YDK - unknown passwords",
                 f"{len(invalid_pw)} line(s) reference passwords not in this ROM (e.g. {preview}).\n\n"
                 "Skip those cards and import the rest?\n\n"
                 "No = cancel the whole import.",
@@ -15768,7 +15811,7 @@ Format = "`f|u8`[u8 arg0]"
                 warn_lines.append(f"Extra deck has {ne} card(s) (maximum 15).")
             if warn_lines:
                 msg = "\n\n".join(warn_lines) + "\n\nContinue import anyway?"
-                if not messagebox.askyesno("Import YDK — deck size", msg):
+                if not messagebox.askyesno("Import YDK - deck size", msg):
                     return
         elif na_fd_pc_list:
             for na_fd_one in na_fd_pc_list:
@@ -15784,7 +15827,7 @@ Format = "`f|u8`[u8 arg0]"
                         warn_lines.append(f"Extra deck has {ne} card(s) (maximum 15).")
             if warn_lines:
                 msg = "\n\n".join(sorted(set(warn_lines))) + "\n\nContinue import anyway?"
-                if not messagebox.askyesno("Import YDK — deck size", msg):
+                if not messagebox.askyesno("Import YDK - deck size", msg):
                     return
 
         try:
@@ -15908,18 +15951,18 @@ Format = "`f|u8`[u8 arg0]"
     # ── File menu: static ROM imports (user-chosen offsets / FF gaps) ─
 
     def file_import_sprite_static(self) -> None:
-        """File → Import Sprite: PNG → tiles and optional palette at file offsets (optional LZ)."""
+        """File -> Import Sprite: PNG -> tiles and optional palette at file offsets (optional LZ)."""
         parent = self.winfo_toplevel()
         if not self._data:
             messagebox.showwarning("Import sprite", "No ROM loaded.")
             return
         path = filedialog.askopenfilename(
-            title="Import sprite — PNG",
+            title="Import sprite - PNG",
             filetypes=[("PNG images", "*.png"), ("All files", "*.*")],
         )
         if not path:
             return
-        opt = _SpriteImportOptionsDialog(parent, path, title="Import sprite — options")
+        opt = _SpriteImportOptionsDialog(parent, path, title="Import sprite - options")
         if opt.result is None:
             return
         bpp, lz, wt, ht, ncolors, tom_name, tom_pal_name, write_pal, upd, rom_clip_8 = opt.result
@@ -15954,7 +15997,7 @@ Format = "`f|u8`[u8 arg0]"
             parent,
             self,
             len(payload),
-            "Import sprite — tile data destination",
+            "Import sprite - tile data destination",
             blurb=f"Sprite sheet {tw}×{th} tiles ({tw * 8}×{th * 8} px).",
         )
         if dest.result is None:
@@ -15967,7 +16010,7 @@ Format = "`f|u8`[u8 arg0]"
                 parent,
                 self,
                 len(pal_payload),
-                "Import sprite — palette destination",
+                "Import sprite - palette destination",
                 blurb=f"Quantized GBA palette: {len(pal_payload)} bytes ({bpp}bpp).",
             )
             if dest_pal.result is None:
@@ -15994,7 +16037,7 @@ Format = "`f|u8`[u8 arg0]"
             )
             if ok_t:
                 tag = "Added new" if how == "created" else "Updated"
-                msg += f"\n\nTOML sprite: {tag} {tom_name!r} — {fmt_sprite}"
+                msg += f"\n\nTOML sprite: {tag} {tom_name!r} - {fmt_sprite}"
                 did_reload = True
             else:
                 msg += f"\n\nTOML sprite failed: {err_t}"
@@ -16005,7 +16048,7 @@ Format = "`f|u8`[u8 arg0]"
             )
             if ok_p:
                 tagp = "Added new" if how_p == "created" else "Updated"
-                msg += f"\nTOML palette: {tagp} {tom_pal_name!r} — {fmt_pal}"
+                msg += f"\nTOML palette: {tagp} {tom_pal_name!r} - {fmt_pal}"
                 did_reload = True
             else:
                 msg += f"\nTOML palette failed: {err_p}"
@@ -16014,7 +16057,7 @@ Format = "`f|u8`[u8 arg0]"
         messagebox.showinfo("Import sprite", msg)
 
     def file_import_palette_static(self) -> None:
-        """File → Import Palette: PNG, standard text .pal/.gpl, or raw GBA .bin (optional LZ)."""
+        """File -> Import Palette: PNG, standard text .pal/.gpl, or raw GBA .bin (optional LZ)."""
         parent = self.winfo_toplevel()
         if not self._data:
             messagebox.showwarning("Import palette", "No ROM loaded.")
@@ -16077,7 +16120,7 @@ Format = "`f|u8`[u8 arg0]"
             parent,
             self,
             len(payload),
-            "Import palette — destination",
+            "Import palette - destination",
         )
         if dest.result is None:
             return
@@ -16090,7 +16133,7 @@ Format = "`f|u8`[u8 arg0]"
         )
 
     def file_import_tilemap_tileset_static(self) -> None:
-        """File → Import Tilemap/Tileset: raw blob, PNG tilemap pipeline, or PNG tileset sheet."""
+        """File -> Import Tilemap/Tileset: raw blob, PNG tilemap pipeline, or PNG tileset sheet."""
         parent = self.winfo_toplevel()
         if not self._data:
             messagebox.showwarning("Import tilemap/tileset", "No ROM loaded.")
@@ -16120,7 +16163,7 @@ Format = "`f|u8`[u8 arg0]"
                 parent,
                 self,
                 len(blob),
-                "Import raw data — destination",
+                "Import raw data - destination",
                 blurb="Writes the file bytes unchanged.",
             )
             if dest.result is None:
@@ -16135,12 +16178,12 @@ Format = "`f|u8`[u8 arg0]"
 
         if mode == "png_ts":
             path = filedialog.askopenfilename(
-                title="Import tileset — PNG",
+                title="Import tileset - PNG",
                 filetypes=[("PNG images", "*.png"), ("All files", "*.*")],
             )
             if not path:
                 return
-            opt = _SpriteImportOptionsDialog(parent, path, title="Import tileset — options")
+            opt = _SpriteImportOptionsDialog(parent, path, title="Import tileset - options")
             if opt.result is None:
                 return
             bpp, lz, wt, ht, ncolors, tom_name, tom_pal_name, write_pal, upd, rom_clip_8 = opt.result
@@ -16174,7 +16217,7 @@ Format = "`f|u8`[u8 arg0]"
                 parent,
                 self,
                 len(payload),
-                "Import tileset — tile data destination",
+                "Import tileset - tile data destination",
                 blurb=f"Tile sheet {tw}×{th} tiles.",
             )
             if dest.result is None:
@@ -16186,7 +16229,7 @@ Format = "`f|u8`[u8 arg0]"
                     parent,
                     self,
                     len(pal_payload),
-                    "Import tileset — palette destination",
+                    "Import tileset - palette destination",
                     blurb=f"Quantized GBA palette: {len(pal_payload)} bytes ({bpp}bpp).",
                 )
                 if dest_pal.result is None:
@@ -16211,7 +16254,7 @@ Format = "`f|u8`[u8 arg0]"
                 )
                 if ok_t:
                     tag = "Added new" if how == "created" else "Updated"
-                    msg += f"\n\nTOML tileset: {tag} {tom_name!r} — {fmt_sprite}"
+                    msg += f"\n\nTOML tileset: {tag} {tom_name!r} - {fmt_sprite}"
                     did_reload = True
                 else:
                     msg += f"\n\nTOML tileset failed: {err_t}"
@@ -16222,7 +16265,7 @@ Format = "`f|u8`[u8 arg0]"
                 )
                 if ok_p:
                     tagp = "Added new" if how_p == "created" else "Updated"
-                    msg += f"\nTOML palette: {tagp} {tom_pal_name!r} — {fmt_pal}"
+                    msg += f"\nTOML palette: {tagp} {tom_pal_name!r} - {fmt_pal}"
                     did_reload = True
                 else:
                     msg += f"\nTOML palette failed: {err_p}"
@@ -16237,7 +16280,7 @@ Format = "`f|u8`[u8 arg0]"
             return
         mw, mh, bpp, pal_n, skip_pal, nm_map, nm_ts, nm_pal, upd, rom_clip_8 = dim.result
         path = filedialog.askopenfilename(
-            title="Import tilemap — PNG",
+            title="Import tilemap - PNG",
             filetypes=[("PNG images", "*.png"), ("All files", "*.*")],
         )
         if not path:
@@ -16269,7 +16312,7 @@ Format = "`f|u8`[u8 arg0]"
             parent,
             self,
             len(raw_map),
-            "Import tilemap — map destination",
+            "Import tilemap - map destination",
             blurb=f"Non-affine map: {mw}×{mh} cells, {len(raw_map)} bytes.",
         )
         if dest_map.result is None:
@@ -16278,7 +16321,7 @@ Format = "`f|u8`[u8 arg0]"
             parent,
             self,
             len(tile_body),
-            "Import tilemap — tileset destination",
+            "Import tilemap - tileset destination",
             blurb=f"Unique tiles: {n_u} ({len(tile_body)} bytes).",
         )
         if dest_ts.result is None:
@@ -16313,7 +16356,7 @@ Format = "`f|u8`[u8 arg0]"
                 parent,
                 self,
                 len(pal_payload),
-                "Import tilemap — palette destination",
+                "Import tilemap - palette destination",
                 blurb="Quantized master palette for this map.",
             )
             if dpal.result is None:
@@ -16359,7 +16402,7 @@ Format = "`f|u8`[u8 arg0]"
                 )
                 if ok_m:
                     tag = "Added" if how_m == "created" else "Updated"
-                    msg += f"\n\nTOML map ({tag}): {nm_map!r} — Address + Format ({fmt_map})"
+                    msg += f"\n\nTOML map ({tag}): {nm_map!r} - Address + Format ({fmt_map})"
                 else:
                     msg += f"\n\nTOML map: {err_m}"
             if nm_ts:
@@ -16368,7 +16411,7 @@ Format = "`f|u8`[u8 arg0]"
                 )
                 if ok_t:
                     tag = "Added" if how_t == "created" else "Updated"
-                    msg += f"\n\nTOML tileset ({tag}): {nm_ts!r} — Address + Format ({fmt_ts})"
+                    msg += f"\n\nTOML tileset ({tag}): {nm_ts!r} - Address + Format ({fmt_ts})"
                 else:
                     msg += f"\n\nTOML tileset: {err_t}"
             if not skip_pal and pal_off is not None and nm_pal:
@@ -16378,7 +16421,7 @@ Format = "`f|u8`[u8 arg0]"
                 )
                 if ok_p:
                     tag = "Added" if how_p == "created" else "Updated"
-                    msg += f"\n\nTOML palette ({tag}): {nm_pal!r} — Address + Format ({fmt_pal})"
+                    msg += f"\n\nTOML palette ({tag}): {nm_pal!r} - Address + Format ({fmt_pal})"
                 else:
                     msg += f"\n\nTOML palette: {err_p}"
             if nm_map or nm_ts or nm_pal:
@@ -16675,7 +16718,7 @@ Format = "`f|u8`[u8 arg0]"
         else:
             _pseudo_c_diag(
                 f"refresh: angr unavailable (_ANGR_AVAILABLE=False); "
-                f"import_err={_ANGR_IMPORT_ERROR!r} — using Capstone only. "
+                f"import_err={_ANGR_IMPORT_ERROR!r} - using Capstone only. "
                 f"start=0x{start:X} end=0x{end:X}"
             )
             self._refresh_pseudo_c_capstone_fallback(start, end, align)
@@ -16701,7 +16744,7 @@ Format = "`f|u8`[u8 arg0]"
             result = f"(angr failed: {e})"
             _pseudo_c_diag(f"worker gen={generation}: exception in _angr_decompile_impl: {e!r}")
         ok = self._angr_decompiler_output_is_success(result)
-        preview = (result[:200] + "…") if isinstance(result, str) and len(result) > 200 else result
+        preview = (result[:200] + "...") if isinstance(result, str) and len(result) > 200 else result
         _pseudo_c_diag(
             f"worker gen={generation}: success={ok} result_type={type(result).__name__!s} preview={preview!r}"
         )
@@ -16730,7 +16773,7 @@ Format = "`f|u8`[u8 arg0]"
             return
         self._text_pseudo_c.configure(state=tk.NORMAL)
         self._text_pseudo_c.delete("1.0", tk.END)
-        self._text_pseudo_c.insert(tk.END, text)
+        self._text_pseudo_c.insert(tk.END, _ascii_safe_pseudo_c_display(text))
         self._apply_syntax_highlighting(self._text_pseudo_c, "c")
         self._text_pseudo_c.configure(state=tk.DISABLED)
 
@@ -16757,11 +16800,14 @@ Format = "`f|u8`[u8 arg0]"
         self._text_pseudo_c.configure(state=tk.NORMAL)
         self._text_pseudo_c.delete("1.0", tk.END)
         if err_s:
-            self._text_pseudo_c.insert(tk.END, err_s + "\n\n--- Capstone pseudo-C fallback ---\n\n")
+            self._text_pseudo_c.insert(
+                tk.END,
+                _ascii_safe_pseudo_c_display(err_s) + "\n\n--- Capstone pseudo-C fallback ---\n\n",
+            )
         else:
             self._text_pseudo_c.insert(
                 tk.END,
-                "(angr failed: empty or missing failure text from worker — "
+                "(angr failed: empty or missing failure text from worker - "
                 "see stderr with CHANNELER_HEX_PSEUDO_C_DEBUG=1)\n\n"
                 "--- Capstone pseudo-C fallback ---\n\n",
             )
@@ -16798,7 +16844,7 @@ Format = "`f|u8`[u8 arg0]"
             f"cfg.kb.functions count={n_kb_funcs}"
         )
         if not cfg.kb.functions:
-            _pseudo_c_diag("impl: early return — CFG found no functions in range")
+            _pseudo_c_diag("impl: early return - CFG found no functions in range")
             return (
                 "(angr failed: CFG found no functions in this range. "
                 "Select more bytes around the routine, or toggle Thumb vs ARM mode.)"
@@ -16809,7 +16855,7 @@ Format = "`f|u8`[u8 arg0]"
 
             angr often leaves ``size == 0`` until later analysis; the old check used
             ``f_addr + size > r0``, which drops the entry function when ``size`` is 0 and
-            ``f_addr == r0`` — then no Decompiler ran and the UI showed only Capstone fallback.
+            ``f_addr == r0`` - then no Decompiler ran and the UI showed only Capstone fallback.
             """
             if r0 >= r1:
                 return False
@@ -16831,7 +16877,7 @@ Format = "`f|u8`[u8 arg0]"
         )
         if not funcs_in_region:
             funcs_in_region = list(cfg.kb.functions.items())
-            _pseudo_c_diag(f"impl: overlap empty — using all {len(funcs_in_region)} cfg functions")
+            _pseudo_c_diag(f"impl: overlap empty - using all {len(funcs_in_region)} cfg functions")
         constants = {c["Name"]: c.get("Value", 0) for c in self._toml_data.get("Constants", [])}
         for addr, func in sorted(funcs_in_region, key=lambda x: x[0]):
             try:
@@ -16895,10 +16941,10 @@ Format = "`f|u8`[u8 arg0]"
                 out_lines.insert(0, "/* Some functions failed: " + "; ".join(errors[:2]) + " */\n")
             _pseudo_c_diag(f"impl: success out_lines blocks={len(out_lines)} errors={len(errors)}")
             return self._apply_symbol_names_to_decompiler_text("\n".join(out_lines))
-        _pseudo_c_diag("impl: no out_lines and no fatal error list — returning no-text sentinel")
+        _pseudo_c_diag("impl: no out_lines and no fatal error list - returning no-text sentinel")
         return (
             "(angr failed: decompiler returned no text for this range. "
-            "You may be seeing only the Capstone line-by-line fallback below — "
+            "You may be seeing only the Capstone line-by-line fallback below - "
             "widen the selection or confirm Thumb/ARM matches the code.)"
         )
 
@@ -16933,7 +16979,7 @@ Format = "`f|u8`[u8 arg0]"
         content = "".join(lines) if lines else "(No instructions)"
         if lines and content != "(No instructions)":
             content = self._apply_symbol_names_to_decompiler_text(content)
-        self._text_pseudo_c.insert(tk.END, content)
+        self._text_pseudo_c.insert(tk.END, _ascii_safe_pseudo_c_display(content))
         if lines:
             self._apply_syntax_highlighting(self._text_pseudo_c, "c")
         self._text_pseudo_c.configure(state=tk.DISABLED)
@@ -17674,7 +17720,7 @@ Format = "`f|u8`[u8 arg0]"
         on_addr_col = cn_i < HEX_DISP_ADDR_END
 
         if not on_addr_col and cn_i >= HEX_DISP_HEX_START:
-            # Hex data: double-click a GBA pointer word → jump to target (overrides table/struct highlight)
+            # Hex data: double-click a GBA pointer word -> jump to target (overrides table/struct highlight)
             ptr_start = (off // 4) * 4
             if self._get_pointer_at_offset(ptr_start) is not None:
                 if self._follow_pointer_at(ptr_start):
@@ -17916,7 +17962,7 @@ Format = "`f|u8`[u8 arg0]"
         self._xref_rebuild_after_id = self.after(450, _run)
 
     def _build_xref_index(self) -> None:
-        """Map each target file offset → sources: word-aligned ROM pointers, and Thumb BL/BLX sites (separate)."""
+        """Map each target file offset -> sources: word-aligned ROM pointers, and Thumb BL/BLX sites (separate)."""
         self._xref_rom_word.clear()
         self._xref_bl.clear()
         n = len(self._data)
@@ -17981,7 +18027,7 @@ Format = "`f|u8`[u8 arg0]"
         sw.grid(row=1, column=1, sticky="ns", pady=2)
         lb_w.configure(yscrollcommand=sw.set)
         for s in words:
-            lb_w.insert(tk.END, f"file 0x{s:08X}  (word at start of pointer)  →  GBA 0x{s + GBA_ROM_BASE:08X}")
+            lb_w.insert(tk.END, f"file 0x{s:08X}  (word at start of pointer)  ->  GBA 0x{s + GBA_ROM_BASE:08X}")
         if not words:
             lb_w.insert(tk.END, "(none)")
 
@@ -17996,7 +18042,7 @@ Format = "`f|u8`[u8 arg0]"
         sb.grid(row=3, column=1, sticky="ns", pady=2)
         lb_b.configure(yscrollcommand=sb.set)
         for s in bls:
-            lb_b.insert(tk.END, f"file 0x{s:08X}  (start of BL/BLX)  →  GBA 0x{s + GBA_ROM_BASE:08X}")
+            lb_b.insert(tk.END, f"file 0x{s:08X}  (start of BL/BLX)  ->  GBA 0x{s + GBA_ROM_BASE:08X}")
         if not bls:
             lb_b.insert(tk.END, "(none)")
 
