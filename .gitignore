@@ -211,3 +211,5 @@ CURSOR.md
 BPRE0.toml
 *.sav
 *.bak
+!scripts/.gitkeep
+scripts/*

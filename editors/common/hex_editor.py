@@ -1267,6 +1267,20 @@ def _strip_seq_struct_format_prefix(t: str) -> str:
     return s
 
 
+def _strip_reshef_struct_format_prefix(t: str) -> str:
+    """Remove leading `` `reshef` `` so the struct parses; :func:`_struct_format_has_reshef_marker` reads *fmt_raw*."""
+    s = str(t or "").strip()
+    m = re.match(r"^\s*`reshef`\s*", s, re.IGNORECASE)
+    if m:
+        return s[m.end() :].lstrip()
+    return s
+
+
+def _struct_format_has_reshef_marker(fmt_raw: str) -> bool:
+    """True when the Format starts with `` `reshef` `` (ygodm8 ``ygodm_encode`` before Huff; see :mod:`gba_graphics`)."""
+    return bool(re.match(r"^\s*`reshef`\s*", str(fmt_raw or "").strip(), re.IGNORECASE))
+
+
 def _struct_format_has_seq_marker(fmt_raw: str) -> bool:
     """True when the Format starts with `` `seq` `` (parallel nested columns indexed together)."""
     return bool(re.search(r"`\s*seq\s*`", str(fmt_raw or ""), re.IGNORECASE))
@@ -1297,7 +1311,8 @@ def _struct_seq_parallel_eligible(fields: List[Dict[str, Any]]) -> Optional[str]
 
 def normalize_named_anchor_format(raw: Any) -> str:
     """Whitespace-strip; expand ``[…]!HEX`` terminator shorthand and `` `ban` `` / `` `ydk` `` deck lines for struct NamedAnchors."""
-    t = _strip_seq_struct_format_prefix(str(raw or "").strip())
+    t = _strip_reshef_struct_format_prefix(str(raw or "").strip())
+    t = _strip_seq_struct_format_prefix(t)
     t = _normalize_shorthand_bracket_terminator_format(t)
     t = _normalize_pass_bracket_shorthand(t)
     return _strip_trailing_ydk_struct_format_tag(t)
@@ -4111,21 +4126,22 @@ class GraphicsPreviewFrame(ttk.Frame):
                     f"Preview palette override ignored: loaded {ov_bpp}bpp data but this sprite is {spec.bpp}bpp.\n"
                 )
             else:
+                _ry = bool(getattr(spec, "reshef_ygodm", False))
                 if ov_st == "raw":
                     raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
                         bytes(rom), ov_off, ov_bpp, lz77=False
                     )
                 elif ov_st == "lz77":
                     raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
-                        bytes(rom), ov_off, ov_bpp, lz77=True
+                        bytes(rom), ov_off, ov_bpp, lz77=True, reshef_ygodm=_ry
                     )
                 elif ov_st == "huff4":
                     raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
-                        bytes(rom), ov_off, ov_bpp, huff_bpp=4
+                        bytes(rom), ov_off, ov_bpp, huff_bpp=4, reshef_ygodm=_ry
                     )
                 else:
                     raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
-                        bytes(rom), ov_off, ov_bpp, huff_bpp=8
+                        bytes(rom), ov_off, ov_bpp, huff_bpp=8, reshef_ygodm=_ry
                     )
                 if raw_ov is None:
                     logs.append(f"Preview palette override: {oerr}\n")
@@ -4204,14 +4220,15 @@ class GraphicsPreviewFrame(ttk.Frame):
         stor = str(self._sprite_pal_storage_var.get()).strip().lower()
         if stor not in ("raw", "lz77", "huff4", "huff8"):
             stor = "raw"
+        _ry = bool(getattr(sp, "reshef_ygodm", False))
         if stor == "raw":
             raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(rom), off, pb, lz77=False)
         elif stor == "lz77":
-            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(rom), off, pb, lz77=True)
+            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(rom), off, pb, lz77=True, reshef_ygodm=_ry)
         elif stor == "huff4":
-            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(rom), off, pb, huff_bpp=4)
+            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(rom), off, pb, huff_bpp=4, reshef_ygodm=_ry)
         else:
-            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(rom), off, pb, huff_bpp=8)
+            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(rom), off, pb, huff_bpp=8, reshef_ygodm=_ry)
         if raw is None:
             messagebox.showerror("Preview palette", rerr or "Could not read palette bytes.")
             return
@@ -7798,21 +7815,22 @@ class StructEditorFrame(ttk.Frame):
                     f"\nPreview palette override ignored: {ov_bpp}bpp ROM data vs {spec.bpp}bpp sprite field.\n"
                 )
             else:
+                _ry = bool(getattr(spec, "reshef_ygodm", False))
                 if ov_st == "raw":
                     raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
                         bytes(data), ov_off, ov_bpp, lz77=False
                     )
                 elif ov_st == "lz77":
                     raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
-                        bytes(data), ov_off, ov_bpp, lz77=True
+                        bytes(data), ov_off, ov_bpp, lz77=True, reshef_ygodm=_ry
                     )
                 elif ov_st == "huff4":
                     raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
-                        bytes(data), ov_off, ov_bpp, huff_bpp=4
+                        bytes(data), ov_off, ov_bpp, huff_bpp=4, reshef_ygodm=_ry
                     )
                 else:
                     raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
-                        bytes(data), ov_off, ov_bpp, huff_bpp=8
+                        bytes(data), ov_off, ov_bpp, huff_bpp=8, reshef_ygodm=_ry
                     )
                 if raw_ov is None:
                     log_extra += f"\nPreview palette override: {oerr}\n"
@@ -7927,14 +7945,15 @@ class StructEditorFrame(ttk.Frame):
         stor = str(self._gfx_struct_sprite_pal_storage_var.get()).strip().lower()
         if stor not in ("raw", "lz77", "huff4", "huff8"):
             stor = "raw"
+        _ry = bool(getattr(spec, "reshef_ygodm", False))
         if stor == "raw":
             raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(data), off, pb, lz77=False)
         elif stor == "lz77":
-            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(data), off, pb, lz77=True)
+            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(data), off, pb, lz77=True, reshef_ygodm=_ry)
         elif stor == "huff4":
-            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(data), off, pb, huff_bpp=4)
+            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(data), off, pb, huff_bpp=4, reshef_ygodm=_ry)
         else:
-            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(data), off, pb, huff_bpp=8)
+            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(data), off, pb, huff_bpp=8, reshef_ygodm=_ry)
         if raw is None:
             messagebox.showerror("Preview palette", rerr or "Could not read palette bytes.")
             return
@@ -13980,8 +13999,11 @@ Format = "`f|u8`[u8 arg0]"
             name = _named_anchor_row_name_field(anchor)
             if not name or name in pcs_names:
                 continue
+            fmt_raw_g = str(anchor.get("Format", "")).strip()
             fmt = normalize_named_anchor_format(anchor.get("Format", ""))
             spec = parse_graphics_anchor_format(fmt)
+            if spec is not None and _struct_format_has_reshef_marker(fmt_raw_g):
+                spec = replace(spec, reshef_ygodm=True)
             table_count_ref: Optional[str] = None
             compressed_rows = False
             ptr_palette_table = False
@@ -13993,6 +14015,8 @@ Format = "`f|u8`[u8 arg0]"
                 if tbl is None:
                     continue
                 spec, table_count_ref, row_is_pointer_column = tbl
+                if _struct_format_has_reshef_marker(fmt_raw_g):
+                    spec = replace(spec, reshef_ygodm=True)
                 ptr_palette_table = bool(
                     row_is_pointer_column and getattr(spec, "kind", None) == "palette"
                 )
@@ -14297,6 +14321,11 @@ Format = "`f|u8`[u8 arg0]"
             fields = _parse_struct_fields(fmt, blist_resolver=self._bit_count_for_blist_ref)
             if not fields:
                 continue
+            if _struct_format_has_reshef_marker(fmt_raw):
+                for f in fields:
+                    gs = f.get("gfx_spec")
+                    if gs is not None and isinstance(gs, GraphicsAnchorSpec):
+                        f["gfx_spec"] = replace(gs, reshef_ygodm=True)
             addr = anchor.get("Address")
             if addr is None:
                 continue

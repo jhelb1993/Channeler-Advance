@@ -11,12 +11,12 @@ Format = '''[card:cardnumbers spawnrate:]795'''
 [[NamedAnchors]]
 Name = '''graphics.cards.art'''
 Address = 0xE11EB8
-Format = '''[card<`huff8s8x10x10|graphics.cards.palettes`>]cardnumbers'''
+Format = '''`reshef`[card<`huff8s8x10x10|graphics.cards.palettes`>]cardnumbers'''
 
 [[NamedAnchors]]
 Name = '''graphics.cards.palettes'''
 Address = 0xE12B3C
-Format = '''[palette<`ucp8:123`>]cardnumbers'''
+Format = '''[palette<`ucp8:0123`>]cardnumbers'''
 
 [[NamedAnchors]]
 Name = '''data.cards.passwords'''
