@@ -29,6 +29,7 @@ from editors.common.gba_graphics import (
     build_sprite_payload_for_rom,
     build_tilemap_payload_for_rom,
     compute_graphics_rom_span,
+    try_measure_sequential_compressed_graphics_table_span,
     decode_graphics_anchor_to_png,
     effective_ucp8_palette_hex_suffix,
     decode_palette_to_png_pal,
@@ -12256,6 +12257,149 @@ class HexEditorFrame(ttk.Frame):
                     return gi
         return None
 
+    def _set_hex_span_selection(
+        self, start: int, end: int, cursor_file_off: Optional[int] = None
+    ) -> None:
+        """Highlight ``[start, end]`` inclusive and optionally keep the caret on ``cursor_file_off``."""
+        if not self._data:
+            return
+        if start < 0:
+            start = 0
+        lim = len(self._data) - 1
+        if end > lim:
+            end = lim
+        if start > end:
+            return
+        cur = start
+        if cursor_file_off is not None and start <= cursor_file_off <= end:
+            cur = cursor_file_off
+        self._cursor_byte_offset = cur
+        self._selection_start = start
+        self._selection_end = end
+        self._visible_row_start = start // BYTES_PER_ROW
+        self._refresh_visible()
+        self._update_scrollbar()
+        if cursor_file_off is not None and self._ensure_cursor_visible():
+            self._refresh_visible()
+            self._update_scrollbar()
+
+    def _find_struct_gfx_field_extent_at_offset(self, file_off: int) -> Optional[Dict[str, Any]]:
+        """If ``file_off`` lies inside a struct field with ``gfx_spec``, return the tightest matching span."""
+        if not self._data:
+            return None
+        data = bytes(self._data)
+        rom_len = len(data)
+        best: Optional[Tuple[int, int, int, Dict[str, Any]]] = None  # (span_len, fo, span, snap)
+
+        for info in self.get_struct_anchors():
+            if info.get("seq_parallel"):
+                continue
+            base = int(info["base_off"])
+            total = _struct_anchor_table_span_bytes(data, info)
+            if not (base <= file_off < base + total):
+                continue
+            fields = list(info.get("fields") or [])
+            row_idx = _struct_row_index_for_file_offset(data, info, file_off)
+
+            if info.get("packed_terminator") and info.get("packed_terminator_fd"):
+                pfd = info["packed_terminator_fd"]
+                entry_base = _packed_terminator_entry_file_offset(data, base, row_idx, pfd)
+                if entry_base is None:
+                    continue
+            else:
+                ss = int(info.get("struct_size") or 0)
+                if ss <= 0:
+                    continue
+                entry_base = base + row_idx * ss
+
+            for fd in fields:
+                gs = fd.get("gfx_spec")
+                if gs is None or not isinstance(gs, GraphicsAnchorSpec):
+                    continue
+                fo = _struct_field_payload_file_off(entry_base, fd, fields, data)
+                if fo is None:
+                    continue
+                span = int(compute_graphics_rom_span(gs, rom_len, fo, rom=data))
+                if span <= 0:
+                    continue
+                last = fo + span - 1
+                if fo <= file_off <= last and last < rom_len:
+                    cand_len = span
+                    snap = {
+                        **info,
+                        "type": "struct",
+                        "struct_entry_index": row_idx,
+                        "struct_gfx_field": True,
+                    }
+                    if best is None or cand_len < best[0]:
+                        best = (cand_len, fo, span, snap)
+
+        if best is None:
+            return None
+        _, fo, span, snap = best
+        snap["base_off"] = fo
+        snap["rom_span"] = span
+        return snap
+
+    def _find_graphics_table_row_extent_at_offset(self, file_off: int) -> Optional[Dict[str, Any]]:
+        """Narrow a graphics *table* anchor to the row (or pointer-resolved blob) containing ``file_off``."""
+        if not self._data:
+            return None
+        data = bytes(self._data)
+        rom_len = len(data)
+        for info in self.get_graphics_anchors():
+            if not info.get("graphics_table"):
+                continue
+            base = int(info["base_off"])
+            if info.get("graphics_table_compressed_rows"):
+                span = max(1, int(info.get("rom_span", 1)))
+                if base <= file_off < base + span:
+                    gi = dict(info)
+                    gi["type"] = "graphics"
+                    return gi
+                continue
+            nent = int(info.get("table_num_entries") or 0)
+            if nent <= 0:
+                continue
+            spec = info.get("spec")
+            if spec is None:
+                continue
+            if info.get("graphics_table_pointer_column"):
+                row_bytes = 4
+                table_end = base + nent * row_bytes
+                if base <= file_off < table_end:
+                    row = (file_off - base) // row_bytes
+                    ptr_off = base + row * row_bytes
+                    tgt, _err = _graphics_table_blob_file_off(info, row, data)
+                    if tgt is None:
+                        continue
+                    blob_span = int(compute_graphics_rom_span(spec, rom_len, tgt, rom=data))
+                    if blob_span <= 0:
+                        continue
+                    if ptr_off <= file_off < ptr_off + 4 or (tgt <= file_off < tgt + blob_span):
+                        gi = dict(info)
+                        gi["type"] = "graphics"
+                        gi["base_off"] = tgt
+                        gi["rom_span"] = blob_span
+                        gi["graphics_table_row"] = row
+                        return gi
+                continue
+            rbs = int(info.get("row_byte_size") or 0)
+            if rbs <= 0:
+                continue
+            total = rbs * nent
+            if not (base <= file_off < base + total):
+                continue
+            row = (file_off - base) // rbs
+            start = base + row * rbs
+            gi = dict(info)
+            gi["type"] = "graphics"
+            gi["base_off"] = start
+            gi["rom_span"] = rbs
+            gi["graphics_table_row"] = row
+            return gi
+        return None
+
     def _select_named_anchor_extent(
         self, info: Dict[str, Any], cursor_file_off: Optional[int] = None
     ) -> None:
@@ -12267,6 +12411,9 @@ class HexEditorFrame(ttk.Frame):
         t = info.get("type")
         if t == "graphics" or info.get("graphics_entry"):
             start = info["base_off"]
+            total_bytes = max(1, int(info.get("rom_span", 1)))
+        elif t == "struct" and info.get("struct_gfx_field"):
+            start = int(info["base_off"])
             total_bytes = max(1, int(info.get("rom_span", 1)))
         elif t == "struct" or "struct_size" in info:
             start = info["base_off"]
@@ -12284,20 +12431,7 @@ class HexEditorFrame(ttk.Frame):
                 return
             total_bytes = info.get("width", 0) * info.get("count", 0)
         end = start + total_bytes - 1
-        if end >= len(self._data):
-            end = len(self._data) - 1
-        cur = start
-        if cursor_file_off is not None and start <= cursor_file_off <= end:
-            cur = cursor_file_off
-        self._cursor_byte_offset = cur
-        self._selection_start = start
-        self._selection_end = end
-        self._visible_row_start = start // BYTES_PER_ROW
-        self._refresh_visible()
-        self._update_scrollbar()
-        if cursor_file_off is not None and self._ensure_cursor_visible():
-            self._refresh_visible()
-            self._update_scrollbar()
+        self._set_hex_span_selection(start, end, cursor_file_off=cursor_file_off)
 
     def _on_asm_mode_change(self, event: Optional[tk.Event] = None) -> None:
         sel = self._asm_mode_var.get()
@@ -14036,7 +14170,7 @@ Format = "`f|u8`[u8 arg0]"
                 if n_entries is None or n_entries <= 0:
                     continue
                 if compressed_rows:
-                    # Per-row compressed length varies; bound selection loosely (same order of magnitude as per-palette LZ).
+                    # Loose cap until ``base_off`` is known; may tighten via measured LZ/Huff below.
                     total_span = max(1, n_entries) * (512 * 1024)
                 elif ptr_palette_table:
                     total_span = 4 * n_entries
@@ -14058,11 +14192,24 @@ Format = "`f|u8`[u8 arg0]"
                 continue
             if base_off < 0 or base_off >= rom_len:
                 continue
+            if (
+                table_count_ref is not None
+                and compressed_rows
+                and rom_len > 0
+                and self._data
+            ):
+                seq = try_measure_sequential_compressed_graphics_table_span(
+                    spec, bytes(self._data), base_off, n_entries
+                )
+                if seq is not None and seq > 0:
+                    total_span = seq
             rest = max(0, rom_len - base_off)
             if table_count_ref is not None:
                 rom_span = min(rest, total_span)
             else:
-                rom_span = compute_graphics_rom_span(spec, rom_len, base_off)
+                rom_span = compute_graphics_rom_span(
+                    spec, rom_len, base_off, rom=bytes(self._data) if self._data else None
+                )
             entry: Dict[str, Any] = {
                 "name": name,
                 "anchor": anchor,
@@ -18674,15 +18821,45 @@ Format = "`f|u8`[u8 arg0]"
         on_addr_col = cn_i < HEX_DISP_ADDR_END
 
         if not on_addr_col and cn_i >= HEX_DISP_HEX_START:
-            # Hex data: double-click a GBA pointer word -> jump to target (overrides table/struct highlight)
+            # 1) Graphics *table* rows (incl. pointer-column palettes): row/blob selection before pointer follow.
+            gtr = self._find_graphics_table_row_extent_at_offset(off)
+            if gtr:
+                tri = gtr.get("graphics_table_row")
+                if tri is not None:
+                    try:
+                        self.graphics_table_row_var.set(int(tri))
+                    except (ValueError, TypeError, tk.TclError):
+                        pass
+                self._select_named_anchor_extent(gtr, cursor_file_off=off)
+                if self._on_pointer_to_named_anchor_cb:
+                    snap = dict(gtr)
+                    self.after(10, lambda s=snap: self._on_pointer_to_named_anchor_cb(s))
+                return "break"
+            # 2) Follow .word pointers (struct ptr fields, etc.) before struct gfx hit-test — LZ/Huff gfx spans
+            #    are conservative/huge and would otherwise swallow pointer slots in the same row.
             ptr_start = (off // 4) * 4
             if self._get_pointer_at_offset(ptr_start) is not None:
                 if self._follow_pointer_at(ptr_start):
                     return "break"
+            # 3) Tight gfx/palette field selection inside struct rows (non-table graphics fields).
+            gfx_struct = self._find_struct_gfx_field_extent_at_offset(off)
+            if gfx_struct:
+                self._select_named_anchor_extent(gfx_struct, cursor_file_off=off)
+                if self._on_pointer_to_named_anchor_cb:
+                    snap = dict(gfx_struct)
+                    snap["struct_entry_index"] = int(gfx_struct.get("struct_entry_index", 0))
+                    self.after(10, lambda s=snap: self._on_pointer_to_named_anchor_cb(s))
+                return "break"
 
         # NamedAnchor PCS / struct / graphics: select span, sync tools to the row under the click
         anchor_info = self._find_named_anchor_at_offset(off)
         if anchor_info:
+            tri = anchor_info.get("graphics_table_row")
+            if tri is not None:
+                try:
+                    self.graphics_table_row_var.set(int(tri))
+                except (ValueError, TypeError, tk.TclError):
+                    pass
             self._select_named_anchor_extent(anchor_info, cursor_file_off=off)
             if self._on_pointer_to_named_anchor_cb:
                 snap = dict(anchor_info)

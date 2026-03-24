@@ -1176,9 +1176,78 @@ def tile_data_bytes(bpp: int, w_tiles: int, h_tiles: int) -> int:
     return w_tiles * h_tiles * per_tile
 
 
-def compute_graphics_rom_span(spec: GraphicsAnchorSpec, rom_len: int, base: int) -> int:
-    """Conservative byte span in ROM from anchor start (for selection / hit-testing)."""
+def try_measure_graphics_rom_footprint(
+    spec: GraphicsAnchorSpec,
+    rom: bytes,
+    base: int,
+    *,
+    graphics_table_row_bytes: Optional[int] = None,
+) -> Optional[int]:
+    """Return **actual** on-disk blob length (LZ/Huff consumed + 4-byte pad) when ``rom[base:]`` decodes; else ``None``."""
+    if graphics_table_row_bytes is not None:
+        return int(graphics_table_row_bytes)
+    if base < 0 or base >= len(rom):
+        return None
+    try:
+        if spec.kind == "palette":
+            return measure_palette_rom_footprint(rom, base, spec)
+        if spec.kind == "sprite":
+            return measure_sprite_rom_footprint(rom, base, spec)
+        if spec.kind == "tilemap":
+            return measure_tilemap_rom_footprint(rom, base, spec)
+    except ValueError:
+        return None
+    return None
+
+
+def try_measure_sequential_compressed_graphics_table_span(
+    spec: GraphicsAnchorSpec,
+    rom: bytes,
+    base: int,
+    n_entries: int,
+) -> Optional[int]:
+    """
+    Sum of measured LZ/Huff row lengths when rows are packed **back-to-back** in ROM (common layout).
+
+    Returns ``None`` if any row fails to measure (then callers should fall back to a loose cap).
+    """
+    if n_entries <= 0:
+        return 0
+    pos = base
+    total = 0
+    for _ in range(n_entries):
+        if pos < 0 or pos >= len(rom):
+            return None
+        one = try_measure_graphics_rom_footprint(spec, rom, pos)
+        if one is None or one <= 0:
+            return None
+        total += one
+        pos += one
+    return total
+
+
+def compute_graphics_rom_span(
+    spec: GraphicsAnchorSpec,
+    rom_len: int,
+    base: int,
+    rom: Optional[bytes] = None,
+    *,
+    graphics_table_row_bytes: Optional[int] = None,
+) -> int:
+    """Byte span in ROM from anchor start (selection / hit-testing).
+
+    When ``rom`` is provided and the blob at ``base`` is valid LZ77 or GBA Huffman, the returned span is the
+    **measured** compressed length (pret-style 4-byte padding). Otherwise uses conservative upper bounds
+    (same as historical behaviour when ``rom`` was unavailable).
+    """
     rest = max(0, rom_len - base)
+    if rom is not None and 0 <= base < len(rom):
+        measured = try_measure_graphics_rom_footprint(
+            spec, rom, base, graphics_table_row_bytes=graphics_table_row_bytes
+        )
+        if measured is not None and measured > 0:
+            return min(rest, measured)
+
     if spec.kind == "palette":
         if spec.lz or spec.huff_bpp is not None:
             return min(rest, 512 * 1024)

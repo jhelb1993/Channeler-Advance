@@ -1,5 +1,4 @@
-double clicking graphics highlights all bytes
-update readme (include Reshef decomp)
+organize and update readme (include Reshef decomp)
 more games
 generate toml (other option)
 testing
