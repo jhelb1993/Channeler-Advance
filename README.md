@@ -4,47 +4,16 @@ A ROM hacking tool for Game Boy Advance games, built with Python and Tkinter —
 
 **Cross-platform:** runs on **Windows**, **macOS**, and **Linux** (standard CPython + Tkinter). Use the same Python interpreter for `pip` and for launching `main.py` so optional native wheels (Capstone, angr) load correctly.
 
-**Releases & changelog:** [GitHub Releases — Channeler-Advance](https://github.com/Soul-8691/Channeler-Advance/releases) (e.g. demo **v0.1.0** notes).
+**Releases & changelog:** [GitHub Releases — Channeler-Advance](https://github.com/Soul-8691/Channeler-Advance/releases) (e.g. demo **v0.1.0** notes). Compare any tag to `main` on GitHub (or `git diff <tag>...main` locally) for file-level history.
 
-## Recent changes (since [v0.1.1.2](https://github.com/Soul-8691/Channeler-Advance/releases/tag/v0.1.1.2))
-
-Changes on `main` after tag **v0.1.1.2**. That release already summarizes earlier beta work (Find fixes, YDK / banlist import, WCT06 TOML updates, address formatting, sample files, and more — see the release page). For a full file diff, use [compare `v0.1.1.2…main`](https://github.com/Soul-8691/Channeler-Advance/compare/v0.1.1.2...main) or locally: `git diff v0.1.1.2...main`.
-
-### Performance
-
-- **Hex editor:** faster refresh / analysis paths (less redundant work when the viewport and ROM slice are unchanged).
-
-### PCS / Table tool (Tools slot 1)
-
-- **Find** (basic): search/filter rows in the PCS string table view.
-
-### Cross-platform
-
-- Better **macOS / Linux** behavior (paths, helpers, and related editor plumbing); **`deps/thumb.sh`** adjustments for non-Windows environments.
-
-### Text and symbols
-
-- **Unicode / symbol** handling improvements in the editor UI (labels, lists, and PCS-related display).
-
-### Setup documentation
-
-- **README** setup steps expanded (e.g. **venv** on macOS/Linux, **`python -m pip`** alignment, notes on **Tkinter**, **Capstone**, and **angr**). The intro already states cross-platform support.
-
-### Structure TOML and Reshef
-
-- Bundled **`Reshef.toml`** for *Yu-Gi-Oh! Reshef of Chaos* (tables, lists, and struct layouts). **`editors/common/TOML.toml`** and the hex/struct editor were extended for **`seq`** parallel columns, pointer-backed string fields, nested-array validation with a shared **`count`**, and related edge cases.
-
-### Goto and Tools interaction
-
-- **Goto** applies when you press **Enter** (main or numpad), not on every keystroke — easier to finish typing an address or anchor name before navigating.
-- **Tools + focus:** opening/syncing the PCS / Struct / Graphics tools no longer steals keyboard focus from **Goto** or other entries when you are still typing there.
-- **Double-click in ROM:** if the byte is inside a **PCS** or **struct** NamedAnchor table, the Tools pane jumps to the **row that contains that byte** (and the view scrolls if needed); the whole table stays selected, with the caret on the clicked byte. (Double-clicking a **pointer word** in the hex columns still **follows the pointer** first, as before.)
+The hex editor skips redundant analysis when the viewport and ROM slice are unchanged (**faster refresh** on large ROMs). **macOS / Linux** path and helper behavior are exercised in-tree (e.g. **`deps/thumb.sh`**). The PCS table tool includes basic **Find** / filter for rows. Labels and PCS-related UI use improved **Unicode / symbol** handling where it matters for display.
 
 ## ROM and structure TOML
 
-- Use the bundled **`FireRed.toml`** when hacking FireRed, **`WCT06.toml`** for *Yu-Gi-Oh! Ultimate Masters: World Championship Tournament 2006*, or **`Reshef.toml`** for *Yu-Gi-Oh! Reshef of Chaos*.
+- Use the bundled **`FireRed.toml`** when hacking FireRed, **`WCT06.toml`** for *Yu-Gi-Oh! Ultimate Masters: World Championship Tournament 2006*, or **`Reshef.toml`** for *Yu-Gi-Oh! Reshef of Destruction*.
 - By default, the editor looks for **`{YourRomBasename}.toml`** next to the ROM. You can load another file with **File → Load structure TOML**.
 - **Authoritative DSL notes** for anchors and `Format` strings also live in **`editors/common/TOML.toml`** (commented reference). The summary below matches that file.
+- Bundled **`Reshef.toml`** for *Yu-Gi-Oh! Reshef of Destruction* covers tables, lists, and struct layouts (including YDK-style deck import paths where configured). The struct/hex pipeline supports **`seq`** parallel columns, pointer-backed string fields, nested-array validation tied to a shared **`count`**, and related edge cases documented in **`TOML.toml`**.
 
 ### Anchor addresses
 
@@ -100,13 +69,17 @@ Whole-anchor **Format** (no `[`…`]` struct wrapper) describes sprites, tile sh
 
 Common tokens include **`ucp4`**, **`ucp4:`** index runs, **`lzp4` / `lzp8`**, **`ucs4xWxH`** sprites, **`uct4xWxH` / `uct8xWxH`** tile sheets, **`lzt4` / `lzt8`** variable strips, **`ucs6xWxH`**, **`ucm4xMWxMH`** tilemaps, **`lzm4` / `lzm8`**, and **`[rowSpec]count`** graphics tables. In struct layouts, fields can use **pointer + backtick-wrapped graphics specs** inside angle brackets, and composite **tileset** / **tilemap** / **palette** fields; see **`editors/common/TOML.toml`** for full syntax.
 
+**`reshef` (Yu-Gi-Oh! Reshef card graphics):** prefix a standalone graphics `Format` or inner struct field spec with `` `reshef` `` so Channeler applies the same **pre-LZ77/Huff byte transform** as [ygodm8](https://github.com/shinny4/ygodm8)’s `ygodm_encode` hook (inverse after decompress for display/import). Use it for Huff- or LZ-compressed card art and palettes that were built with that pipeline—see **[shinny4/ygodm8](https://github.com/shinny4/ygodm8)** (credit below).
+
+**ROM span sizing:** when the ROM is loaded, LZ77 and GBA Huff blobs use **measured** compressed lengths (stream length + 4-byte padding) for selection and anchor bounds where possible; graphics tables with consecutive compressed rows sum row sizes when that layout matches the ROM.
+
 **Full graphics DSL** (every prefix, LZ rules, palette linking, struct field patterns): **`editors/common/TOML.toml`** (Graphics section).
 
 ## Supported Games
 
 - **Pokémon FireRed** – Uses [pret/pokefirered](https://github.com/pret/pokefirered) for C code reference
 - **Yu-Gi-Oh! Ultimate Masters: World Championship Tournament 2006** – Uses [Soul-8691/ygowct06](https://github.com/Soul-8691/ygowct06) for ARM7TDMI ASM reference
-- **Yu-Gi-Oh! Reshef of Chaos** – Bundled structure file **`Reshef.toml`** (load via **File → Load structure TOML** or place next to your ROM as **`{basename}.toml`**)
+- **Yu-Gi-Oh! Reshef of Destruction** – Bundled structure file **`Reshef.toml`** (load via **File → Load structure TOML** or place next to your ROM as **`{basename}.toml`**). Card sprite **Huff/LZ** data may require the `` `reshef` `` graphics prefix so decoding matches the game’s **ygodm**-style pre-scramble (see [shinny4/ygodm8](https://github.com/shinny4/ygodm8) in **Credits**).
 
 ## Setup
 
@@ -204,7 +177,7 @@ These apply when the main hex view (or the overall window, for global toggles) h
 | **Ctrl+D** | Toggle **pseudo-C** pane |
 | **Ctrl+End** | Jump to **end** of ROM |
 | **Ctrl+F** | Open **Find** (hex mode: space-separated token **`xx`** or **`XX`** matches any byte, e.g. `00 xx 08 XX 09 xx 10`) |
-| **Ctrl+G** | Focus the **Goto** field (type an offset or anchor name, then **Enter** to jump) |
+| **Ctrl+G** | Focus the **Goto** field (type an offset or anchor name, then **Enter** to jump — navigation runs on **Enter**, not on every keystroke) |
 | **Ctrl+H** | Toggle **HackMew** mode (when available) |
 | **Ctrl+Home** | Jump to **start** of ROM |
 | **Ctrl+I** | **Compile** HackMew ASM (when HackMew mode and the disassembly pane are active) |
@@ -235,6 +208,14 @@ These apply when the main hex view (or the overall window, for global toggles) h
 | **Insert** | Toggle **INSERT** vs **REPLACE** mode |
 | **Delete** | Delete byte(s) (selection or at cursor) |
 | **Backspace** | Delete previous byte |
+
+### Hex view — double-click (hex / ASCII data columns)
+
+- **Graphics NamedAnchor (table):** selects the **row**’s bytes in ROM (for pointer-column palette tables, the **palette blob** at the resolved address). The **graphics table row** control syncs when applicable.
+- **Struct — graphics field:** if the click lies in a **`gfx` / backtick graphics** field, the selection is **just that field** (LZ77/Huff length is **measured** from the stream when the header is valid).
+- **PCS or struct table:** Tools jumps to the **row** that contains the byte; the table range stays highlighted.
+- **Pointer follow:** a **valid GBA ROM `.word`** (0x08…… / 0x09……) is followed **after** graphics-table and pointer-field rules, so struct pointer fields still jump to `*ptr` targets.
+- **Goto / Tools focus:** syncing Tools does not pull focus away from **Goto** while you are typing there.
 
 ### Tools panes (PCS / Struct / Graphics)
 
@@ -269,7 +250,7 @@ High-level capabilities include:
 
 - General editing: write, insert (**Insert** key toggles insert mode), delete, copy, paste-overwrite (**Ctrl+B**) / paste-insert (**Ctrl+V**), find/replace, goto.
 - Hex / ASCII / PCS text; table and struct editing from TOML; repointing text and pointers (including optional **FF**-fill of old space when relocating).
-- In-tool editing of TOML anchor formats; **double-click** pointers to follow (red highlight); **double-click** the start of an ASM routine in the hex view to highlight through the end (when applicable); **double-click** bytes inside a PCS/struct **NamedAnchor** table to select that row in the Tools pane.
+- In-tool editing of TOML anchor formats; **double-click** valid **`.word`** ROM pointers to follow; **double-click** the start of an ASM routine in the hex view to highlight through the end (when applicable). **Double-click** handling for PCS/struct tables, graphics tables, struct **graphics** fields, and pointers is summarized under **Hex view — double-click** above.
 - **Ctrl+T** / **Ctrl+Shift+1–3** to show or focus Tools slots.
 - **Ctrl+Shift+4–7** for pseudo-C inject workflow and Python script pane.
 - Disassembly (**Ctrl+P**), HackMew ASM (**Ctrl+H**), pseudo-C (**Ctrl+D**), **Ctrl+M** anchor browser.
@@ -286,5 +267,6 @@ High-level capabilities include:
 - **[Tilemap Studio](https://github.com/Rangi42/tilemap-studio)** (**Rangi42**) — image→tiles workflow and palette conventions that informed tilemap import behavior.
 - **Kertra** — for discovering and documenting the **6bpp** Yu-Gi-Oh! card sprite layout used in WCT-era titles.
 - **[pret/pokefirered](https://github.com/pret/pokefirered)** — decomp reference and **gbagfx**-aligned behavior used throughout graphics code.
+- **[shinny4/ygodm8](https://github.com/shinny4/ygodm8)** — reference for **Yu-Gi-Oh!** DM8 disassembly tooling; Channeler’s **`reshef`** / **ygodm**-style pre-Huff (and inverse on decode) sprite and palette handling for *Reshef of Destruction* aligns with the **`ygodm_encode`** approach in that project’s **gbagfx** fork.
 - **HackMew** and the THUMB assembler tooling referenced for ASM workflows.
 - Tooling built with **Cursor** (often **Composer**).

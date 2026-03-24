@@ -1,4 +1,3 @@
-organize and update readme (include Reshef decomp)
 more games
 generate toml (other option)
 testing
