@@ -2,8 +2,8 @@
 GBA graphics helpers: LZ77 decompress (pret ``lz.c``) and **pure-Python** palette/tile decode aligned with pret
 ``tools/gbagfx/gfx.c`` (``ReadGbaPalette``, 4bpp/8bpp tile layout, ``DecodeNonAffineTilemap``). PNG output uses Pillow.
 
-Palette formats: ucp4, lzp4, ucp4:HEX…, ucp8:N / lzp8:N.
-Sprite sheets: ucs/lzs (and **uct/lzt** — same layout as 4bpp/8bpp ``.4bpp`` / ``.8bpp`` in gbagfx).
+Palette formats: ucp4, lzp4, **huff4p4** / **huff8p8** (GBA Huffman), ucp4:HEX…, ucp8:N / lzp8:N.
+Sprite sheets: ucs/lzs (and **uct/lzt** — same layout as 4bpp/8bpp ``.4bpp`` / ``.8bpp`` in gbagfx); **huff4**/**huff8** mirror **lz** for Huff-compressed blobs (pret ``huff.c``).
 Bare **uct4** / **lzt8** (no ``xWxH``): LZ77 or raw blob is only tiles; tile count = len÷32 or len÷64; drawn as one row (matches gbagfx tile strip + ``-width N`` style).
 Tilemaps: ucm/lzm 4bpp or 8bpp non-affine maps (2 bytes/cell, same layout as [Tilemap Studio GBA_4BPP](https://github.com/Rangi42/tilemap-studio/blob/master/src/tilemap-format.cpp) / pret ``NonAffineTile``);
   tileset = another NamedAnchor; optional ``|palette`` — if omitted, Tools uses the tileset anchor’s ``|palette`` link.
@@ -17,6 +17,13 @@ import re
 import tempfile
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple
+
+from .gba_huff import (
+    compress_gba_huff,
+    decompress_gba_huff,
+    decompress_gba_huff_with_consumed,
+    is_gba_huff_header,
+)
 
 # Repo root: editors/common -> repo
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -177,6 +184,31 @@ def decompress_gba_lz77_with_consumed(data: bytes, max_out: int = 1 << 22) -> Tu
     if len(out) != dest_size:
         raise ValueError("LZ77 size mismatch")
     return bytes(out), src_pos
+
+
+def _compression_from_format_prefix(prefix: str) -> Tuple[bool, Optional[int]]:
+    """Map ``uc`` / ``lz`` / ``huff4`` / ``huff8`` to ``(use_lz77, huff_bpp)``. LZ and Huff are mutually exclusive."""
+    p = prefix.lower()
+    if p == "uc":
+        return False, None
+    if p == "lz":
+        return True, None
+    if p == "huff4":
+        return False, 4
+    if p == "huff8":
+        return False, 8
+    raise ValueError(f"unknown graphics compression prefix {prefix!r}")
+
+
+def _huff_bpp_matches_tile_bpp(huff_bpp: Optional[int], pixel_bpp: int) -> bool:
+    """Huff ``0x2n`` mode ``n`` must match how tile/palette bytes are packed (4bpp vs 6/8bpp)."""
+    if huff_bpp is None:
+        return True
+    if huff_bpp == 4:
+        return pixel_bpp == 4
+    if huff_bpp == 8:
+        return pixel_bpp in (6, 8)
+    return False
 
 
 def compress_gba_lz77(uncompressed: bytes, *, min_distance: int = 1) -> bytes:
@@ -520,21 +552,20 @@ def _pil_rgba_tiles_burner_quantize(
     return bytes(tile_data), pal_bytes, tw, th, ""
 
 
-def build_sprite_payload_for_rom(
-    tile_bytes: bytes,
-    spec: GraphicsAnchorSpec,
-    *,
-    lz: bool,
-) -> bytes:
-    """Wrap tile bytes with optional LZ (must match ``spec`` / anchor storage)."""
-    if lz:
+def build_sprite_payload_for_rom(tile_bytes: bytes, spec: GraphicsAnchorSpec) -> bytes:
+    """Wrap tile bytes with optional LZ77 or Huff (must match ``spec`` / anchor storage)."""
+    if spec.lz:
         return compress_gba_lz77(tile_bytes)
+    if spec.huff_bpp is not None:
+        return compress_gba_huff(tile_bytes, spec.huff_bpp)
     return tile_bytes
 
 
-def palette_payload_for_rom(pal_bytes: bytes, spec: GraphicsAnchorSpec, *, lz: bool) -> bytes:
-    if lz:
+def palette_payload_for_rom(pal_bytes: bytes, spec: GraphicsAnchorSpec) -> bytes:
+    if spec.lz:
         return compress_gba_lz77(pal_bytes)
+    if spec.huff_bpp is not None:
+        return compress_gba_huff(pal_bytes, spec.huff_bpp)
     return pal_bytes
 
 
@@ -1070,23 +1101,23 @@ def compute_graphics_rom_span(spec: GraphicsAnchorSpec, rom_len: int, base: int)
     """Conservative byte span in ROM from anchor start (for selection / hit-testing)."""
     rest = max(0, rom_len - base)
     if spec.kind == "palette":
-        if spec.lz:
+        if spec.lz or spec.huff_bpp is not None:
             return min(rest, 512 * 1024)
         if spec.bpp == 4:
             return min(rest, 32 * palette_4_chunk_count(spec))
         dig = effective_ucp8_palette_hex_suffix(spec)
         return min(rest, palette_byte_count_8_variant(dig))
     if spec.kind == "tilemap":
-        if spec.lz:
+        if spec.lz or spec.huff_bpp is not None:
             return min(rest, 2 * 1024 * 1024)
         need = spec.map_w_tiles * spec.map_h_tiles * 2
         return min(rest, max(1, need))
     if spec.kind == "sprite" and spec.width_tiles == 0 and spec.height_tiles == 0:
         # Variable-length tile strip (``lzt4|pal``): unknown uncompressed span
-        if spec.lz:
+        if spec.lz or spec.huff_bpp is not None:
             return min(rest, 2 * 1024 * 1024)
         return min(rest, 512 * 1024)
-    if spec.lz:
+    if spec.lz or spec.huff_bpp is not None:
         return min(rest, 2 * 1024 * 1024)
     return min(rest, tile_data_bytes(spec.bpp, spec.width_tiles, spec.height_tiles))
 
@@ -1096,6 +1127,8 @@ class GraphicsAnchorSpec:
     kind: str  # "palette" | "sprite" | "tilemap"
     bpp: int  # palette: 4 or 8; sprite: 4, 6, or 8; tilemap: 4 or 8
     lz: bool
+    # GBA Huffman (pret huff.c): 4 = 0x24… nybble symbols, 8 = 0x28… byte symbols. Exclusive with ``lz``.
+    huff_bpp: Optional[int] = None
     # palette 4bpp: ``ucp4:`` hex digits = hardware indices; ``None`` = plain ucp4 → one chunk for index 0
     palette_4_indices: Optional[Tuple[int, ...]] = None
     # palette 8bpp: ucp8:N / lzp8:N — one or more hex digits; byte length via palette_byte_count_8_variant
@@ -1177,11 +1210,18 @@ def measure_sprite_rom_footprint(
         _dec, consumed = decompress_gba_lz77_with_consumed(raw)
         # pret ``LZCompress`` pads the compressed stream to a multiple of 4 bytes (not read by decompress).
         return (consumed + 3) & ~3
+    if spec.huff_bpp is not None:
+        if not is_gba_huff_header(raw) or (raw[0] & 0x0F) != spec.huff_bpp:
+            raise ValueError(
+                f"Sprite data is not valid GBA Huffman (expected header 0x2{spec.huff_bpp:X})."
+            )
+        _dec, consumed = decompress_gba_huff_with_consumed(raw)
+        return (consumed + 3) & ~3
     if spec.width_tiles > 0 and spec.height_tiles > 0:
         return tile_data_bytes(spec.bpp, spec.width_tiles, spec.height_tiles)
     raise ValueError(
         "Cannot size this raw sprite slot for import (variable-length strip without WxH). "
-        "Use a fixed uct/ucs WxH format or LZ (lzt/lzs) in TOML."
+        "Use a fixed uct/ucs WxH format or LZ/Huff (lzt/lzs, huff4t/huff8t, …) in TOML."
     )
 
 
@@ -1204,6 +1244,13 @@ def measure_palette_rom_footprint(
         if len(raw) < 4 or raw[0] != 0x10:
             raise ValueError("Palette data is not valid GBA LZ77 (expected type byte 0x10).")
         _dec, consumed = decompress_gba_lz77_with_consumed(raw)
+        return (consumed + 3) & ~3
+    if spec.huff_bpp is not None:
+        if not is_gba_huff_header(raw) or (raw[0] & 0x0F) != spec.huff_bpp:
+            raise ValueError(
+                f"Palette data is not valid GBA Huffman (expected header 0x2{spec.huff_bpp:X})."
+            )
+        _dec, consumed = decompress_gba_huff_with_consumed(raw)
         return (consumed + 3) & ~3
     return palette_byte_count_for_spec(spec)
 
@@ -1228,6 +1275,13 @@ def measure_tilemap_rom_footprint(
             raise ValueError("Tilemap data is not valid GBA LZ77 (expected type byte 0x10).")
         _dec, consumed = decompress_gba_lz77_with_consumed(raw)
         return (consumed + 3) & ~3
+    if spec.huff_bpp is not None:
+        if not is_gba_huff_header(raw) or (raw[0] & 0x0F) != spec.huff_bpp:
+            raise ValueError(
+                f"Tilemap data is not valid GBA Huffman (expected header 0x2{spec.huff_bpp:X})."
+            )
+        _dec, consumed = decompress_gba_huff_with_consumed(raw)
+        return (consumed + 3) & ~3
     need = spec.map_w_tiles * spec.map_h_tiles * 2
     return max(1, need)
 
@@ -1241,6 +1295,8 @@ def build_tilemap_payload_for_rom(map_body: bytes, spec: GraphicsAnchorSpec) -> 
         raise ValueError(f"Tilemap body length {len(map_body)} != expected {need}")
     if spec.lz:
         return compress_gba_lz77(map_body)
+    if spec.huff_bpp is not None:
+        return compress_gba_huff(map_body, spec.huff_bpp)
     return map_body
 
 
@@ -1335,33 +1391,42 @@ def read_sprite_preview_palette_at_rom_offset(
     file_off: int,
     palette_bpp: int,
     *,
-    lz77: bool,
+    lz77: bool = False,
+    huff_bpp: Optional[int] = None,
 ) -> Tuple[Optional[bytes], str]:
     """
-    Palette bytes for sprite preview at ``file_off``: either **raw** RGB555 (same as
-    :func:`read_raw_sprite_palette_at_rom_offset`) or **LZ77-compressed** (GBA type ``0x10``)
-    data starting at ``file_off``, decompressed and then truncated to 32 / 128 / 512 bytes.
+    Palette bytes for sprite preview at ``file_off``: **raw** RGB555, **LZ77** (type ``0x10``), or
+    **Gba Huffman** (``0x24`` / ``0x28``), decompressed then truncated to 32 / 128 / 512 bytes.
     """
     if palette_bpp not in SPRITE_PALETTE_ROM_BYTE_COUNT:
         return None, "Palette mode must be 4, 6, or 8 bpp."
     need = SPRITE_PALETTE_ROM_BYTE_COUNT[palette_bpp]
-    if not lz77:
+    if huff_bpp is None and not lz77:
         return read_raw_sprite_palette_at_rom_offset(rom, file_off, palette_bpp)
     if file_off < 0:
         return None, "Offset must be ≥ 0."
     if file_off >= len(rom):
         return None, "Offset past end of ROM."
-    lz_blob = bytes(rom[file_off:])
-    if len(lz_blob) < 4:
-        return None, "LZ77 data too short (need at least 4 bytes for a header)."
-    try:
-        dec = decompress_gba_lz77(lz_blob)
-    except ValueError as e:
-        return None, f"LZ77 decompress failed: {e}"
+    blob = bytes(rom[file_off:])
+    if huff_bpp is not None:
+        if len(blob) < 5:
+            return None, "Huff data too short (need at least 5 bytes for a header)."
+        try:
+            dec = decompress_gba_huff(blob)
+        except ValueError as e:
+            return None, f"Huff decompress failed: {e}"
+    else:
+        if len(blob) < 4:
+            return None, "LZ77 data too short (need at least 4 bytes for a header)."
+        try:
+            dec = decompress_gba_lz77(blob)
+        except ValueError as e:
+            return None, f"LZ77 decompress failed: {e}"
     if len(dec) < need:
+        tag = "Huff" if huff_bpp is not None else "LZ77"
         return None, (
             f"Decompressed data too short for {palette_bpp}bpp palette: need {need} bytes, "
-            f"got {len(dec)} after LZ77."
+            f"got {len(dec)} after {tag}."
         )
     return bytes(dec[:need]), ""
 
@@ -1823,48 +1888,77 @@ def parse_graphics_anchor_format(fmt: str) -> Optional[GraphicsAnchorSpec]:
     s = _strip_outer_backticks(s)
 
     # 8bpp palette: one or more hex digits after colon (e.g. ucp8:3 or ucp8:0123)
-    m = re.fullmatch(r"(uc|lz)p8:([0-9a-fA-F]+)", s, re.IGNORECASE)
+    m = re.fullmatch(r"(uc|lz|huff4|huff8)p8:([0-9a-fA-F]+)", s, re.IGNORECASE)
     if m:
-        lz = m.group(1).lower() == "lz"
+        try:
+            lz, huff_bp = _compression_from_format_prefix(m.group(1))
+        except ValueError:
+            return None
+        if not _huff_bpp_matches_tile_bpp(huff_bp, 8):
+            return None
         return GraphicsAnchorSpec(
             kind="palette",
             bpp=8,
             lz=lz,
+            huff_bpp=huff_bp,
             palette_hex_digit=m.group(2).upper(),
         )
 
     # Bare ``ucp8`` / ``lzp8`` — same footprint as full 256-color master (16×32-byte chunks).
-    m = re.fullmatch(r"(uc|lz)p8", s, re.IGNORECASE)
+    m = re.fullmatch(r"(uc|lz|huff4|huff8)p8", s, re.IGNORECASE)
     if m:
-        lz = m.group(1).lower() == "lz"
+        try:
+            lz, huff_bp = _compression_from_format_prefix(m.group(1))
+        except ValueError:
+            return None
+        if not _huff_bpp_matches_tile_bpp(huff_bp, 8):
+            return None
         return GraphicsAnchorSpec(
             kind="palette",
             bpp=8,
             lz=lz,
+            huff_bpp=huff_bp,
             palette_hex_digit=ucp8_slot_hex_digits_for_chunk_count(16),
         )
 
     # 4bpp palette: optional :HEX… — each hex digit names a palette index (0–F); one 32-byte chunk per digit in ROM order
-    m = re.fullmatch(r"(uc|lz)p4(?::([0-9a-fA-F]+))?", s, re.IGNORECASE)
+    m = re.fullmatch(r"(uc|lz|huff4|huff8)p4(?::([0-9a-fA-F]+))?", s, re.IGNORECASE)
     if m:
-        lz = m.group(1).lower() == "lz"
+        try:
+            lz, huff_bp = _compression_from_format_prefix(m.group(1))
+        except ValueError:
+            return None
+        if not _huff_bpp_matches_tile_bpp(huff_bp, 4):
+            return None
         suffix = m.group(2)
         if not suffix:
-            return GraphicsAnchorSpec(kind="palette", bpp=4, lz=lz, palette_4_indices=None)
+            return GraphicsAnchorSpec(
+                kind="palette",
+                bpp=4,
+                lz=lz,
+                huff_bpp=huff_bp,
+                palette_4_indices=None,
+            )
         idxs = tuple(int(ch, 16) for ch in suffix)
         return GraphicsAnchorSpec(
             kind="palette",
             bpp=4,
             lz=lz,
+            huff_bpp=huff_bp,
             palette_4_indices=idxs,
         )
 
     # Tilemap (non-affine ``bin`` / ``bin.lz``): ucm4xWxH[|tileset.anchor[|palette.anchor]].
     # Dimensions-only (no ``|`` tail): tileset/palette come from struct fields or external decode args.
-    m = re.fullmatch(r"(uc|lz)m([468])x(\d+)x(\d+)(?:\|(.+))?", s, re.IGNORECASE)
+    m = re.fullmatch(r"(uc|lz|huff4|huff8)m([468])x(\d+)x(\d+)(?:\|(.+))?", s, re.IGNORECASE)
     if m:
-        lz = m.group(1).lower() == "lz"
+        try:
+            lz, huff_bp = _compression_from_format_prefix(m.group(1))
+        except ValueError:
+            return None
         bpp = int(m.group(2))
+        if not _huff_bpp_matches_tile_bpp(huff_bp, bpp):
+            return None
         mw, mh = int(m.group(3)), int(m.group(4))
         if mw <= 0 or mh <= 0:
             return None
@@ -1874,6 +1968,7 @@ def parse_graphics_anchor_format(fmt: str) -> Optional[GraphicsAnchorSpec]:
                 kind="tilemap",
                 bpp=bpp,
                 lz=lz,
+                huff_bpp=huff_bp,
                 map_w_tiles=mw,
                 map_h_tiles=mh,
                 tileset_anchor_name=None,
@@ -1888,16 +1983,22 @@ def parse_graphics_anchor_format(fmt: str) -> Optional[GraphicsAnchorSpec]:
             kind="tilemap",
             bpp=bpp,
             lz=lz,
+            huff_bpp=huff_bp,
             map_w_tiles=mw,
             map_h_tiles=mh,
             tileset_anchor_name=ts_name,
             palette_anchor_name=pal_name,
         )
 
-    m = re.fullmatch(r"(uc|lz)s([468])x(\d+)(?:x(\d+))?", s, re.IGNORECASE)
+    m = re.fullmatch(r"(uc|lz|huff4|huff8)s([468])x(\d+)(?:x(\d+))?", s, re.IGNORECASE)
     if m:
-        lz = m.group(1).lower() == "lz"
+        try:
+            lz, huff_bp = _compression_from_format_prefix(m.group(1))
+        except ValueError:
+            return None
         bpp = int(m.group(2))
+        if not _huff_bpp_matches_tile_bpp(huff_bp, bpp):
+            return None
         w = int(m.group(3))
         h = int(m.group(4)) if m.group(4) is not None else 1
         if w <= 0 or h <= 0:
@@ -1906,6 +2007,7 @@ def parse_graphics_anchor_format(fmt: str) -> Optional[GraphicsAnchorSpec]:
             kind="sprite",
             bpp=bpp,
             lz=lz,
+            huff_bpp=huff_bp,
             width_tiles=w,
             height_tiles=h,
         )
@@ -1926,11 +2028,16 @@ def parse_tilemap_dimension_spec(inner: str) -> Optional[GraphicsAnchorSpec]:
     """
     s = _strip_outer_backticks(inner.strip())
     dim_part = s.split("|", 1)[0].strip()
-    m = re.fullmatch(r"(uc|lz)m([468])x(\d+)x(\d+)", dim_part, re.IGNORECASE)
+    m = re.fullmatch(r"(uc|lz|huff4|huff8)m([468])x(\d+)x(\d+)", dim_part, re.IGNORECASE)
     if not m:
         return None
-    lz = m.group(1).lower() == "lz"
+    try:
+        lz, huff_bp = _compression_from_format_prefix(m.group(1))
+    except ValueError:
+        return None
     bpp = int(m.group(2))
+    if not _huff_bpp_matches_tile_bpp(huff_bp, bpp):
+        return None
     mw, mh = int(m.group(3)), int(m.group(4))
     if mw <= 0 or mh <= 0:
         return None
@@ -1938,6 +2045,7 @@ def parse_tilemap_dimension_spec(inner: str) -> Optional[GraphicsAnchorSpec]:
         kind="tilemap",
         bpp=bpp,
         lz=lz,
+        huff_bpp=huff_bp,
         map_w_tiles=mw,
         map_h_tiles=mh,
         tileset_anchor_name=None,
@@ -1948,12 +2056,18 @@ def parse_tilemap_dimension_spec(inner: str) -> Optional[GraphicsAnchorSpec]:
 _GRAPHICS_TABLE_COUNT_REF_RE = re.compile(r"^[A-Za-z_][\w.+-]*$")
 
 
-def parse_graphics_table_format(fmt: str) -> Optional[Tuple[GraphicsAnchorSpec, str]]:
+def parse_graphics_table_format(
+    fmt: str,
+) -> Optional[Tuple[GraphicsAnchorSpec, str, bool]]:
     """
     Table of identical graphics blobs: ``[rowFormat]countRef``.
 
     ``rowFormat`` parses as a standalone graphics spec (palette, sprite/tile sheet, or tilemap, with optional ``|…`` tails).
     ``countRef`` is resolved in the hex editor (PCS table name, ``[[List]]`` name, numeric count, etc.).
+
+    Returns ``(spec, countRef, row_is_pointer_column)``. The third flag is ``True`` when ``rowFormat`` uses struct
+    shorthand like ``palette<`ucp8:0123`>`` (each row is a **pointer** to data decoded with that spec). Those tables
+    are **not** contiguous stride rows; the hex editor registers them as **struct** NamedAnchors instead.
 
     Examples::
 
@@ -1984,29 +2098,56 @@ def parse_graphics_table_format(fmt: str) -> Optional[Tuple[GraphicsAnchorSpec, 
         return None
     if not _GRAPHICS_TABLE_COUNT_REF_RE.match(suffix):
         return None
+    row_is_pointer_column = False
     row_spec = parse_graphics_anchor_format(inner)
     if row_spec is None:
+        # Row may mirror struct shorthand: ``pal<`ucp8:0123`>``, ``card<`huff8s8x10x10|graphics…`>``, etc.
+        sm = re.match(r"^(\w+)<`([^`]*)`>\s*$", inner.strip())
+        if sm:
+            row_spec = parse_graphics_anchor_format(sm.group(2).strip())
+            row_is_pointer_column = bool(row_spec is not None)
+    if row_spec is None:
         return None
-    return (row_spec, suffix)
+    return (row_spec, suffix, row_is_pointer_column)
 
 
 def graphics_row_byte_size(spec: GraphicsAnchorSpec) -> int:
     """Uncompressed byte size of one row in a graphics table (palette blob or tile blob)."""
     if spec.kind == "palette":
-        if spec.lz:
-            raise ValueError("LZ palette rows in graphics tables are not supported")
+        if spec.lz or spec.huff_bpp is not None:
+            raise ValueError("LZ/Huff palette rows in graphics tables are not supported")
         if spec.bpp == 4:
             return 32 * palette_4_chunk_count(spec)
         return palette_byte_count_8_variant(effective_ucp8_palette_hex_suffix(spec))
     if spec.kind == "sprite":
-        if spec.lz:
-            raise ValueError("LZ sprite rows in graphics tables are not supported")
+        if spec.lz or spec.huff_bpp is not None:
+            raise ValueError("LZ/Huff sprite rows in graphics tables are not supported")
         if spec.width_tiles == 0 or spec.height_tiles == 0:
             raise ValueError("Variable-length tile strips (uct4/lzt4 without WxH) cannot be graphics table rows")
         return tile_data_bytes(spec.bpp, spec.width_tiles, spec.height_tiles)
     if spec.kind == "tilemap":
-        if spec.lz:
-            raise ValueError("LZ tilemap rows in graphics tables are not supported")
+        if spec.lz or spec.huff_bpp is not None:
+            raise ValueError("LZ/Huff tilemap rows in graphics tables are not supported")
+        return spec.map_w_tiles * spec.map_h_tiles * 2
+    raise ValueError(f"unknown graphics kind {spec.kind!r}")
+
+
+def graphics_table_row_logical_byte_size(spec: GraphicsAnchorSpec) -> int:
+    """
+    Uncompressed size of one logical row in a graphics table.
+
+    For **LZ/Huff** row specs, ROM storage is still compressed per row (variable length), but this is
+    the byte length after decompress — used for UI caps and for **uncompressed** table layouts.
+    """
+    if spec.kind == "palette":
+        if spec.bpp == 4:
+            return 32 * palette_4_chunk_count(spec)
+        return palette_byte_count_8_variant(effective_ucp8_palette_hex_suffix(spec))
+    if spec.kind == "sprite":
+        if spec.width_tiles == 0 or spec.height_tiles == 0:
+            raise ValueError("Variable-length tile strips cannot be graphics table rows")
+        return tile_data_bytes(spec.bpp, spec.width_tiles, spec.height_tiles)
+    if spec.kind == "tilemap":
         return spec.map_w_tiles * spec.map_h_tiles * 2
     raise ValueError(f"unknown graphics kind {spec.kind!r}")
 
@@ -2026,25 +2167,36 @@ def parse_sprite_field_spec(inner: str) -> Tuple[Optional[GraphicsAnchorSpec], O
         spec_part = inner
 
     # Bare uct4 / uct6 / lzt8 — whole blob is tiles; width = tile_count, height = 1 (gbagfx .4bpp.lz / .8bpp.lz strip)
-    m = re.fullmatch(r"(uc|lz)t([468])$", spec_part, re.IGNORECASE)
+    m = re.fullmatch(r"(uc|lz|huff4|huff8)t([468])$", spec_part, re.IGNORECASE)
     if m:
-        lz = m.group(1).lower() == "lz"
+        try:
+            lz, huff_bp = _compression_from_format_prefix(m.group(1))
+        except ValueError:
+            return None, pal_name
         bpp = int(m.group(2))
+        if not _huff_bpp_matches_tile_bpp(huff_bp, bpp):
+            return None, pal_name
         return (
             GraphicsAnchorSpec(
                 kind="sprite",
                 bpp=bpp,
                 lz=lz,
+                huff_bpp=huff_bp,
                 width_tiles=0,
                 height_tiles=0,
             ),
             pal_name,
         )
 
-    m = re.fullmatch(r"(uc|lz)t([468])x(\d+)(?:x(\d+))?", spec_part, re.IGNORECASE)
+    m = re.fullmatch(r"(uc|lz|huff4|huff8)t([468])x(\d+)(?:x(\d+))?", spec_part, re.IGNORECASE)
     if m:
-        lz = m.group(1).lower() == "lz"
+        try:
+            lz, huff_bp = _compression_from_format_prefix(m.group(1))
+        except ValueError:
+            return None, pal_name
         bpp = int(m.group(2))
+        if not _huff_bpp_matches_tile_bpp(huff_bp, bpp):
+            return None, pal_name
         w = int(m.group(3))
         h = int(m.group(4)) if m.group(4) is not None else 1
         if w <= 0 or h <= 0:
@@ -2054,17 +2206,23 @@ def parse_sprite_field_spec(inner: str) -> Tuple[Optional[GraphicsAnchorSpec], O
                 kind="sprite",
                 bpp=bpp,
                 lz=lz,
+                huff_bpp=huff_bp,
                 width_tiles=w,
                 height_tiles=h,
             ),
             pal_name,
         )
 
-    m = re.fullmatch(r"(uc|lz)s([468])x(\d+)(?:x(\d+))?", spec_part, re.IGNORECASE)
+    m = re.fullmatch(r"(uc|lz|huff4|huff8)s([468])x(\d+)(?:x(\d+))?", spec_part, re.IGNORECASE)
     if not m:
         return None, pal_name
-    lz = m.group(1).lower() == "lz"
+    try:
+        lz, huff_bp = _compression_from_format_prefix(m.group(1))
+    except ValueError:
+        return None, pal_name
     bpp = int(m.group(2))
+    if not _huff_bpp_matches_tile_bpp(huff_bp, bpp):
+        return None, pal_name
     w = int(m.group(3))
     h = int(m.group(4)) if m.group(4) is not None else 1
     if w <= 0 or h <= 0:
@@ -2074,6 +2232,7 @@ def parse_sprite_field_spec(inner: str) -> Tuple[Optional[GraphicsAnchorSpec], O
             kind="sprite",
             bpp=bpp,
             lz=lz,
+            huff_bpp=huff_bp,
             width_tiles=w,
             height_tiles=h,
         ),
@@ -2099,13 +2258,13 @@ def rewrite_standalone_sprite_format_dimensions(
 
     def rewrite_spec_token(spec_part: str) -> Optional[str]:
         sp = spec_part.strip()
-        m = re.fullmatch(r"(?i)(uc|lz)s([468])x(\d+)(?:x(\d+))?", sp)
+        m = re.fullmatch(r"(?i)(uc|lz|huff4|huff8)s([468])x(\d+)(?:x(\d+))?", sp)
         if m:
             return f"{m.group(1).lower()}s{m.group(2)}x{tw}x{th}"
-        m = re.fullmatch(r"(?i)(uc|lz)t([468])x(\d+)(?:x(\d+))?", sp)
+        m = re.fullmatch(r"(?i)(uc|lz|huff4|huff8)t([468])x(\d+)(?:x(\d+))?", sp)
         if m:
             return f"{m.group(1).lower()}t{m.group(2)}x{tw}x{th}"
-        m = re.fullmatch(r"(?i)(uc|lz)t([468])", sp)
+        m = re.fullmatch(r"(?i)(uc|lz|huff4|huff8)t([468])", sp)
         if m:
             return f"{m.group(1).lower()}t{m.group(2)}x{tw}x{th}"
         return None
@@ -2186,7 +2345,7 @@ def rewrite_standalone_tilemap_format_dimensions(
         else:
             spec_part = inner_st.strip()
             rest = ""
-        m = re.fullmatch(r"(?i)(uc|lz)m([468])x(\d+)x(\d+)", spec_part)
+        m = re.fullmatch(r"(?i)(uc|lz|huff4|huff8)m([468])x(\d+)x(\d+)", spec_part)
         if not m:
             return None
         new_sp = f"{m.group(1).lower()}m{m.group(2)}x{tw}x{th}"
@@ -2248,6 +2407,8 @@ def extract_palette_bytes(spec: GraphicsAnchorSpec, raw: bytes) -> bytes:
     data = raw
     if spec.lz:
         data = decompress_gba_lz77(raw)
+    elif spec.huff_bpp is not None:
+        data = decompress_gba_huff(raw)
     if spec.bpp == 4:
         need = 32 * palette_4_chunk_count(spec)
     else:
@@ -2366,6 +2527,8 @@ def extract_sprite_bytes(spec: GraphicsAnchorSpec, raw: bytes) -> bytes:
         per = 32 if spec.bpp == 4 else 64
         if spec.lz:
             data = decompress_gba_lz77(raw)
+        elif spec.huff_bpp is not None:
+            data = decompress_gba_huff(raw)
         else:
             data = raw
         if len(data) < per:
@@ -2377,6 +2540,8 @@ def extract_sprite_bytes(spec: GraphicsAnchorSpec, raw: bytes) -> bytes:
     need = tile_data_bytes(spec.bpp, spec.width_tiles, spec.height_tiles)
     if spec.lz:
         data = decompress_gba_lz77(raw)
+    elif spec.huff_bpp is not None:
+        data = decompress_gba_huff(raw)
     else:
         data = raw
     if len(data) < need:
@@ -2390,6 +2555,8 @@ def extract_tilemap_bytes(spec: GraphicsAnchorSpec, raw: bytes) -> bytes:
     need = spec.map_w_tiles * spec.map_h_tiles * 2
     if spec.lz:
         data = decompress_gba_lz77(raw)
+    elif spec.huff_bpp is not None:
+        data = decompress_gba_huff(raw)
     else:
         data = raw
     if len(data) < need:

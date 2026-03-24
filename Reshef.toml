@@ -9,9 +9,19 @@ Address = 0x0C8020
 Format = '''[card:cardnumbers spawnrate:]795'''
 
 [[NamedAnchors]]
+Name = '''graphics.cards.art'''
+Address = 0xE11EB8
+Format = '''[card<`huff8s8x10x10|graphics.cards.palettes`>]cardnumbers'''
+
+[[NamedAnchors]]
+Name = '''graphics.cards.palettes'''
+Address = 0xE12B3C
+Format = '''[palette<`ucp8:0123`>]cardnumbers'''
+
+[[NamedAnchors]]
 Name = '''data.cards.duelists'''
 Address = 0x0BCA00
-Format = '''[id: field: deck<> goodDrops<> shopCards<> badDrops<> playerLP: lifePoints: capacityYield:: minDomino: maxDomino: unk20. padding:. duelMusic: winMusic: lossMusic: unk2A:]duelists'''
+Format = '''[id: field: deck<[card:cardnumbers]/40> goodDrops<[card:cardnumbers chance:]!0000> shopCards<[card:cardnumbers chance:]!0000> badDrops<[card:cardnumbers chance:]!0000> playerLP: lifePoints: capacityYield:: minDomino: maxDomino: unk20. padding:. duelMusic: winMusic: lossMusic: unk2A:]duelists'''
 
 [[NamedAnchors]]
 Name = '''data.drops.0Dummynodrops'''

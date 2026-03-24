@@ -1,4 +1,14 @@
 [[NamedAnchors]]
+Name = '''graphics.cards.sprites'''
+Address = 0x510640
+Format = '''[ucs6x10x10|graphics.cards.palettes]cardgraphicsindexes'''
+
+[[NamedAnchors]]
+Name = '''graphics.cards.palettes'''
+Address = 0x4C76C0
+Format = '''[`ucp8:0123`]cardgraphicsindexes'''
+
+[[NamedAnchors]]
 Name = "data.text.event"
 Address = 0x1622500
 Format = "[index1: index2:]9908"

@@ -6,19 +6,13 @@ Format = '''[`ucs6x9x10|graphics.cards.palettes`]cardnumbers'''
 [[NamedAnchors]]
 Name = '''graphics.cards.palettes'''
 Address = 0x09A34C
-Format = '''[ucp8:0123]cardnumbers'''
-DefaultHash = '''83AD53AE'''
+Format = '''[`ucp8:0123`]cardnumbers'''
 
 [[NamedAnchors]]
 Name = '''data.cards.stats'''
 Address = 0x663A00
 Format = '''[cardstats::|t|defn::::.|atk::::.|type:types|race::.races|stars::|attribute:.attributes]cardnumbers'''
-DefaultHash = '''C1044DB6'''
 
-#################################
-#################################
-#################################
-#################################
 [[List]]
 Name = '''types'''
 DefaultHash = '''FCD131C5'''

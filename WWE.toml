@@ -6,7 +6,7 @@ Format = '''[`ucs6x9x10|graphics.cards.palettes`]cardnumbers'''
 [[NamedAnchors]]
 Name = '''graphics.cards.palettes'''
 Address = 0x810C04
-Format = '''[ucp8:0123]cardnumbers'''
+Format = '''[`ucp8:0123`]cardnumbers'''
 
 [[NamedAnchors]]
 Name = '''data.cards.stats'''

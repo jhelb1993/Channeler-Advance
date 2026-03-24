@@ -1,3 +1,7 @@
+more games
+generate toml (other option)
+testing
+fix finnicky behaviors
 triple backticks instead of quotes
 toml writing extra bug
 .hma scripts
@@ -6,7 +10,6 @@ python scripting
 split hex_editor.py up into separate files
 get rid of second scrollbar (tools)
 undo (ctrl + z)
-generate toml (other option)
 trainer team editing
 overworld sprite editing
 egg moves

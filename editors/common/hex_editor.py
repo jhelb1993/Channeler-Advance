@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import zlib
+from dataclasses import replace
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
@@ -37,6 +38,7 @@ from editors.common.gba_graphics import (
     extract_sprite_bytes,
     get_palette_4_slot_bytes,
     graphics_row_byte_size,
+    graphics_table_row_logical_byte_size,
     max_sprite_height_tiles,
     measure_palette_rom_footprint,
     measure_sprite_rom_footprint,
@@ -572,16 +574,32 @@ HEX_DIGITS = "0123456789ABCDEFabcdef"
 _GOTO_ALLOWED_CHARS = set(string.ascii_letters + string.digits + "._")
 
 
-def _toml_sprite_format_token(lz: bool, bpp: int, w: int, h: int) -> str:
-    p = "lz" if lz else "uc"
+def _toml_compression_prefix(lz: bool, huff_bpp: Optional[int]) -> str:
+    if huff_bpp == 4:
+        return "huff4"
+    if huff_bpp == 8:
+        return "huff8"
+    return "lz" if lz else "uc"
+
+
+def _toml_sprite_format_token(
+    lz: bool, bpp: int, w: int, h: int, *, huff_bpp: Optional[int] = None
+) -> str:
+    p = _toml_compression_prefix(lz, huff_bpp)
     return f"`{p}t{bpp}x{w}x{h}`"
 
 
 def _toml_sprite_format_token_with_palette(
-    lz: bool, bpp: int, w: int, h: int, palette_anchor: str
+    lz: bool,
+    bpp: int,
+    w: int,
+    h: int,
+    palette_anchor: str,
+    *,
+    huff_bpp: Optional[int] = None,
 ) -> str:
     """Sprite Format with optional ``|paletteNamedAnchor`` tail (same as Tools / vanilla TOML)."""
-    p = "lz" if lz else "uc"
+    p = _toml_compression_prefix(lz, huff_bpp)
     inner = f"{p}t{bpp}x{w}x{h}"
     pa = normalize_named_anchor_lookup_key(palette_anchor) if (palette_anchor or "").strip() else ""
     if pa:
@@ -589,8 +607,10 @@ def _toml_sprite_format_token_with_palette(
     return f"`{inner}`"
 
 
-def _toml_tilemap_format_token(lz: bool, bpp: int, mw: int, mh: int, tileset_name: str) -> str:
-    p = "lz" if lz else "uc"
+def _toml_tilemap_format_token(
+    lz: bool, bpp: int, mw: int, mh: int, tileset_name: str, *, huff_bpp: Optional[int] = None
+) -> str:
+    p = _toml_compression_prefix(lz, huff_bpp)
     ts = tileset_name.strip()
     if ts:
         return f"`{p}m{bpp}x{mw}x{mh}|{ts}`"
@@ -619,10 +639,17 @@ def _graphics_anchor_combo_display(info: Dict[str, Any]) -> str:
     spec = info.get("spec")
     if spec is not None and getattr(spec, "kind", None) == "palette":
         if ref:
+            if info.get("graphics_table_pointer_column"):
+                return (
+                    f"{name}{_GFX_COMBO_DISPLAY_SEP}"
+                    f"{n} pointers to palettes (decode ucp8… at *ptr), index from [[List]] {ref}"
+                )
             return (
                 f"{name}{_GFX_COMBO_DISPLAY_SEP}"
                 f"{n} palette rows (each [ucp8…] blob), index from [[List]] {ref}"
             )
+        if info.get("graphics_table_pointer_column"):
+            return f"{name}{_GFX_COMBO_DISPLAY_SEP}{n} pointers to palettes (ucp8…)"
         return f"{name}{_GFX_COMBO_DISPLAY_SEP}palette table ({n} rows)"
     if ref:
         return f"{name}{_GFX_COMBO_DISPLAY_SEP}{n} rows via {ref}"
@@ -635,6 +662,51 @@ def _graphics_combo_entry_to_anchor_name(entry: str) -> str:
     if _GFX_COMBO_DISPLAY_SEP in t:
         return t.split(_GFX_COMBO_DISPLAY_SEP, 1)[0].strip()
     return t
+
+
+def _graphics_table_blob_file_off(
+    info: Dict[str, Any], table_row_idx: int, rom: Optional[bytes] = None
+) -> Tuple[int, str]:
+    """ROM file offset for one row of a graphics table. LZ/Huff rows have no fixed stride in ROM.
+    Pointer palette tables (``palette<`ucp8…`>`` rows) resolve the GBA .word at ``base + row*4``."""
+    base = int(info["base_off"])
+    if not info.get("graphics_table"):
+        return base, ""
+    if info.get("graphics_table_pointer_column"):
+        if rom is None:
+            return base, "Pointer palette table: ROM data required to resolve row target.\n"
+        ptr_slot = base + table_row_idx * 4
+        if ptr_slot < 0 or ptr_slot + 4 > len(rom):
+            return base, (
+                f"Pointer table row {table_row_idx}: slot file offset 0x{ptr_slot:X} out of ROM range.\n"
+            )
+        tgt = resolve_gba_pointer(rom, ptr_slot)
+        if tgt is None:
+            w = int.from_bytes(rom[ptr_slot : ptr_slot + 4], "little")
+            return base, (
+                f"Pointer table row {table_row_idx}: 0x{w:08X} at file 0x{ptr_slot:X} "
+                "is not a valid ROM pointer (0x08…… / 0x09……).\n"
+            )
+        return tgt, ""
+    if info.get("graphics_table_compressed_rows"):
+        if table_row_idx != 0:
+            return base, (
+                f"LZ/Huff graphics table: row {table_row_idx} is not placed at a fixed stride; "
+                "decoding from the table base Address (same as row 0).\n"
+            )
+        return base, ""
+    return base + table_row_idx * int(info["row_byte_size"]), ""
+
+
+def _graphics_palette_table_row_stride_for_measure(ga: Optional[Dict[str, Any]]) -> Optional[int]:
+    """For :func:`measure_palette_rom_footprint`: ``None`` means read compressed length from the stream."""
+    if not ga or not ga.get("graphics_table"):
+        return None
+    if ga.get("graphics_table_compressed_rows"):
+        return None
+    if ga.get("graphics_table_pointer_column"):
+        return None
+    return int(ga["row_byte_size"])
 
 
 def _sign_extend_uint(v: int, bits: int) -> int:
@@ -2123,11 +2195,11 @@ class _StaticRomOffsetDialog:
 
 
 class _SpriteImportOptionsDialog:
-    """Manual static sprite/tileset import: bpp, palette size, tile grid, LZ, TOML update."""
+    """Manual static sprite/tileset import: bpp, palette size, tile grid, compression, TOML update."""
 
     def __init__(self, parent: tk.Misc, png_path: str, *, title: str = "Import sprite - options") -> None:
-        # bpp, lz, w, h, pal_colors, toml_sprite, toml_palette, write_palette_rom, update_toml, rom_colors_8bpp_clip
-        self.result: Optional[Tuple[int, bool, int, int, int, str, str, bool, bool, Optional[int]]] = None
+        # bpp, compress_mode, w, h, pal_colors, toml_sprite, toml_palette, write_palette_rom, update_toml, rom_colors_8bpp_clip
+        self.result: Optional[Tuple[int, str, int, int, int, str, str, bool, bool, Optional[int]]] = None
         self._dlg = tk.Toplevel(parent)
         self._dlg.title(title)
         self._dlg.transient(parent)
@@ -2184,40 +2256,45 @@ class _SpriteImportOptionsDialog:
         ttk.Label(whf, text="Height:").pack(side=tk.LEFT)
         self._ht = tk.StringVar(value="1")
         ttk.Entry(whf, textvariable=self._ht, width=6).pack(side=tk.LEFT, padx=(4, 0))
-        self._lz = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        self._compress = tk.StringVar(value="raw")
+        ttk.Label(f, text="ROM compression (tiles + palette):").grid(
+            row=7, column=0, columnspan=2, sticky="w", pady=(8, 0)
+        )
+        ttk.Combobox(
             f,
-            text="Compress tiles (and palette) with LZ77 (0x10)",
-            variable=self._lz,
-        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+            textvariable=self._compress,
+            values=("raw", "lz77", "huff4", "huff8"),
+            width=12,
+            state="readonly",
+        ).grid(row=8, column=0, columnspan=2, sticky="w")
         self._write_pal = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             f,
             text="Write quantized GBA palette to ROM (separate offset after tiles)",
             variable=self._write_pal,
-        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Label(
             f,
             text="Sprite NamedAnchor (TOML) - may be new; row is added if missing:",
             wraplength=420,
-        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=10, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self._toml_name = tk.StringVar(value="")
-        ttk.Entry(f, textvariable=self._toml_name, width=48).grid(row=10, column=0, columnspan=2, sticky="ew")
+        ttk.Entry(f, textvariable=self._toml_name, width=48).grid(row=11, column=0, columnspan=2, sticky="ew")
         ttk.Label(
             f,
             text="Palette NamedAnchor (optional - sprite Format gets |palette; row added if missing):",
             wraplength=420,
-        ).grid(row=11, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=12, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self._toml_pal_name = tk.StringVar(value="")
-        ttk.Entry(f, textvariable=self._toml_pal_name, width=48).grid(row=12, column=0, columnspan=2, sticky="ew")
+        ttk.Entry(f, textvariable=self._toml_pal_name, width=48).grid(row=13, column=0, columnspan=2, sticky="ew")
         self._upd_toml = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             f,
             text="Update Address + Format in TOML (needs tomli-w)",
             variable=self._upd_toml,
-        ).grid(row=13, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ).grid(row=14, column=0, columnspan=2, sticky="w", pady=(6, 0))
         btnf = ttk.Frame(f)
-        btnf.grid(row=14, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btnf.grid(row=15, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
         ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
         self._dlg.bind("<Escape>", lambda e: self._on_cancel())
@@ -2257,7 +2334,15 @@ class _SpriteImportOptionsDialog:
 
     def _on_ok(self) -> None:
         bpp = int(self._bpp.get())
-        lz = bool(self._lz.get())
+        comp = str(self._compress.get()).strip().lower()
+        if comp not in ("raw", "lz77", "huff4", "huff8"):
+            comp = "raw"
+        if comp == "huff4" and bpp != 4:
+            messagebox.showwarning("Import", "Huff 4-bit compression applies to 4bpp tiles only.")
+            return
+        if comp == "huff8" and bpp not in (6, 8):
+            messagebox.showwarning("Import", "Huff 8-bit compression applies to 6bpp/8bpp tiles only.")
+            return
         try:
             wt = int(self._wt.get().strip(), 0)
             ht = int(self._ht.get().strip(), 0)
@@ -2297,7 +2382,7 @@ class _SpriteImportOptionsDialog:
         if bool(self._upd_toml.get()) and not name:
             messagebox.showwarning("Import", "Enter a sprite NamedAnchor Name, or disable TOML update.")
             return
-        self.result = (bpp, lz, wt, ht, ncolors, name, pal_nm, write_pal, bool(self._upd_toml.get()), rom_clip_8)
+        self.result = (bpp, comp, wt, ht, ncolors, name, pal_nm, write_pal, bool(self._upd_toml.get()), rom_clip_8)
         self._dlg.destroy()
 
     def _on_cancel(self) -> None:
@@ -2305,10 +2390,10 @@ class _SpriteImportOptionsDialog:
 
 
 class _PaletteImportOptionsDialog:
-    """4bpp / 8bpp, optional 8bpp color count (multiple of 16), optional LZ."""
+    """4bpp / 8bpp, optional 8bpp color count (multiple of 16), optional compression."""
 
     def __init__(self, parent: tk.Misc, *, is_png: bool) -> None:
-        self.result: Optional[Tuple[int, bool, int]] = None  # bpp, lz, colors_8bpp (meaningful if bpp==8)
+        self.result: Optional[Tuple[int, str, int]] = None  # bpp, compress_mode, colors_8bpp (meaningful if bpp==8)
         self._is_png = is_png
         self._dlg = tk.Toplevel(parent)
         self._dlg.title("Import palette - options")
@@ -2386,14 +2471,17 @@ class _PaletteImportOptionsDialog:
         _upd_bytes()
         _sync_bpp()
 
-        self._lz = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        self._compress = tk.StringVar(value="raw")
+        ttk.Label(f, text="ROM compression:").grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Combobox(
             f,
-            text="Compress with LZ77 (0x10)",
-            variable=self._lz,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+            textvariable=self._compress,
+            values=("raw", "lz77", "huff4", "huff8"),
+            width=12,
+            state="readonly",
+        ).grid(row=4, column=0, columnspan=2, sticky="w")
         btnf = ttk.Frame(f)
-        btnf.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btnf.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btnf, text="OK", command=self._on_ok).pack(side=tk.LEFT, padx=2)
         ttk.Button(btnf, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
         self._dlg.bind("<Escape>", lambda e: self._on_cancel())
@@ -2401,7 +2489,15 @@ class _PaletteImportOptionsDialog:
 
     def _on_ok(self) -> None:
         bpp = int(self._bpp.get())
-        lz = bool(self._lz.get())
+        comp = str(self._compress.get()).strip().lower()
+        if comp not in ("raw", "lz77", "huff4", "huff8"):
+            comp = "raw"
+        if comp == "huff4" and bpp != 4:
+            messagebox.showwarning("Import palette", "Huff 4-bit applies to 4bpp palettes only.")
+            return
+        if comp == "huff8" and bpp != 8:
+            messagebox.showwarning("Import palette", "Huff 8-bit applies to 8bpp palettes only.")
+            return
         try:
             n_raw = int(self._colors_8.get())
         except (ValueError, tk.TclError):
@@ -2414,7 +2510,7 @@ class _PaletteImportOptionsDialog:
                 return
         else:
             n8 = 16
-        self.result = (bpp, lz, n8)
+        self.result = (bpp, comp, n8)
         self._dlg.destroy()
 
     def _on_cancel(self) -> None:
@@ -3156,8 +3252,8 @@ class GraphicsPreviewFrame(ttk.Frame):
         self._gfx_filter_job: Optional[str] = None
         self._gfx_sprite_anchor_name: Optional[str] = None
         self._gfx_decode_anchor_name: Optional[str] = None
-        # (file_off, palette_bpp 4|6|8, lz77: read palette from LZ-compressed blob at offset)
-        self._sprite_palette_override: Optional[Tuple[int, int, bool]] = None
+        # (file_off, palette_bpp 4|6|8, storage: raw|lz77|huff4|huff8)
+        self._sprite_palette_override: Optional[Tuple[int, int, str]] = None
         # If set, prepended once to the next graphics decode log (import traces must survive _decode_selected).
         self._gfx_decode_log_prefix: str = ""
         # Tilemap PNG import: default preserves exact RGBs from the image; enable to MedianCut-quantize.
@@ -3297,8 +3393,8 @@ class GraphicsPreviewFrame(ttk.Frame):
         ttk.Combobox(
             self._sprite_pal_override_row,
             textvariable=self._sprite_pal_storage_var,
-            values=("raw", "lz77"),
-            width=6,
+            values=("raw", "lz77", "huff4", "huff8"),
+            width=8,
             state="readonly",
             font=("Consolas", 8),
         ).grid(row=2, column=1, sticky="w", padx=(0, 8), pady=(2, 0))
@@ -3843,9 +3939,9 @@ class GraphicsPreviewFrame(ttk.Frame):
         else:
             self._table_row_label.configure(text="")
 
-        blob_off = info["base_off"]
-        if info.get("graphics_table"):
-            blob_off = info["base_off"] + tbl_idx * int(info["row_byte_size"])
+        blob_off, tbl_stride_warn = _graphics_table_blob_file_off(info, tbl_idx, bytes(rom))
+        if tbl_stride_warn:
+            tbl_warn = (tbl_warn or "") + tbl_stride_warn
 
         if spec.kind == "sprite":
             self._sprite_layout_row.grid()
@@ -3959,9 +4055,9 @@ class GraphicsPreviewFrame(ttk.Frame):
                 self._clear_image("(tilemap needs valid tileset anchor)")
                 return
             ext_ts_spec = ga_ts["spec"]
-            ext_ts_off = int(ga_ts["base_off"])
-            if ga_ts.get("graphics_table"):
-                ext_ts_off = ga_ts["base_off"] + tbl_idx * int(ga_ts["row_byte_size"])
+            ext_ts_off, ts_stride_warn = _graphics_table_blob_file_off(ga_ts, tbl_idx, bytes(rom))
+            if ts_stride_warn:
+                log_pre = (log_pre or "") + ts_stride_warn
             pan = getattr(spec, "palette_anchor_name", None)
             if not pan:
                 pan = getattr(ga_ts["spec"], "palette_anchor_name", None)
@@ -3994,20 +4090,35 @@ class GraphicsPreviewFrame(ttk.Frame):
 
         override_pal_bytes: Optional[bytes] = None
         if spec.kind == "sprite" and self._sprite_palette_override is not None:
-            ov_off, ov_bpp, ov_lz = self._sprite_palette_override
+            ov_off, ov_bpp, ov_st = self._sprite_palette_override
             if ov_bpp != spec.bpp:
                 logs.append(
                     f"Preview palette override ignored: loaded {ov_bpp}bpp data but this sprite is {spec.bpp}bpp.\n"
                 )
             else:
-                raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
-                    bytes(rom), ov_off, ov_bpp, lz77=ov_lz
-                )
+                if ov_st == "raw":
+                    raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
+                        bytes(rom), ov_off, ov_bpp, lz77=False
+                    )
+                elif ov_st == "lz77":
+                    raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
+                        bytes(rom), ov_off, ov_bpp, lz77=True
+                    )
+                elif ov_st == "huff4":
+                    raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
+                        bytes(rom), ov_off, ov_bpp, huff_bpp=4
+                    )
+                else:
+                    raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
+                        bytes(rom), ov_off, ov_bpp, huff_bpp=8
+                    )
                 if raw_ov is None:
                     logs.append(f"Preview palette override: {oerr}\n")
                 else:
                     override_pal_bytes = raw_ov
-                    src = "LZ77->" if ov_lz else "raw "
+                    src = {"raw": "raw ", "lz77": "LZ77->", "huff4": "Huff4->", "huff8": "Huff8->"}.get(
+                        ov_st, "raw "
+                    )
                     logs.append(
                         f"Preview palette: {src}file offset 0x{ov_off:X} ({ov_bpp}bpp, {len(raw_ov)} bytes); "
                         f"linked |palette ignored for preview.\n"
@@ -4075,13 +4186,27 @@ class GraphicsPreviewFrame(ttk.Frame):
                 f"(4->16 colors, 6->64, 8->256).",
             )
             return
-        use_lz = str(self._sprite_pal_storage_var.get()).strip().lower() == "lz77"
-        raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(rom), off, pb, lz77=use_lz)
+        stor = str(self._sprite_pal_storage_var.get()).strip().lower()
+        if stor not in ("raw", "lz77", "huff4", "huff8"):
+            stor = "raw"
+        if stor == "raw":
+            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(rom), off, pb, lz77=False)
+        elif stor == "lz77":
+            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(rom), off, pb, lz77=True)
+        elif stor == "huff4":
+            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(rom), off, pb, huff_bpp=4)
+        else:
+            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(rom), off, pb, huff_bpp=8)
         if raw is None:
             messagebox.showerror("Preview palette", rerr or "Could not read palette bytes.")
             return
-        self._sprite_palette_override = (off, pb, use_lz)
-        src = "LZ77 at offset" if use_lz else "Raw bytes at"
+        self._sprite_palette_override = (off, pb, stor)
+        src = {
+            "raw": "Raw bytes at",
+            "lz77": "LZ77 at offset",
+            "huff4": "Huff (4-bit) at",
+            "huff8": "Huff (8-bit) at",
+        }[stor]
         loc = (
             f"{src} 0x{off:X}"
             if direct_off is not None
@@ -4212,11 +4337,20 @@ class GraphicsPreviewFrame(ttk.Frame):
             messagebox.showinfo("Import graphic", f"{spec.bpp}bpp sprite import is not supported.")
             return
         tbl_idx, _eff, _ = self._effective_table_state(info)
-        blob_off = int(info["base_off"])
-        if info.get("graphics_table"):
-            blob_off = int(info["base_off"]) + tbl_idx * int(info["row_byte_size"])
+        if info.get("graphics_table") and info.get("graphics_table_compressed_rows") and tbl_idx != 0:
+            messagebox.showerror(
+                "Import graphic",
+                "LZ/Huff graphics tables only support import at table row 0 "
+                "(compressed rows have no fixed ROM stride in this tool).",
+            )
+            return
+        blob_off, _stride_w = _graphics_table_blob_file_off(info, tbl_idx, bytes(rom))
         is_table = bool(info.get("graphics_table"))
-        table_row_b = int(info["row_byte_size"]) if is_table else None
+        table_row_b = (
+            None
+            if (is_table and info.get("graphics_table_compressed_rows"))
+            else (int(info["row_byte_size"]) if is_table else None)
+        )
 
         path = filedialog.askopenfilename(
             title="Import PNG",
@@ -4262,7 +4396,7 @@ class GraphicsPreviewFrame(ttk.Frame):
             messagebox.showerror("Import graphic", str(e))
             return
 
-        sprite_payload = build_sprite_payload_for_rom(tile_bytes, spec, lz=spec.lz)
+        sprite_payload = build_sprite_payload_for_rom(tile_bytes, spec)
         logs: List[str] = [log_intro]
 
         ok_s, log_s = self._gfx_import_write_blob(
@@ -4318,10 +4452,15 @@ class GraphicsPreviewFrame(ttk.Frame):
         use_pal_override = ov is not None and ov[1] == spec.bpp
         if use_pal_override:
             linked = pan.strip() if pan else ""
-            lz_note = ""
-            if ov[2]:
-                lz_note = (
+            comp_note = ""
+            if ov[2] == "lz77":
+                comp_note = (
                     "\n\nPreview was loaded from LZ77 at that offset; import still writes an "
+                    "**uncompressed** palette body there (same as raw preview imports)."
+                )
+            elif ov[2] in ("huff4", "huff8"):
+                comp_note = (
+                    "\n\nPreview was loaded from Huff-compressed data at that offset; import still writes an "
                     "**uncompressed** palette body there (same as raw preview imports)."
                 )
             messagebox.showinfo(
@@ -4331,7 +4470,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                 f"0x{ov[0]:08X} (GBA 0x{ov[0] + GBA_ROM_BASE:08X}), "
                 "not to the linked |palette NamedAnchor"
                 + (f" ({linked!r})." if linked else ".")
-                + lz_note,
+                + comp_note,
             )
 
         if spec.bpp == 8:
@@ -4347,7 +4486,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     messagebox.showerror("Import graphic", str(e))
                     return
                 pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
-                pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                pal_payload = palette_payload_for_rom(pal_body, ext_ps)
                 pal_cap = max(pal_cap, len(pal_payload))
                 ok_p, log_p = self._gfx_import_write_blob(
                     "Palette",
@@ -4380,7 +4519,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     self._set_log("".join(logs))
                     return
                 ga_p = self._hex.find_graphics_anchor_by_name(pan.strip())
-                pal_table_b = int(ga_p["row_byte_size"]) if ga_p and ga_p.get("graphics_table") else None
+                pal_table_b = _graphics_palette_table_row_stride_for_measure(ga_p)
                 pal_is_table = bool(ga_p and ga_p.get("graphics_table"))
                 try:
                     pal_cap = measure_palette_rom_footprint(
@@ -4391,7 +4530,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     messagebox.showerror("Import graphic", str(e))
                     return
                 pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
-                pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                pal_payload = palette_payload_for_rom(pal_body, ext_ps)
                 pal_cap = max(pal_cap, len(pal_payload))
                 pal_anchor_name = pan.strip() if ga_p and ga_p["spec"].kind == "palette" else None
                 if pal_anchor_name and pal_is_table:
@@ -4425,7 +4564,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     messagebox.showerror("Import graphic", str(e))
                     return
                 pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
-                pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                pal_payload = palette_payload_for_rom(pal_body, ext_ps)
                 pal_cap = max(pal_cap, len(pal_payload))
                 ok_p, log_p = self._gfx_import_write_blob(
                     "Palette",
@@ -4458,7 +4597,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     self._set_log("".join(logs))
                     return
                 ga_p = self._hex.find_graphics_anchor_by_name(pan.strip())
-                pal_table_b = int(ga_p["row_byte_size"]) if ga_p and ga_p.get("graphics_table") else None
+                pal_table_b = _graphics_palette_table_row_stride_for_measure(ga_p)
                 pal_is_table = bool(ga_p and ga_p.get("graphics_table"))
                 try:
                     pal_cap = measure_palette_rom_footprint(
@@ -4469,7 +4608,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     messagebox.showerror("Import graphic", str(e))
                     return
                 pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
-                pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                pal_payload = palette_payload_for_rom(pal_body, ext_ps)
                 pal_cap = max(pal_cap, len(pal_payload))
                 pal_anchor_name = pan.strip() if ga_p and ga_p["spec"].kind == "palette" else None
                 if pal_anchor_name and pal_is_table:
@@ -4503,7 +4642,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     messagebox.showerror("Import graphic", str(e))
                     return
                 pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
-                pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                pal_payload = palette_payload_for_rom(pal_body, ext_ps)
                 pal_cap = max(pal_cap, len(pal_payload))
                 ok_p, log_p = self._gfx_import_write_blob(
                     "Palette",
@@ -4527,7 +4666,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     logs.append(pal_notes or "Palette not resolved; skipped palette write.\n")
                 else:
                     ga_p = self._hex.find_graphics_anchor_by_name(pan.strip())
-                    pal_table_b = int(ga_p["row_byte_size"]) if ga_p and ga_p.get("graphics_table") else None
+                    pal_table_b = _graphics_palette_table_row_stride_for_measure(ga_p)
                     pal_is_table = bool(ga_p and ga_p.get("graphics_table"))
                     try:
                         pal_cap = measure_palette_rom_footprint(
@@ -4538,7 +4677,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                         messagebox.showerror("Import graphic", str(e))
                         return
                     pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
-                    pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                    pal_payload = palette_payload_for_rom(pal_body, ext_ps)
                     pal_cap = max(pal_cap, len(pal_payload))
                     pal_anchor_name = pan.strip() if ga_p and ga_p["spec"].kind == "palette" else None
                     if pal_anchor_name and pal_is_table:
@@ -4601,17 +4740,31 @@ class GraphicsPreviewFrame(ttk.Frame):
             return
 
         tbl_idx, _eff, tbl_warn = self._effective_table_state(info)
-        blob_off_map = int(info["base_off"])
-        if info.get("graphics_table"):
-            blob_off_map = int(info["base_off"]) + tbl_idx * int(info["row_byte_size"])
+        if tbl_idx != 0 and (
+            (info.get("graphics_table") and info.get("graphics_table_compressed_rows"))
+            or (ga_ts.get("graphics_table") and ga_ts.get("graphics_table_compressed_rows"))
+        ):
+            messagebox.showerror(
+                "Import tilemap",
+                "LZ/Huff graphics tables only support import at table row 0 "
+                "(compressed rows have no fixed ROM stride in this tool).",
+            )
+            return
+        blob_off_map, _ = _graphics_table_blob_file_off(info, tbl_idx, bytes(rom))
         is_table_tm = bool(info.get("graphics_table"))
-        table_row_b_tm = int(info["row_byte_size"]) if is_table_tm else None
+        table_row_b_tm = (
+            None
+            if (is_table_tm and info.get("graphics_table_compressed_rows"))
+            else (int(info["row_byte_size"]) if is_table_tm else None)
+        )
 
-        ts_off = int(ga_ts["base_off"])
-        if ga_ts.get("graphics_table"):
-            ts_off = int(ga_ts["base_off"]) + tbl_idx * int(ga_ts["row_byte_size"])
+        ts_off, _ = _graphics_table_blob_file_off(ga_ts, tbl_idx, bytes(rom))
         is_table_ts = bool(ga_ts.get("graphics_table"))
-        table_row_b_ts = int(ga_ts["row_byte_size"]) if is_table_ts else None
+        table_row_b_ts = (
+            None
+            if (is_table_ts and ga_ts.get("graphics_table_compressed_rows"))
+            else (int(ga_ts["row_byte_size"]) if is_table_ts else None)
+        )
 
         pan_tm = getattr(spec, "palette_anchor_name", None)
         if not pan_tm:
@@ -4694,7 +4847,7 @@ class GraphicsPreviewFrame(ttk.Frame):
             return
 
         try:
-            ts_payload = build_sprite_payload_for_rom(tile_body, ts_spec, lz=ts_spec.lz)
+            ts_payload = build_sprite_payload_for_rom(tile_body, ts_spec)
         except ValueError as e:
             messagebox.showerror("Import tilemap", f"Tileset compress: {e}")
             return
@@ -4738,7 +4891,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                 logs.append(pal_notes or "Palette not resolved; skipped palette write.\n")
             else:
                 ga_p = self._hex.find_graphics_anchor_by_name(pan_key)
-                pal_table_b = int(ga_p["row_byte_size"]) if ga_p and ga_p.get("graphics_table") else None
+                pal_table_b = _graphics_palette_table_row_stride_for_measure(ga_p)
                 pal_is_table = bool(ga_p and ga_p.get("graphics_table"))
                 rom_now = self._hex.get_data()
                 try:
@@ -4766,6 +4919,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     bpp=int(ext_ps.bpp),
                     kind=str(ext_ps.kind),
                     lz=bool(ext_ps.lz),
+                    huff_bpp=getattr(ext_ps, "huff_bpp", None),
                     palette_hex_digit=getattr(ext_ps, "palette_hex_digit", None),
                     effective_ucp8_suffix=u8_sfx,
                     need_bytes_spec=need_before,
@@ -4773,7 +4927,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     pal_cap_measure=pal_cap,
                 )
                 pal_body = prepare_palette_rom_body_from_import(ext_ps, pal_flat)
-                pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=ext_ps.lz)
+                pal_payload = palette_payload_for_rom(pal_body, ext_ps)
                 pal_cap = max(pal_cap, len(pal_payload))
                 _tilemap_import_debug(
                     logs,
@@ -5752,7 +5906,9 @@ def _assign_struct_field_offsets(fields: List[Dict[str, Any]]) -> None:
 
 def _validate_nested_array_fields(fields: List[Dict[str, Any]]) -> bool:
     """Each ``nested_array`` either names a ``/countField`` uint elsewhere in the same struct, or uses
-    ``!HEX>`` terminator bytes (even-length hex -> raw bytes) and must be the **last** field.
+    ``!HEX>`` terminator bytes (even-length hex -> raw bytes). **Inline** packed (``!HEX>inline``) must be the **last**
+    field (bytes live in the struct row). **Pointer** form (``!HEX>`` only): a 4-byte GBA pointer at the field;
+    the terminated blob lives at ``*ptr``, so **later fields may follow** in the struct row.
 
     Valid layouts:
     - **Count first:** ``count`` uint appears before ``name<[inner]/count>``. Fixed fields (uint/ptr/PCS/…)
@@ -5772,8 +5928,9 @@ def _validate_nested_array_fields(fields: List[Dict[str, Any]]) -> bool:
         if fd.get("type") != "nested_array":
             continue
         if fd.get("terminator"):
-            # Delimited by a byte pattern; no count uint - must be the last field in the struct.
-            if i != len(fields) - 1:
+            # Inline packed terminator data sits in the row — must be last. Pointer-backed (!HEX> without inline)
+            # only reserves 4 bytes in the row; more fields may follow.
+            if fd.get("terminator_inline_packed") and i != len(fields) - 1:
                 return False
             continue
         cf_name = str(fd.get("count_field") or "")
@@ -6579,6 +6736,28 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
                     "gfx_spec": pal_spec,
                 }
             return None
+        pal_spec = parse_graphics_anchor_format(inner)
+        if pal_spec is not None and getattr(pal_spec, "kind", None) == "palette":
+            return {
+                "name": fname,
+                "size": 4,
+                "type": "gfx_palette",
+                "enum": None,
+                "hex": True,
+                "gfx_spec": pal_spec,
+            }
+        tbl = parse_graphics_table_format(inner)
+        if tbl is not None:
+            row_spec, _count_ref, _ptr_col = tbl
+            if getattr(row_spec, "kind", None) == "palette":
+                return {
+                    "name": fname,
+                    "size": 4,
+                    "type": "gfx_palette",
+                    "enum": None,
+                    "hex": True,
+                    "gfx_spec": row_spec,
+                }
         gspec, pal_name = parse_sprite_field_spec(inner)
         return {
             "name": fname,
@@ -7035,8 +7214,8 @@ class StructEditorFrame(ttk.Frame):
         ttk.Combobox(
             self._gfx_struct_sprite_pal_row,
             textvariable=self._gfx_struct_sprite_pal_storage_var,
-            values=("raw", "lz77"),
-            width=6,
+            values=("raw", "lz77", "huff4", "huff8"),
+            width=8,
             state="readonly",
             font=("Consolas", 8),
         ).grid(row=2, column=1, sticky="w", padx=(0, 8), pady=(2, 0))
@@ -7071,7 +7250,7 @@ class StructEditorFrame(ttk.Frame):
         self._gfx_fi: Optional[int] = None
         self._gfx_sprite_last_fi: Optional[int] = None
         self._gfx_photo: Optional[Any] = None
-        self._gfx_struct_sprite_palette_override: Optional[Tuple[int, int, bool]] = None
+        self._gfx_struct_sprite_palette_override: Optional[Tuple[int, int, str]] = None
 
         # tileset<`lzt4`> tilemap<`lzm4xWxH|…`> palette<`ucp4`>: composite tilemap decode
         self._gfx_tilemap_frame = ttk.Frame(self)
@@ -7465,20 +7644,35 @@ class StructEditorFrame(ttk.Frame):
         override_pal_bytes: Optional[bytes] = None
         ov = self._gfx_struct_sprite_palette_override
         if ov is not None:
-            ov_off, ov_bpp, ov_lz = ov
+            ov_off, ov_bpp, ov_st = ov
             if ov_bpp != spec.bpp:
                 log_extra += (
                     f"\nPreview palette override ignored: {ov_bpp}bpp ROM data vs {spec.bpp}bpp sprite field.\n"
                 )
             else:
-                raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
-                    bytes(data), ov_off, ov_bpp, lz77=ov_lz
-                )
+                if ov_st == "raw":
+                    raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
+                        bytes(data), ov_off, ov_bpp, lz77=False
+                    )
+                elif ov_st == "lz77":
+                    raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
+                        bytes(data), ov_off, ov_bpp, lz77=True
+                    )
+                elif ov_st == "huff4":
+                    raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
+                        bytes(data), ov_off, ov_bpp, huff_bpp=4
+                    )
+                else:
+                    raw_ov, oerr = read_sprite_preview_palette_at_rom_offset(
+                        bytes(data), ov_off, ov_bpp, huff_bpp=8
+                    )
                 if raw_ov is None:
                     log_extra += f"\nPreview palette override: {oerr}\n"
                 else:
                     override_pal_bytes = raw_ov
-                    src = "LZ77->" if ov_lz else "raw "
+                    src = {"raw": "raw ", "lz77": "LZ77->", "huff4": "Huff4->", "huff8": "Huff8->"}.get(
+                        ov_st, "raw "
+                    )
                     log_extra += (
                         f"\nPreview palette: {src}file offset 0x{ov_off:X} ({ov_bpp}bpp, {len(raw_ov)} bytes); "
                         f"linked palette ignored for preview.\n"
@@ -7582,13 +7776,27 @@ class StructEditorFrame(ttk.Frame):
                 f"(4->16 colors, 6->64, 8->256).",
             )
             return
-        use_lz = str(self._gfx_struct_sprite_pal_storage_var.get()).strip().lower() == "lz77"
-        raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(data), off, pb, lz77=use_lz)
+        stor = str(self._gfx_struct_sprite_pal_storage_var.get()).strip().lower()
+        if stor not in ("raw", "lz77", "huff4", "huff8"):
+            stor = "raw"
+        if stor == "raw":
+            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(data), off, pb, lz77=False)
+        elif stor == "lz77":
+            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(data), off, pb, lz77=True)
+        elif stor == "huff4":
+            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(data), off, pb, huff_bpp=4)
+        else:
+            raw, rerr = read_sprite_preview_palette_at_rom_offset(bytes(data), off, pb, huff_bpp=8)
         if raw is None:
             messagebox.showerror("Preview palette", rerr or "Could not read palette bytes.")
             return
-        self._gfx_struct_sprite_palette_override = (off, pb, use_lz)
-        src = "LZ77 at" if use_lz else "Raw at"
+        self._gfx_struct_sprite_palette_override = (off, pb, stor)
+        src = {
+            "raw": "Raw at",
+            "lz77": "LZ77 at",
+            "huff4": "Huff (4-bit) at",
+            "huff8": "Huff (8-bit) at",
+        }[stor]
         loc = (
             f"{src} 0x{off:X}"
             if direct_off is not None
@@ -9379,6 +9587,11 @@ class StructEditorFrame(ttk.Frame):
             if len(raw) >= 4:
                 ptr = int.from_bytes(raw[:4], "little")
                 return f"0x{ptr:08X}  (sprite)"
+            return ""
+        if ftype == "gfx_palette":
+            if len(raw) >= 4:
+                ptr = int.from_bytes(raw[:4], "little")
+                return f"0x{ptr:08X}  (palette)"
             return ""
         val_u = int.from_bytes(raw, "little")
         if fd.get("blist_ref"):
@@ -13603,21 +13816,41 @@ Format = "`f|u8`[u8 arg0]"
             fmt = normalize_named_anchor_format(anchor.get("Format", ""))
             spec = parse_graphics_anchor_format(fmt)
             table_count_ref: Optional[str] = None
+            compressed_rows = False
+            ptr_palette_table = False
+            row_byte_size = 0
+            n_entries = 0
+            total_span = 0
             if spec is None:
                 tbl = parse_graphics_table_format(fmt)
                 if tbl is None:
                     continue
-                spec, table_count_ref = tbl
+                spec, table_count_ref, row_is_pointer_column = tbl
+                ptr_palette_table = bool(
+                    row_is_pointer_column and getattr(spec, "kind", None) == "palette"
+                )
+                compressed_rows = bool(spec.lz or getattr(spec, "huff_bpp", None) is not None)
+                if ptr_palette_table and compressed_rows:
+                    continue
                 try:
-                    if spec.lz:
-                        raise ValueError("LZ rows in graphics tables are not supported")
-                    row_byte_size = graphics_row_byte_size(spec)
+                    if ptr_palette_table:
+                        row_byte_size = 4
+                    elif compressed_rows:
+                        row_byte_size = graphics_table_row_logical_byte_size(spec)
+                    else:
+                        row_byte_size = graphics_row_byte_size(spec)
                 except ValueError:
                     continue
                 n_entries = self._resolve_struct_count(table_count_ref)
                 if n_entries is None or n_entries <= 0:
                     continue
-                total_span = row_byte_size * n_entries
+                if compressed_rows:
+                    # Per-row compressed length varies; bound selection loosely (same order of magnitude as per-palette LZ).
+                    total_span = max(1, n_entries) * (512 * 1024)
+                elif ptr_palette_table:
+                    total_span = 4 * n_entries
+                else:
+                    total_span = row_byte_size * n_entries
             else:
                 row_byte_size = 0
                 n_entries = 0
@@ -13650,6 +13883,8 @@ Format = "`f|u8`[u8 arg0]"
                 "table_count_ref": table_count_ref,
                 "row_byte_size": row_byte_size,
                 "table_num_entries": n_entries,
+                "graphics_table_compressed_rows": compressed_rows,
+                "graphics_table_pointer_column": ptr_palette_table,
             }
             result.append(entry)
         result.sort(key=lambda x: str(x["name"]).lower())
@@ -13683,10 +13918,37 @@ Format = "`f|u8`[u8 arg0]"
         ga = self.find_graphics_anchor_by_name(table_name)
         if ga is not None and ga["spec"].kind == "palette":
             if ga.get("graphics_table"):
-                rsz = int(ga["row_byte_size"])
                 nent = int(ga.get("table_num_entries") or 0)
                 if nent and (row_idx < 0 or row_idx >= nent):
                     notes += f"Warning: palette row {row_idx} may be out of range (0..{nent - 1}) for {table_name!r}.\n"
+                if ga.get("graphics_table_compressed_rows"):
+                    if row_idx != 0:
+                        notes += (
+                            "LZ/Huff palette table: rows are not at a fixed ROM stride; "
+                            f"cannot resolve offset for row {row_idx}.\n"
+                        )
+                        return ga["spec"], None, notes
+                    return ga["spec"], int(ga["base_off"]), notes
+                if ga.get("graphics_table_pointer_column"):
+                    data = self.get_data()
+                    if not data:
+                        return ga["spec"], None, notes
+                    ptr_off = int(ga["base_off"]) + row_idx * 4
+                    if ptr_off < 0 or ptr_off + 4 > len(data):
+                        return (
+                            ga["spec"],
+                            None,
+                            notes + f"Pointer slot for row {row_idx} out of ROM range.\n",
+                        )
+                    tgt = resolve_gba_pointer(bytes(data), ptr_off)
+                    if tgt is None:
+                        return (
+                            ga["spec"],
+                            None,
+                            notes + f"Invalid GBA pointer at row {row_idx} (file 0x{ptr_off:X}).\n",
+                        )
+                    return ga["spec"], tgt, notes
+                rsz = int(ga["row_byte_size"])
                 ext_pb = int(ga["base_off"]) + row_idx * rsz
                 return ga["spec"], ext_pb, notes
             return ga["spec"], int(ga["base_off"]), notes
@@ -13735,10 +13997,38 @@ Format = "`f|u8`[u8 arg0]"
         if not ref:
             return None, None, ""
 
+        data = self.get_data()
         ga = self.find_graphics_anchor_by_name(ref)
         if ga is not None:
             if ga["spec"].kind == "palette":
                 if ga.get("graphics_table"):
+                    if ga.get("graphics_table_compressed_rows"):
+                        if table_row_idx != 0:
+                            notes += (
+                                "LZ/Huff palette table: rows are not at a fixed ROM stride; "
+                                "cannot resolve a file offset for row "
+                                f"{table_row_idx} (need a pointer table or raw layout).\n"
+                            )
+                            return ga["spec"], None, notes
+                        return ga["spec"], int(ga["base_off"]), notes
+                    if ga.get("graphics_table_pointer_column"):
+                        if not data:
+                            return ga["spec"], None, notes + "No ROM loaded.\n"
+                        ptr_off = int(ga["base_off"]) + table_row_idx * 4
+                        if ptr_off < 0 or ptr_off + 4 > len(data):
+                            return (
+                                ga["spec"],
+                                None,
+                                notes + f"Palette pointer slot row {table_row_idx} out of ROM range.\n",
+                            )
+                        tgt = resolve_gba_pointer(bytes(data), ptr_off)
+                        if tgt is None:
+                            return (
+                                ga["spec"],
+                                None,
+                                notes + f"Invalid palette pointer at row {table_row_idx} (file 0x{ptr_off:X}).\n",
+                            )
+                        return ga["spec"], tgt, notes
                     ext_pb = int(ga["base_off"]) + table_row_idx * int(ga["row_byte_size"])
                     return ga["spec"], ext_pb, notes
                 return ga["spec"], int(ga["base_off"]), notes
@@ -13752,7 +14042,6 @@ Format = "`f|u8`[u8 arg0]"
         if si is None:
             return None, None, notes + f"NamedAnchor {ref!r} not found (palette or lookup struct).\n"
 
-        data = self.get_data()
         if not data:
             return None, None, notes
         cnt = int(si["count"])
@@ -13945,13 +14234,18 @@ Format = "`f|u8`[u8 arg0]"
         return result
 
     def _resolve_struct_count(self, ref: str) -> Optional[int]:
-        """Resolve count reference: number, MatchedWord, or NamedAnchor name (with optional +/-N)."""
+        """Resolve count reference: decimal literal (e.g. ``40``), MatchedWord, or NamedAnchor name (optional +/-N)."""
         ref = ref.strip()
         offset = 0
         m = re.match(r'^(.+?)([+-]\d+)$', ref)
         if m:
             ref = m.group(1)
             offset = int(m.group(2))
+        if re.fullmatch(r"\d+", ref):
+            try:
+                return int(ref, 10) + offset
+            except ValueError:
+                return None
         mw = self._resolve_table_length(ref)
         if mw is not None:
             return mw + offset
@@ -16320,7 +16614,9 @@ Format = "`f|u8`[u8 arg0]"
         opt = _SpriteImportOptionsDialog(parent, path, title="Import sprite - options")
         if opt.result is None:
             return
-        bpp, lz, wt, ht, ncolors, tom_name, tom_pal_name, write_pal, upd, rom_clip_8 = opt.result
+        bpp, comp_mode, wt, ht, ncolors, tom_name, tom_pal_name, write_pal, upd, rom_clip_8 = opt.result
+        lz = comp_mode == "lz77"
+        huff_bpp = 4 if comp_mode == "huff4" else (8 if comp_mode == "huff8" else None)
         tb, flat_pal, err, tw, th = sprite_import_png_manual(
             path,
             bpp=bpp,
@@ -16331,9 +16627,16 @@ Format = "`f|u8`[u8 arg0]"
         if err:
             messagebox.showerror("Import sprite", err)
             return
-        spec = GraphicsAnchorSpec(kind="sprite", bpp=bpp, lz=lz, width_tiles=tw, height_tiles=th)
+        spec = GraphicsAnchorSpec(
+            kind="sprite",
+            bpp=bpp,
+            lz=lz,
+            huff_bpp=huff_bpp,
+            width_tiles=tw,
+            height_tiles=th,
+        )
         try:
-            payload = build_sprite_payload_for_rom(tb, spec, lz=lz)
+            payload = build_sprite_payload_for_rom(tb, spec)
         except ValueError as e:
             messagebox.showerror("Import sprite", str(e))
             return
@@ -16341,9 +16644,10 @@ Format = "`f|u8`[u8 arg0]"
             bpp,
             rom_palette_colors_8bpp=rom_clip_8 if bpp == 8 else None,
         )
+        ext_ps = replace(ext_ps, lz=lz, huff_bpp=huff_bpp)
         try:
             pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
-            pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=lz)
+            pal_payload = palette_payload_for_rom(pal_body, ext_ps)
         except ValueError as e:
             messagebox.showerror("Import sprite", f"Palette pack: {e}")
             return
@@ -16383,7 +16687,12 @@ Format = "`f|u8`[u8 arg0]"
 
         link_pal = bool(write_pal and pal_off is not None and normalize_named_anchor_lookup_key(tom_pal_name))
         fmt_sprite = _toml_sprite_format_token_with_palette(
-            lz, bpp, tw, th, tom_pal_name if link_pal else ""
+            lz,
+            bpp,
+            tw,
+            th,
+            tom_pal_name if link_pal else "",
+            huff_bpp=huff_bpp,
         )
         did_reload = False
         if upd and tom_name:
@@ -16434,7 +16743,9 @@ Format = "`f|u8`[u8 arg0]"
         opt = _PaletteImportOptionsDialog(parent, is_png=is_png)
         if opt.result is None:
             return
-        bpp, lz, n_colors_8 = opt.result
+        bpp, comp_mode, n_colors_8 = opt.result
+        lz = comp_mode == "lz77"
+        huff_bpp = 4 if comp_mode == "huff4" else (8 if comp_mode == "huff8" else None)
         kw: Dict[str, Any] = {}
         if bpp == 8:
             kw["colors_8bpp"] = n_colors_8
@@ -16454,7 +16765,13 @@ Format = "`f|u8`[u8 arg0]"
                 messagebox.showerror("Import palette", err)
                 return
         if bpp == 4:
-            pal_spec = GraphicsAnchorSpec(kind="palette", bpp=4, lz=lz, palette_4_indices=None)
+            pal_spec = GraphicsAnchorSpec(
+                kind="palette",
+                bpp=4,
+                lz=lz,
+                huff_bpp=huff_bpp,
+                palette_4_indices=None,
+            )
         else:
             syn = synthetic_palette_spec_for_sprite_import_write(
                 8,
@@ -16464,10 +16781,11 @@ Format = "`f|u8`[u8 arg0]"
                 kind="palette",
                 bpp=8,
                 lz=lz,
+                huff_bpp=huff_bpp,
                 palette_hex_digit=syn.palette_hex_digit,
             )
         try:
-            payload = palette_payload_for_rom(pal_body, pal_spec, lz=lz)
+            payload = palette_payload_for_rom(pal_body, pal_spec)
         except ValueError as e:
             messagebox.showerror("Import palette", str(e))
             return
@@ -16541,7 +16859,9 @@ Format = "`f|u8`[u8 arg0]"
             opt = _SpriteImportOptionsDialog(parent, path, title="Import tileset - options")
             if opt.result is None:
                 return
-            bpp, lz, wt, ht, ncolors, tom_name, tom_pal_name, write_pal, upd, rom_clip_8 = opt.result
+            bpp, comp_mode, wt, ht, ncolors, tom_name, tom_pal_name, write_pal, upd, rom_clip_8 = opt.result
+            lz = comp_mode == "lz77"
+            huff_bpp = 4 if comp_mode == "huff4" else (8 if comp_mode == "huff8" else None)
             tb, flat_pal, err, tw, th = sprite_import_png_manual(
                 path,
                 bpp=bpp,
@@ -16552,9 +16872,16 @@ Format = "`f|u8`[u8 arg0]"
             if err:
                 messagebox.showerror("Import tileset", err)
                 return
-            spec = GraphicsAnchorSpec(kind="sprite", bpp=bpp, lz=lz, width_tiles=tw, height_tiles=th)
+            spec = GraphicsAnchorSpec(
+                kind="sprite",
+                bpp=bpp,
+                lz=lz,
+                huff_bpp=huff_bpp,
+                width_tiles=tw,
+                height_tiles=th,
+            )
             try:
-                payload = build_sprite_payload_for_rom(tb, spec, lz=lz)
+                payload = build_sprite_payload_for_rom(tb, spec)
             except ValueError as e:
                 messagebox.showerror("Import tileset", str(e))
                 return
@@ -16562,9 +16889,10 @@ Format = "`f|u8`[u8 arg0]"
                 bpp,
                 rom_palette_colors_8bpp=rom_clip_8 if bpp == 8 else None,
             )
+            ext_ps = replace(ext_ps, lz=lz, huff_bpp=huff_bpp)
             try:
                 pal_body = prepare_palette_rom_body_from_import(ext_ps, flat_pal)
-                pal_payload = palette_payload_for_rom(pal_body, ext_ps, lz=lz)
+                pal_payload = palette_payload_for_rom(pal_body, ext_ps)
             except ValueError as e:
                 messagebox.showerror("Import tileset", f"Palette pack: {e}")
                 return
@@ -16600,7 +16928,12 @@ Format = "`f|u8`[u8 arg0]"
                 msg += f"\nPalette: {len(pal_payload)} byte(s) at file 0x{pal_off:X} (GBA 0x{gba_p:08X})."
             link_pal = bool(write_pal and pal_off is not None and normalize_named_anchor_lookup_key(tom_pal_name))
             fmt_sprite = _toml_sprite_format_token_with_palette(
-                lz, bpp, tw * th, 1, tom_pal_name if link_pal else ""
+                lz,
+                bpp,
+                tw * th,
+                1,
+                tom_pal_name if link_pal else "",
+                huff_bpp=huff_bpp,
             )
             did_reload = False
             if upd and tom_name:
@@ -16703,7 +17036,7 @@ Format = "`f|u8`[u8 arg0]"
             if bpp == 8 and rom_clip_8 is not None:
                 pal_use = pal_flat[: rom_clip_8 * 2]
             try:
-                pal_payload = palette_payload_for_rom(pal_use, pal_spec, lz=False)
+                pal_payload = palette_payload_for_rom(pal_use, pal_spec)
             except ValueError as e:
                 messagebox.showerror("Import tilemap", str(e))
                 return
