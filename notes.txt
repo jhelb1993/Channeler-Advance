@@ -1,4 +1,5 @@
 data.stats.items uses name field
+linux asm insertion
 fix invalid unicode symbols on linux
 pcs macros
 improve performance when loading tools
@@ -8,7 +9,7 @@ generate toml (other option)
 triple backticks instead of quotes
 toml writing extra bug
 fix finnicky behaviors
-update readme
+update readme (other ygo games, no outdated info)
 testing
 .hma scripts
 read the code
