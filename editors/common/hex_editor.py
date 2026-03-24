@@ -942,6 +942,58 @@ def _struct_count_ref_base_name(count_ref: str) -> str:
     return s
 
 
+def _struct_label_source_field(fields: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """First top-level field named ``name`` suitable for row labels (PCS/ASCII slot or pointer to one)."""
+    for f in fields:
+        if str(f.get("name", "")) != "name":
+            continue
+        t = f.get("type")
+        if t in ("pcs", "ascii", "pcs_ptr", "ascii_ptr"):
+            return f
+    return None
+
+
+def _struct_entry_label_enum_field_source(
+    fields: List[Dict[str, Any]],
+    by_norm: Dict[str, Dict[str, Any]],
+    lists_loaded: Dict[str, Any],
+    pcs_keys_norm: Set[str],
+) -> Optional[Dict[str, Any]]:
+    """First top-level ``uint`` with ``enum`` naming a struct that has a displayable ``name`` field (e.g. ``item:data.items.stats``)."""
+    for f in fields:
+        if f.get("type") != "uint" or f.get("bit_array"):
+            continue
+        er = f.get("enum")
+        if not er or not isinstance(er, str):
+            continue
+        base, delta = _split_enum_field_ref(er)
+        lk = normalize_named_anchor_lookup_key(base)
+        if not lk or lk in lists_loaded or lk in pcs_keys_norm:
+            continue
+        ta = by_norm.get(lk)
+        if ta is None or _struct_label_source_field(ta.get("fields") or []) is None:
+            continue
+        fn = str(f.get("name", "")).strip()
+        if not fn:
+            continue
+        return {
+            "source_anchor_name": str(ta["name"]),
+            "ref_row_count": int(ta["count"]),
+            "enum_field_name": fn,
+            "enum_delta": int(delta),
+        }
+    return None
+
+
+def _decode_pcs_raw_bytes(raw: bytes) -> str:
+    chars: List[str] = []
+    for b in raw:
+        if b == 0xFF:
+            break
+        chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
+    return "".join(chars)
+
+
 def _struct_anchor_search_blob(a: Dict[str, Any], lists_map: Dict[str, Dict[int, str]]) -> str:
     """Lowercase text used to filter struct anchors by search query (name, ``]count`` ref, ``[[List]]`` rows, PCS name)."""
     parts: List[str] = [str(a.get("name", ""))]
@@ -956,6 +1008,9 @@ def _struct_anchor_search_blob(a: Dict[str, Any], lists_map: Dict[str, Dict[int,
         cref = normalize_named_anchor_lookup_key(_struct_count_ref_base_name(str(cr)))
         if cref and cref not in list_keys:
             list_keys.append(cref)
+    els = a.get("entry_label_struct")
+    if els:
+        parts.append(str(els.get("source_anchor_name", "")))
     for lk in list_keys:
         parts.append(lk)
         lm = lists_map.get(lk) or {}
@@ -7079,6 +7134,7 @@ class StructEditorFrame(ttk.Frame):
         self._anchors: List[Dict[str, Any]] = []
         self._lists: Dict[str, Dict[int, str]] = {}
         self._list_enum_active_pcs: Optional[Dict[str, Any]] = None
+        self._list_enum_active_struct: Optional[Dict[str, Any]] = None
         self._fields: List[Dict[str, Any]] = []
         self._entry_count = 0
         self._struct_size = 0
@@ -7089,6 +7145,7 @@ class StructEditorFrame(ttk.Frame):
         self._edit_iid: Optional[str] = None
         self._entry_index_context_pcs: Optional[Dict[str, Any]] = None
         self._entry_index_context_list: Optional[str] = None
+        self._entry_index_context_struct: Optional[Dict[str, Any]] = None
         self._struct_filter_job: Optional[str] = None
         self._struct_match_entries: List[Tuple[str, str, Optional[int]]] = []
         self._seq_parallel = False
@@ -8330,6 +8387,21 @@ class StructEditorFrame(ttk.Frame):
                 return info
         return None
 
+    def _find_struct_anchor_info_for_enum(self, enum_name: str) -> Optional[Dict[str, Any]]:
+        """Struct table anchor whose rows have a displayable ``name`` field (e.g. ``item:data.items.stats``)."""
+        base, _ = _split_enum_field_ref(enum_name)
+        ref = base.strip()
+        if not ref:
+            return None
+        nk = normalize_named_anchor_lookup_key(ref)
+        for sa in self._hex.get_struct_anchors():
+            if normalize_named_anchor_lookup_key(str(sa["name"])) != nk:
+                continue
+            if _struct_label_source_field(sa.get("fields") or []) is None:
+                continue
+            return sa
+        return None
+
     def _is_toml_list_enum_field(self, fd: Dict[str, Any]) -> bool:
         if fd.get("type") != "uint" or not fd.get("enum"):
             return False
@@ -8344,8 +8416,35 @@ class StructEditorFrame(ttk.Frame):
             return False
         return self._find_pcs_anchor_info_for_enum(fd["enum"]) is not None
 
+    def _is_struct_table_enum_field(self, fd: Dict[str, Any]) -> bool:
+        if fd.get("type") != "uint" or not fd.get("enum"):
+            return False
+        base, _ = _split_enum_field_ref(fd["enum"])
+        if not base or normalize_named_anchor_lookup_key(base) in self._lists:
+            return False
+        if self._find_pcs_anchor_info_for_enum(fd["enum"]) is not None:
+            return False
+        return self._find_struct_anchor_info_for_enum(fd["enum"]) is not None
+
     def _is_enum_panel_field(self, fd: Dict[str, Any]) -> bool:
-        return self._is_toml_list_enum_field(fd) or self._is_pcs_table_enum_field(fd)
+        return (
+            self._is_toml_list_enum_field(fd)
+            or self._is_pcs_table_enum_field(fd)
+            or self._is_struct_table_enum_field(fd)
+        )
+
+    def _enum_picker_supported_for_ctx(self, ctx: Dict[str, Any]) -> bool:
+        """True when the ROM index combobox can be filled (List, PCS table, or struct with ``name``)."""
+        er = str(ctx.get("enum_ref") or "")
+        base, _ = _split_enum_field_ref(er)
+        lk = normalize_named_anchor_lookup_key(base)
+        if lk in self._lists:
+            return True
+        if self._find_pcs_anchor_info_for_enum(er) is not None:
+            return True
+        if self._find_struct_anchor_info_for_enum(er) is not None:
+            return True
+        return False
 
     def _update_list_enum_panel(self) -> None:
         """Show ROM index combobox + [[List]] TOML editor or PCS table string editor (uint or bitfield subfield)."""
@@ -8355,6 +8454,7 @@ class StructEditorFrame(ttk.Frame):
             self._list_enum_fi = None
             self._list_enum_ctx = None
             self._list_enum_active_pcs = None
+            self._list_enum_active_struct = None
             return
         ctx = self._struct_resolve_enum_field_context(sel[0])
         self._list_enum_ctx = ctx
@@ -8362,6 +8462,7 @@ class StructEditorFrame(ttk.Frame):
             self._list_enum_frame.grid_remove()
             self._list_enum_fi = None
             self._list_enum_active_pcs = None
+            self._list_enum_active_struct = None
             return
         fd = ctx["fd"]
         self._list_enum_fi = int(ctx["fi"])
@@ -8394,6 +8495,7 @@ class StructEditorFrame(ttk.Frame):
 
         if list_key in self._lists:
             self._list_enum_active_pcs = None
+            self._list_enum_active_struct = None
             self._list_enum_toml_block.grid()
             self._list_enum_pcs_block.grid_remove()
             lm = self._lists.get(list_key, {})
@@ -8432,45 +8534,97 @@ class StructEditorFrame(ttk.Frame):
             return
 
         pcs_info = self._find_pcs_anchor_info_for_enum(er)
-        self._list_enum_active_pcs = pcs_info
-        self._list_enum_toml_block.grid_remove()
-        self._list_enum_pcs_block.grid()
-        count = int(pcs_info.get("count") or 0) if pcs_info else 0
-        mx_bf_pcs: Optional[int] = None
-        if kind not in ("uint", "nested_uint"):
-            mx_bf_pcs = (1 << int(ctx["part"]["bits"])) - 1
-        for idx in range(count):
-            if mx_bf_pcs is not None:
-                rom_try = idx - delta
-                if rom_try < 0 or rom_try > mx_bf_pcs:
-                    continue
-            lab = self._pcs_decode_table_row(pcs_info, idx) if pcs_info else ""
-            self._list_enum_all_indices.append(idx)
-            short = lab.replace("\n", " ")
-            if len(short) > 52:
-                short = short[:49] + "..."
-            self._list_enum_all_display.append(f"{idx}: {short}")
-        self._list_enum_idx_by_combo = list(self._list_enum_all_indices)
-        display_vals = list(self._list_enum_all_display)
-        self._list_enum_rom_combo["values"] = tuple(display_vals)
-        try:
-            pos = self._list_enum_idx_by_combo.index(list_row)
-        except ValueError:
-            if mx_bf_pcs is not None and 0 <= list_row < count:
-                self._list_enum_rom_combo.set(
-                    f"(PCS row {list_row} needs ROM {list_row - delta}; "
-                    f"subfield allows 0-{mx_bf_pcs} - widen Format or trim PCS table)"
-                )
+        struct_si = self._find_struct_anchor_info_for_enum(er)
+
+        if pcs_info is not None:
+            self._list_enum_active_pcs = pcs_info
+            self._list_enum_active_struct = None
+            self._list_enum_toml_block.grid_remove()
+            self._list_enum_pcs_block.grid()
+            count = int(pcs_info.get("count") or 0)
+            mx_bf_pcs: Optional[int] = None
+            if kind not in ("uint", "nested_uint"):
+                mx_bf_pcs = (1 << int(ctx["part"]["bits"])) - 1
+            for idx in range(count):
+                if mx_bf_pcs is not None:
+                    rom_try = idx - delta
+                    if rom_try < 0 or rom_try > mx_bf_pcs:
+                        continue
+                lab = self._pcs_decode_table_row(pcs_info, idx)
+                self._list_enum_all_indices.append(idx)
+                short = lab.replace("\n", " ")
+                if len(short) > 52:
+                    short = short[:49] + "..."
+                self._list_enum_all_display.append(f"{idx}: {short}")
+            self._list_enum_idx_by_combo = list(self._list_enum_all_indices)
+            display_vals = list(self._list_enum_all_display)
+            self._list_enum_rom_combo["values"] = tuple(display_vals)
+            try:
+                pos = self._list_enum_idx_by_combo.index(list_row)
+            except ValueError:
+                if mx_bf_pcs is not None and 0 <= list_row < count:
+                    self._list_enum_rom_combo.set(
+                        f"(PCS row {list_row} needs ROM {list_row - delta}; "
+                        f"subfield allows 0-{mx_bf_pcs} - widen Format or trim PCS table)"
+                    )
+                else:
+                    self._list_enum_rom_combo.set(
+                        f"(ROM {cur} -> PCS row {list_row} - past table or negative)"
+                    )
             else:
-                self._list_enum_rom_combo.set(
-                    f"(ROM {cur} -> PCS row {list_row} - past table or negative)"
+                self._list_enum_rom_combo.current(pos)
+            if 0 <= list_row < count:
+                self._list_enum_pcs_var.set(self._pcs_decode_table_row(pcs_info, list_row))
+            else:
+                self._list_enum_pcs_var.set("")
+            return
+
+        if struct_si is not None:
+            self._list_enum_active_pcs = None
+            self._list_enum_active_struct = struct_si
+            self._list_enum_toml_block.grid_remove()
+            self._list_enum_pcs_block.grid_remove()
+            count = int(struct_si.get("count") or 0)
+            mx_bf_st: Optional[int] = None
+            if kind not in ("uint", "nested_uint"):
+                mx_bf_st = (1 << int(ctx["part"]["bits"])) - 1
+            for idx in range(count):
+                if mx_bf_st is not None:
+                    rom_try = idx - delta
+                    if rom_try < 0 or rom_try > mx_bf_st:
+                        continue
+                lab = (
+                    self._hex.decode_struct_anchor_row_name_field(str(struct_si["name"]), idx) or ""
                 )
-        else:
-            self._list_enum_rom_combo.current(pos)
-        if pcs_info and 0 <= list_row < count:
-            self._list_enum_pcs_var.set(self._pcs_decode_table_row(pcs_info, list_row))
-        else:
-            self._list_enum_pcs_var.set("")
+                self._list_enum_all_indices.append(idx)
+                short = lab.replace("\n", " ")
+                if len(short) > 52:
+                    short = short[:49] + "..."
+                self._list_enum_all_display.append(f"{idx}: {short}")
+            self._list_enum_idx_by_combo = list(self._list_enum_all_indices)
+            display_vals = list(self._list_enum_all_display)
+            self._list_enum_rom_combo["values"] = tuple(display_vals)
+            try:
+                pos = self._list_enum_idx_by_combo.index(list_row)
+            except ValueError:
+                if mx_bf_st is not None and 0 <= list_row < count:
+                    self._list_enum_rom_combo.set(
+                        f"(struct row {list_row} needs ROM {list_row - delta}; "
+                        f"subfield allows 0-{mx_bf_st} - widen Format or trim struct table)"
+                    )
+                else:
+                    self._list_enum_rom_combo.set(
+                        f"(ROM {cur} -> struct row {list_row} - past table or negative)"
+                    )
+            else:
+                self._list_enum_rom_combo.current(pos)
+            return
+
+        self._list_enum_active_pcs = None
+        self._list_enum_active_struct = None
+        self._list_enum_frame.grid_remove()
+        self._list_enum_fi = None
+        self._list_enum_ctx = None
 
     def _on_list_enum_search_changed(self) -> None:
         """Filter the ROM index combobox by the search text (case-insensitive substring match on the label)."""
@@ -8791,7 +8945,9 @@ class StructEditorFrame(ttk.Frame):
             pcs = a.get("entry_label_pcs")
             pcs_name_l = str((pcs or {}).get("name", "")).lower()
 
-            if q and q not in _struct_anchor_search_blob(a, lists_map):
+            if q and q not in _struct_anchor_search_blob(a, lists_map) and not a.get(
+                "entry_label_struct"
+            ):
                 continue
 
             list_keys: List[str] = []
@@ -8812,6 +8968,14 @@ class StructEditorFrame(ttk.Frame):
                     for idx in sorted(lm.keys()):
                         lbl = str(lm[idx])
                         if q in lbl.lower():
+                            label_entries.append((lbl, nm, idx))
+                            label_anchor_names_hit.add(nm)
+                            found_label = True
+                if a.get("entry_label_struct"):
+                    nrows = int(a.get("count") or 0)
+                    for idx in range(nrows):
+                        lbl = self._hex.decode_struct_consumer_row_label(a, idx)
+                        if lbl and q in lbl.lower():
                             label_entries.append((lbl, nm, idx))
                             label_anchor_names_hit.add(nm)
                             found_label = True
@@ -8921,11 +9085,18 @@ class StructEditorFrame(ttk.Frame):
                 lk = normalize_named_anchor_lookup_key(_struct_count_ref_base_name(count_ref_raw))
                 if lk and lk in self._hex.get_lists():
                     self._entry_index_context_list = lk
+        self._entry_index_context_struct = info.get("entry_label_struct")
+        if self._entry_index_context_list or self._entry_index_context_pcs:
+            self._entry_index_context_struct = None
         self._idx_spin.configure(to=max(0, self._entry_count - 1))
         self._idx_var.set("0")
         self._entry_label.config(text=f"/ {self._entry_count}")
         # Keep Find text while switching structs; it now drives Struct Search/Matches filtering.
-        if self._entry_index_context_pcs or self._entry_index_context_list:
+        if (
+            self._entry_index_context_pcs
+            or self._entry_index_context_list
+            or self._entry_index_context_struct
+        ):
             self._entry_search_frame.grid()
         else:
             self._entry_search_frame.grid_remove()
@@ -9086,6 +9257,10 @@ class StructEditorFrame(ttk.Frame):
             row = self._entry_pcs_row_for_struct_index(idx)
             if row is not None:
                 return self._pcs_decode_table_row(self._entry_index_context_pcs, row) or None
+        if self._entry_index_context_struct:
+            cur = self._selected_struct_anchor()
+            if cur:
+                return self._hex.decode_struct_consumer_row_label(cur, idx)
         return None
 
     def _pcs_decode_table_row(self, pcs_info: Dict[str, Any], row_idx: int) -> str:
@@ -9172,6 +9347,30 @@ class StructEditorFrame(ttk.Frame):
             self._entry_label_pcs_frame.grid()
             return
 
+        if self._entry_index_context_struct:
+            cur = self._selected_struct_anchor()
+            if cur:
+                txt = self._hex.decode_struct_consumer_row_label(cur, idx)
+                if txt:
+                    self._entry_index_name_label.config(text=f"-> {txt}")
+                else:
+                    ctx = self._entry_index_context_struct or {}
+                    if ctx.get("enum_field_name"):
+                        self._entry_index_name_label.config(text="-> (no label)")
+                    else:
+                        ref_n = int(ctx.get("ref_row_count") or 0)
+                        delta = int(self._entry_count) - ref_n
+                        raw = idx - delta
+                        if raw < 0:
+                            self._entry_index_name_label.config(text="-> (before referenced table)")
+                        elif raw >= ref_n:
+                            self._entry_index_name_label.config(text="-> (past referenced table)")
+                        else:
+                            self._entry_index_name_label.config(text="-> (empty)")
+                self._entry_index_name_label.grid()
+                self._entry_label_pcs_frame.grid_remove()
+                return
+
         self._entry_index_name_label.grid_remove()
         self._entry_label_pcs_frame.grid_remove()
 
@@ -9189,7 +9388,9 @@ class StructEditorFrame(ttk.Frame):
         self._reload_lists()
         self._entry_index_context_pcs = None
         self._entry_index_context_list = None
+        self._entry_index_context_struct = None
         self._list_enum_ctx = None
+        self._list_enum_active_struct = None
         self._entry_index_name_label.grid_remove()
         self._entry_label_pcs_frame.grid_remove()
         self._entry_search_frame.grid_remove()
@@ -9857,6 +10058,16 @@ class StructEditorFrame(ttk.Frame):
                         chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
                     preview = "".join(chars)
                 return f"{value} ({preview})"
+        for sa in self._hex.get_struct_anchors():
+            if normalize_named_anchor_lookup_key(str(sa["name"])) != base_key:
+                continue
+            if _struct_label_source_field(sa.get("fields") or []) is None:
+                continue
+            cnt = int(sa.get("count") or 0)
+            if cnt <= 0 or idx < 0 or idx >= cnt:
+                return None
+            preview = self._hex.decode_struct_anchor_row_name_field(str(sa["name"]), idx) or ""
+            return f"{value} ({preview})"
         return None
 
     def _start_inline_edit(self, event: Optional[tk.Event] = None) -> None:
@@ -9877,7 +10088,8 @@ class StructEditorFrame(ttk.Frame):
             return
         entry_base = self._entry_file_offset(entry_idx)
 
-        if self._struct_resolve_enum_field_context(iid) is not None:
+        ctx_enum = self._struct_resolve_enum_field_context(iid)
+        if ctx_enum is not None and self._enum_picker_supported_for_ctx(ctx_enum):
             self._sync_field_aux_panels()
             self._list_enum_rom_combo.focus_set()
             return
@@ -14572,6 +14784,37 @@ Format = "`f|u8`[u8 arg0]"
                 anchor_entry["seq_parallel"] = True
                 anchor_entry["seq_entry_count"] = seq_entry_count
             result.append(anchor_entry)
+        # Row labels from another struct's ``name`` field: ``]count`` struct ref (table-aligned), or a top-level
+        # ``uint`` field like ``item:data.items.stats`` (label = ``name`` at the ROM item index for that row).
+        by_norm = {normalize_named_anchor_lookup_key(str(a["name"])): a for a in result}
+        lists_loaded = _load_toml_lists(self._toml_data)
+        pcs_keys_norm = {normalize_named_anchor_lookup_key(str(n)) for n in pcs_names}
+        for anchor_entry in result:
+            if anchor_entry.get("seq_parallel"):
+                continue
+            if anchor_entry.get("entry_label_list") or anchor_entry.get("entry_label_pcs"):
+                continue
+            if not anchor_entry.get("entry_label_struct"):
+                cr = anchor_entry.get("count_ref")
+                if cr:
+                    cref_base = _struct_count_ref_base_name(str(cr))
+                    lk = normalize_named_anchor_lookup_key(cref_base)
+                    if lk not in lists_loaded:
+                        ta = by_norm.get(lk)
+                        if ta is not None and _struct_label_source_field(ta.get("fields") or []) is not None:
+                            anchor_entry["entry_label_struct"] = {
+                                "source_anchor_name": str(ta["name"]),
+                                "ref_row_count": int(ta["count"]),
+                            }
+            if not anchor_entry.get("entry_label_struct"):
+                ef = _struct_entry_label_enum_field_source(
+                    anchor_entry.get("fields") or [],
+                    by_norm,
+                    lists_loaded,
+                    pcs_keys_norm,
+                )
+                if ef:
+                    anchor_entry["entry_label_struct"] = ef
         result.sort(key=lambda x: str(x["name"]).lower())
         self._struct_anchors_cache = result
         return result
@@ -15434,6 +15677,134 @@ Format = "`f|u8`[u8 arg0]"
             messagebox.showerror("Struct", f"TOML write failed:\n{e}")
             return False
         return True
+
+    def struct_anchor_row_file_offset(self, si: Dict[str, Any], row_idx: int) -> Optional[int]:
+        """File offset of row ``row_idx`` in struct table ``si`` (fixed stride or packed ``!`` terminator)."""
+        data = self.get_data()
+        if not data or row_idx < 0:
+            return None
+        cnt = int(si.get("count") or 0)
+        if row_idx >= cnt:
+            return None
+        base = int(si["base_off"])
+        if si.get("packed_terminator") and si.get("packed_terminator_fd"):
+            return _packed_terminator_entry_file_offset(
+                bytes(data), base, row_idx, si["packed_terminator_fd"]
+            )
+        ss = int(si.get("struct_size") or 0)
+        if ss <= 0:
+            return None
+        return base + row_idx * ss
+
+    def _read_pcs_string_at_file_off(self, file_off: int, limit: int = 256) -> str:
+        data = self.get_data()
+        if not data or file_off < 0:
+            return ""
+        chars: List[str] = []
+        for i in range(limit):
+            p = file_off + i
+            if p >= len(data):
+                break
+            b = data[p]
+            if b == 0xFF:
+                break
+            chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
+        return "".join(chars)
+
+    def _read_ascii_string_at_file_off(self, file_off: int, limit: int = 256) -> str:
+        data = self.get_data()
+        if not data or file_off < 0:
+            return ""
+        end = min(len(data), file_off + limit)
+        chunk = bytes(data[file_off:end])
+        return decode_ascii_slot(chunk)
+
+    def decode_struct_anchor_row_name_field(self, source_anchor_name: str, row_idx: int) -> Optional[str]:
+        """Decode the first ``name`` PCS/ASCII (or pointer-backed) field for one row of struct ``source_anchor_name``."""
+        si = self.find_struct_anchor_by_name(source_anchor_name)
+        if not si:
+            return None
+        fields = list(si.get("fields") or [])
+        fld = _struct_label_source_field(fields)
+        if not fld:
+            return None
+        data = self.get_data()
+        if not data:
+            return None
+        row_off = self.struct_anchor_row_file_offset(si, row_idx)
+        if row_off is None:
+            return None
+        roff = _struct_field_payload_file_off(row_off, fld, fields, bytes(data))
+        if roff is None:
+            return None
+        fsz = int(fld["size"])
+        if roff + fsz > len(data):
+            return None
+        raw = bytes(data[roff : roff + fsz])
+        t = fld["type"]
+        if t == "pcs":
+            s = _decode_pcs_raw_bytes(raw)
+            return s if s else None
+        if t == "ascii":
+            s = decode_ascii_slot(raw)
+            return s if s else None
+        if t == "pcs_ptr" and len(raw) >= 4:
+            ptr = int.from_bytes(raw[:4], "little")
+            if (ptr >> 24) in (0x08, 0x09):
+                fo = ptr - GBA_ROM_BASE
+                s = self._read_pcs_string_at_file_off(fo)
+                return s if s else None
+        if t == "ascii_ptr" and len(raw) >= 4:
+            ptr = int.from_bytes(raw[:4], "little")
+            if (ptr >> 24) in (0x08, 0x09):
+                fo = ptr - GBA_ROM_BASE
+                s = self._read_ascii_string_at_file_off(fo)
+                return s if s else None
+        return None
+
+    def decode_struct_consumer_row_label(self, consumer: Dict[str, Any], struct_row_idx: int) -> Optional[str]:
+        """Label for ``consumer`` struct row from ``entry_label_struct`` (table-aligned ``]ref±N`` or per-row ``uint`` enum)."""
+        ctx = consumer.get("entry_label_struct")
+        if not ctx:
+            return None
+        ref_n = int(ctx["ref_row_count"])
+        src = str(ctx["source_anchor_name"])
+        enum_fn = ctx.get("enum_field_name")
+        if enum_fn:
+            data = self.get_data()
+            if not data:
+                return None
+            si = self.find_struct_anchor_by_name(str(consumer.get("name", "")))
+            if not si:
+                return None
+            fields = list(si.get("fields") or [])
+            fld = next((x for x in fields if str(x.get("name", "")) == str(enum_fn)), None)
+            if not fld or fld.get("type") != "uint":
+                return None
+            row_off = self.struct_anchor_row_file_offset(si, struct_row_idx)
+            if row_off is None:
+                return None
+            roff = _struct_field_payload_file_off(row_off, fld, fields, bytes(data))
+            if roff is None:
+                return None
+            fsz = int(fld.get("size") or 0)
+            if fsz <= 0 or roff + fsz > len(data):
+                return None
+            raw_b = bytes(data[roff : roff + fsz])
+            if fld.get("signed"):
+                val = int.from_bytes(raw_b, "little", signed=True)
+            else:
+                val = int.from_bytes(raw_b, "little")
+            idx = int(val) + int(ctx.get("enum_delta") or 0)
+            if idx < 0 or idx >= ref_n:
+                return None
+            return self.decode_struct_anchor_row_name_field(src, idx)
+        cons_n = int(consumer.get("count") or 0)
+        delta = cons_n - ref_n
+        rrow = int(struct_row_idx) - delta
+        if rrow < 0 or rrow >= ref_n:
+            return None
+        return self.decode_struct_anchor_row_name_field(src, rrow)
 
     def get_list_entry_label(self, list_name: str, flat_index: int) -> Optional[str]:
         """Return the string at ``flat_index`` in ``[[List]]`` with this Name, or None.

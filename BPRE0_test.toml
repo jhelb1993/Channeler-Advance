@@ -234,12 +234,12 @@ Format = '''[[loc.data.maps.names]7]26'''
 [[NamedAnchors]]
 Name = '''graphics.pokemon.sprites.front'''
 Address = 0x2350AC
-Format = '''^[sprite<`lzs4x8x8`> uncompressedLength: index:]data.pokemon.names+28'''
+Format = '''^[sprite<`lzs4x8x8`> `pal`graphics.pokemon.palettes.normal uncompressedLength: index:]data.pokemon.names+28'''
 
 [[NamedAnchors]]
 Name = '''graphics.pokemon.sprites.back'''
 Address = 0x23654C
-Format = '''[sprite<`lzs4x8x8`> uncompressedLength: index:]data.pokemon.names+28'''
+Format = '''[sprite<`lzs4x8x8`> `pal`graphics.pokemon.palettes.normal uncompressedLength: index:]data.pokemon.names+28'''
 
 [[NamedAnchors]]
 Name = '''graphics.pokemon.sprites.ghost'''
