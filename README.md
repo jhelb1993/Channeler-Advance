@@ -2,6 +2,8 @@
 
 A ROM hacking tool for Game Boy Advance games, built with Python and Tkinter — hex/table/struct editing, ARM7TDMI disassembly and HackMew-style ASM insertion, pseudo-C decompilation, and graphics preview tied to TOML “NamedAnchors” (similar in spirit to [Hex Maniac Advance](https://github.com/huderlem/hex-maniac-advance)).
 
+**Cross-platform:** runs on **Windows**, **macOS**, and **Linux** (standard CPython + Tkinter). Use the same Python interpreter for `pip` and for launching `main.py` so optional native wheels (Capstone, angr) load correctly.
+
 **Releases & changelog:** [GitHub Releases — Channeler-Advance](https://github.com/Soul-8691/Channeler-Advance/releases) (e.g. demo **v0.1.0** notes).
 
 ## Recent changes (since v0.1.1.1)
@@ -118,13 +120,33 @@ Common tokens include **`ucp4`**, **`ucp4:`** index runs, **`lzp4` / `lzp8`**, *
    git submodule update --init --recursive
    ```
 
-2. Run the launcher:
+2. **Install Python dependencies** (Capstone, angr, Pygments, Pillow, TOML libraries — see `requirements.txt`). Always use the interpreter you will use to run the app:
+
+   ```bash
+   python3 -m pip install -r requirements.txt
+   ```
+
+   On **macOS** and **Linux**, prefer a **venv** so system Python and wheels stay aligned:
+
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate   # Linux / macOS: adjust for your shell
+   python -m pip install -U pip
+   python -m pip install -r requirements.txt
+   ```
+
+   - **Tkinter:** Most official Python builds include it. On **Debian/Ubuntu**, if `import tkinter` fails, install `python3-tk` (package name may differ on other distros).
+   - **Capstone** (`capstone>=5`): ARM disassembly for the hex pane and the **pseudo-C** Capstone fallback. Wheels are usually available from PyPI on macOS and common Linux architectures.
+   - **angr** (`angr>=9.2`): CFG + decompiler for **pseudo-C** when you press **Ctrl+D**. It pulls larger native dependencies (e.g. Z3, unicorn); the first install can take several minutes. If `import angr` fails (missing module, `OSError` loading a library), the editor still starts; **pseudo-C** falls back to Capstone-only until angr installs cleanly into that same environment.
+   - **Troubleshooting:** If `pip` and `python` point at different installations, run `python -m pip install -r requirements.txt` using the same `python` you use for `python main.py`.
+
+3. Run the launcher:
 
    ```bash
    python main.py
    ```
 
-3. Select the game you want to hack from the dropdown and click **Launch Editor**.
+4. Select the game you want to hack from the dropdown and click **Launch Editor**.
 
 ## Project Structure
 
@@ -143,18 +165,20 @@ Channeler-Advance/
 
 ## Requirements
 
-- Python 3.8+
-- Tkinter (included with most Python installations)
+- **Python 3.8+** (64-bit recommended on Windows; use a current CPython from [python.org](https://www.python.org/) or your package manager on macOS/Linux).
+- **Tkinter** — bundled with many installers; on Linux you may need a separate `python3-tk` (or equivalent) package.
 
-Python packages used by the app include **tomli** / **tomli-w**, **Pillow**, **Capstone** (disassembly), **angr** (pseudo-C / analysis, optional in some paths), **Pygments** (syntax highlighting), and the repo may integrate external tools such as **HackMew’s THUMB assembler** for ASM insertion workflows.
+Python packages from `requirements.txt`: **tomli** / **tomli-w**, **Pillow**, **Pygments**, **Capstone** (ARM disassembly), **angr** (pseudo-C decompilation via CFG + decompiler). The repo may also use external tools such as **HackMew’s THUMB assembler** for ASM insertion workflows.
 
-Install Python dependencies (use the same interpreter you use to run `main.py`):
+**Pseudo-C behavior:** With **angr** installed, **Ctrl+D** shows structured decompilation when possible. Without a working **angr** import, the same pane uses a **Capstone**-based line-by-line pseudo-C fallback (still useful, but not the full decompiler). Install everything with:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-**If the app says `tomli-w` is missing but you installed it:** `pip` and `python` often point at different installations on Windows. Install with the interpreter that runs Channeler:
+(or `python3 -m pip` on macOS/Linux — see **Setup** above).
+
+**If the app says `tomli-w` is missing but you installed it:** `pip` and `python` often point at different installations (common on Windows). Install with the interpreter that runs Channeler:
 
 ```bash
 python -m pip install -U tomli-w
