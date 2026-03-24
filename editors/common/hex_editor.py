@@ -1156,6 +1156,19 @@ def _normalize_offset_inner_card_before_count_slash(t: str) -> str:
     )
 
 
+def _normalize_ydk_wrapper_close_before_count_slash(t: str) -> str:
+    """Close the ``[`` opened before `` `ydk`Anchor`` when TOML has ``…[card:List]/count>`` with only one ``]``.
+
+    Valid nested form is ``deck<[`ydk`data.cards.passwords[card:cardnumbers]]/40>`` — two ``]`` before ``/`` (inner
+    list + ydk wrapper). Common shorthand omits the wrapper ``]``: ``…[card:cardnumbers]/40>``."""
+    return re.sub(
+        r"(`ydk`[a-zA-Z0-9_.]+)(\[card\s*:\s*[\w.]+\s*\])/(\w+)\s*>",
+        r"\1\2]/\3>",
+        str(t or ""),
+        flags=re.IGNORECASE,
+    )
+
+
 def _normalize_ydk_deck_struct_shorthand_format(t: str) -> str:
     """Expand minimal `` `ydk` `` deck lines so :func:`_parse_struct_fields` accepts them.
 
@@ -1216,6 +1229,7 @@ def _normalize_shorthand_bracket_terminator_format(s: str) -> str:
     t = _normalize_offset_padding_dual_ydeck_main_extra(t)
     t = _normalize_offset_angle_open_bracket_before_ydk(t)
     t = _normalize_offset_inner_card_before_count_slash(t)
+    t = _normalize_ydk_wrapper_close_before_count_slash(t)
     t = _normalize_ban_deck_struct_shorthand_format(t)
     t = _normalize_ydk_deck_struct_shorthand_format(t)
     if "<[" in t and "!>" in t:
@@ -1285,6 +1299,7 @@ def normalize_named_anchor_format(raw: Any) -> str:
     """Whitespace-strip; expand ``[…]!HEX`` terminator shorthand and `` `ban` `` / `` `ydk` `` deck lines for struct NamedAnchors."""
     t = _strip_seq_struct_format_prefix(str(raw or "").strip())
     t = _normalize_shorthand_bracket_terminator_format(t)
+    t = _normalize_pass_bracket_shorthand(t)
     return _strip_trailing_ydk_struct_format_tag(t)
 
 
@@ -5383,6 +5398,117 @@ def _password_ydk_token_match_key(token: str) -> Optional[str]:
     return t.lstrip("0") or "0"
 
 
+def _normalize_pass_bracket_shorthand(s: str) -> str:
+    """Expand ``[`pass`]`` / ``[pass]`` to ``[pass::::]`` (8-byte digit-pair password field)."""
+    t = str(s or "")
+    t = re.sub(r"\[\s*`pass`\s*\]", "[pass::::]", t, flags=re.IGNORECASE)
+    t = re.sub(r"\[\s*pass\s*\]", "[pass::::]", t, flags=re.IGNORECASE)
+    return t
+
+
+def _struct_field_is_pass_u64_digit_pairs(fd: Dict[str, Any]) -> bool:
+    """True for ``pass::::`` — each byte is a decimal digit 0–9; two bytes form one 0–99 value (tens, ones)."""
+    return (
+        fd.get("type") == "uint"
+        and str(fd.get("name") or "").lower() == "pass"
+        and int(fd.get("size") or 0) == 8
+    )
+
+
+def _password_pass_pair_key_from_rom8(raw: bytes) -> Optional[str]:
+    """8 raw bytes → 8-digit match key (four 0–99 values, each zero-padded to 2 digits). ``None`` if any byte > 9."""
+    if len(raw) != 8:
+        return None
+    parts: List[int] = []
+    for i in range(4):
+        hi, lo = raw[2 * i], raw[2 * i + 1]
+        if hi > 9 or lo > 9:
+            return None
+        parts.append(hi * 10 + lo)
+    return "".join(f"{p:02d}" for p in parts)
+
+
+def _password_pass_pair_display(raw: bytes) -> str:
+    """Editor display: ``98  55  12  03`` when digit-pairs; else hex fallback."""
+    if len(raw) != 8:
+        return raw.hex().upper()
+    chunks: List[str] = []
+    bad = False
+    for i in range(4):
+        hi, lo = raw[2 * i], raw[2 * i + 1]
+        if hi > 9 or lo > 9:
+            bad = True
+            break
+        chunks.append(str(hi * 10 + lo))
+    if bad:
+        return f"0x{int.from_bytes(raw, 'little'):016X}  (not digit-pairs)"
+    return "  ".join(chunks) + "  (pass)"
+
+
+def _password_ydk_pass_token_match_key(token: str) -> Optional[str]:
+    """Normalize a YDK/ban line for ``pass::::`` tables: strip non-digits; need exactly 8 digits."""
+    dig = re.sub(r"\D", "", str(token or "").strip())
+    if len(dig) != 8 or not dig.isdigit():
+        return None
+    return dig
+
+
+def _parse_pass_field_edit_to_bytes(text: str) -> Optional[bytes]:
+    """Parse struct inline edit: ``98981203``, or ``98 98 12 03`` / ``98,98,12,3`` (four 0–99 values)."""
+    s = str(text).strip()
+    dig = re.sub(r"\D", "", s)
+    if len(dig) == 8 and dig.isdigit():
+        out = bytearray(8)
+        for i in range(4):
+            pair = int(dig[i * 2 : i * 2 + 2])
+            if pair > 99:
+                return None
+            out[2 * i] = pair // 10
+            out[2 * i + 1] = pair % 10
+        return bytes(out)
+    parts = [p for p in re.split(r"[\s,/]+", s) if p]
+    if len(parts) == 4:
+        out = bytearray(8)
+        for i, p in enumerate(parts):
+            v = int(p.strip(), 0)
+            if v < 0 or v > 99:
+                return None
+            out[2 * i] = v // 10
+            out[2 * i + 1] = v % 10
+        return bytes(out)
+    return None
+
+
+def _password_lookup_token_in_map(pw_map: Dict[str, int], raw_tok: str) -> Tuple[Optional[int], Optional[str]]:
+    """Resolve YDK/ban password text against *pw_map* (8-digit ``pass`` keys and/or legacy u32 hex keys)."""
+    mkp = _password_ydk_pass_token_match_key(raw_tok)
+    if mkp is not None:
+        ix = pw_map.get(mkp)
+        if ix is not None and 0 <= ix <= 0xFFFF:
+            return int(ix), mkp
+    mk = _password_ydk_token_match_key(raw_tok)
+    if mk is None:
+        return None, mkp
+    ix = pw_map.get(mk)
+    if ix is not None and 0 <= ix <= 0xFFFF:
+        return int(ix), mk
+    try:
+        w = int(mk, 16) & 0xFFFFFFFF
+        alt = _password_rom_u32_match_key(int.from_bytes(w.to_bytes(4, "little"), "big"))
+        if alt != mk:
+            ix = pw_map.get(alt)
+            if ix is not None and 0 <= ix <= 0xFFFF:
+                return int(ix), alt
+        alt2 = _password_rom_u32_match_key(int.from_bytes(w.to_bytes(4, "big"), "little"))
+        if alt2 not in (mk, alt):
+            ix = pw_map.get(alt2)
+            if ix is not None and 0 <= ix <= 0xFFFF:
+                return int(ix), alt2
+    except (ValueError, OverflowError):
+        pass
+    return None, mk
+
+
 def _parse_ydk_deck_text(text: str) -> Tuple[List[str], List[str], bool]:
     """Parse a YDK file: ``#main`` / ``#extra`` password lines; ``!side`` / ``#side`` ignored.
 
@@ -5599,6 +5725,28 @@ def _parse_nested_array_inner_body_fields(inner_body: str) -> Optional[List[Dict
     if not lst:
         return None
     return _parse_struct_inner_content_to_fields(f"card:{lst}")
+
+
+def _replace_nested_array_slash_count_in_format(
+    fmt: str, nested_field_name: str, old_digits: str, new_count: int
+) -> Optional[str]:
+    """Rewrite ``name<…/old>`` to ``name<…/new>`` when *old* is a decimal literal (hard-coded ``/N`` slot count)."""
+    name = str(nested_field_name or "").strip()
+    od = str(old_digits or "").strip()
+    if not name or not od or not re.fullmatch(r"\d+", od):
+        return None
+    try:
+        nc = int(new_count)
+    except (ValueError, TypeError):
+        return None
+    if nc < 0:
+        return None
+    s = str(fmt or "")
+    pat = rf"(?i)({re.escape(name)}<[^>]*)/{re.escape(od)}(\s*>)"
+    m = re.search(pat, s)
+    if not m:
+        return None
+    return s[: m.start()] + m.group(1) + f"/{nc}" + m.group(2) + s[m.end() :]
 
 
 def _struct_field_omitted_from_editor_tree(fd: Optional[Dict[str, Any]]) -> bool:
@@ -9593,6 +9741,10 @@ class StructEditorFrame(ttk.Frame):
                 ptr = int.from_bytes(raw[:4], "little")
                 return f"0x{ptr:08X}  (palette)"
             return ""
+        if ftype == "uint" and _struct_field_is_pass_u64_digit_pairs(fd):
+            if len(raw) >= 8:
+                return _password_pass_pair_display(raw[:8])
+            return ""
         val_u = int.from_bytes(raw, "little")
         if fd.get("blist_ref"):
             hx = raw.hex().upper()
@@ -9762,6 +9914,8 @@ class StructEditorFrame(ttk.Frame):
         self._edit_entry = tk.Entry(tw.master, font=("Consolas", 9))
         self._edit_entry.place(x=tw.winfo_x() + x, y=tw.winfo_y() + y, width=max(w, 80), height=h)
         raw_val = vals[1]
+        if _struct_field_is_pass_u64_digit_pairs(fd):
+            raw_val = raw_val.replace("  (pass)", "").strip()
         if fd.get("enum"):
             raw_val = raw_val.split(" (", 1)[0] if " (" in raw_val else raw_val
         elif fd.get("type") == "bitfield":
@@ -9942,16 +10096,23 @@ class StructEditorFrame(ttk.Frame):
                     self._cancel_inline_edit()
                     return
             elif fd["type"] in ("uint", "ptr", "gfx_sprite", "gfx_tileset", "gfx_tilemap", "gfx_palette"):
-                try:
-                    val = int(text, 0)
-                except ValueError:
-                    self._cancel_inline_edit()
-                    return
-                enc = (
-                    _encode_struct_uint_field(fd, val)
-                    if fd["type"] == "uint"
-                    else val.to_bytes(fd["size"], "little")
-                )
+                if fd["type"] == "uint" and _struct_field_is_pass_u64_digit_pairs(fd):
+                    enc_pb = _parse_pass_field_edit_to_bytes(text)
+                    if enc_pb is None:
+                        self._cancel_inline_edit()
+                        return
+                    enc = enc_pb
+                else:
+                    try:
+                        val = int(text, 0)
+                    except ValueError:
+                        self._cancel_inline_edit()
+                        return
+                    enc = (
+                        _encode_struct_uint_field(fd, val)
+                        if fd["type"] == "uint"
+                        else val.to_bytes(fd["size"], "little")
+                    )
                 self._hex.write_bytes_at(foff, enc)
                 if fd.get("type") == "uint" and self._count_field_drives_nested(str(fd["name"])):
                     self._load_entry(entry_idx)
@@ -10057,16 +10218,22 @@ class StructEditorFrame(ttk.Frame):
                 self._cancel_inline_edit()
                 return
         elif fd["type"] in ("uint", "ptr", "gfx_sprite", "gfx_tileset", "gfx_tilemap", "gfx_palette"):
-            try:
-                val = int(text, 0)
-            except ValueError:
-                self._cancel_inline_edit()
-                return
-            enc = (
-                _encode_struct_uint_field(fd, val)
-                if fd["type"] == "uint"
-                else val.to_bytes(fd["size"], "little")
-            )
+            if fd["type"] == "uint" and _struct_field_is_pass_u64_digit_pairs(fd):
+                enc = _parse_pass_field_edit_to_bytes(text)
+                if enc is None:
+                    self._cancel_inline_edit()
+                    return
+            else:
+                try:
+                    val = int(text, 0)
+                except ValueError:
+                    self._cancel_inline_edit()
+                    return
+                enc = (
+                    _encode_struct_uint_field(fd, val)
+                    if fd["type"] == "uint"
+                    else val.to_bytes(fd["size"], "little")
+                )
             self._hex.write_bytes_at(foff, enc)
             if fd.get("type") == "uint" and self._count_field_drives_nested(str(fd["name"])):
                 self._load_entry(entry_idx)
@@ -15639,8 +15806,13 @@ Format = "`f|u8`[u8 arg0]"
         n = count_raw if isinstance(count_raw, int) else self._resolve_struct_count(str(count_raw))
         if n is None or n <= 0:
             return None, f"Invalid row count for {password_anchor_name!r}."
-        pw_f = next((f for f in fields if str(f.get("name")) == "password"), fields[0])
+        pw_f = next((f for f in fields if str(f.get("name")) == "password"), None)
+        if pw_f is None:
+            pw_f = next((f for f in fields if str(f.get("name")).lower() == "pass"), None)
+        if pw_f is None:
+            pw_f = fields[0]
         delta = int(pw_f.get("offset") or 0)
+        is_pass_u64 = _struct_field_is_pass_u64_digit_pairs(pw_f)
 
         lists_all = _load_toml_lists(self._toml_data)
         idx_list_raw = _password_anchor_index_list_name(fmt_raw)
@@ -15673,12 +15845,20 @@ Format = "`f|u8`[u8 arg0]"
         out: Dict[str, int] = {}
         for i in range(int(n)):
             ro = base_off + i * struct_size + delta
+            card_u16 = max(0, min(0xFFFF, row_to_card_u16(i)))
+            if is_pass_u64:
+                if ro + 8 > len(self._data):
+                    break
+                raw8 = bytes(self._data[ro : ro + 8])
+                mkp = _password_pass_pair_key_from_rom8(raw8)
+                if mkp is not None and mkp not in out:
+                    out[mkp] = card_u16
+                continue
             if ro + 4 > len(self._data):
                 break
             word = self._data[ro : ro + 4]
             v_le = int.from_bytes(word, "little")
             v_be = int.from_bytes(word, "big")
-            card_u16 = max(0, min(0xFFFF, row_to_card_u16(i)))
             for v in (v_le, v_be):
                 mk = _password_rom_u32_match_key(v)
                 if mk not in out:
@@ -15706,43 +15886,117 @@ Format = "`f|u8`[u8 arg0]"
         entry_base = base_off + entry_idx * int(info["struct_size"])
         stride = int(na_fd["inner_stride"])
         cf_name = str(na_fd.get("count_field") or "")
-        if na_fd.get("count_field_external"):
+        external = bool(na_fd.get("count_field_external"))
+        external_literal = external and bool(re.fullmatch(r"\d+", cf_name.strip() or ""))
+        external_named = external and not external_literal
+
+        if external_named:
             messagebox.showerror(
                 "Import YDK",
-                f"Nested length is resolved from TOML/ROM metadata ({cf_name!r}), not a struct uint field; "
-                "YDK import cannot rewrite that length.",
+                f"Nested length is resolved from TOML/ROM metadata ({cf_name!r}), not a struct uint field. "
+                "Use a numeric slot count in the nested field (e.g. deck<…/40>) so the importer can update it, "
+                "or edit the structure TOML manually.",
             )
             return
-        cf = next((f for f in fields if str(f.get("name")) == cf_name), None)
-        if not cf or cf.get("type") != "uint":
-            messagebox.showerror("Import YDK", f"Count field {cf_name!r} not found for this layout.")
-            return
-        rsz = int(cf["size"])
-        data = bytes(self._data)
-        na_base = _nested_array_data_base_file(entry_base, na_fd, fields, data)
-        if na_base is None:
-            messagebox.showerror("Import YDK", "Could not resolve the deck pointer for this row.")
-            return
-        cur_len = int(se._read_nested_array_count(entry_base, na_fd))
-        byte_len = bool(na_fd.get("count_is_byte_length"))
-        # ``*bytes`` count fields hold byte length; otherwise the uint is card/element count (stride × count = bytes).
-        old_span = max(0, cur_len if byte_len else cur_len * stride)
-        reloc = _ptr_word_off_and_alloc_start(entry_base, na_fd, fields, data)
-        if reloc is None:
-            messagebox.showerror(
-                "Import YDK",
-                "This pointer-backed deck layout is not relocatable (expected a GBA pointer field).",
-            )
-            return
-        _poff, alloc_lo, na_chk = reloc
-        if na_chk != na_base:
-            messagebox.showerror("Import YDK", "Internal: nested base mismatch.")
-            return
+
+        cf: Optional[Dict[str, Any]] = None
+        rsz = 2
+        if not external_literal:
+            cf = next((f for f in fields if str(f.get("name")) == cf_name), None)
+            if not cf or cf.get("type") != "uint":
+                messagebox.showerror("Import YDK", f"Count field {cf_name!r} not found for this layout.")
+                return
+            rsz = int(cf["size"])
+
+        na_nm = str(na_fd.get("name") or "deck")
+        while True:
+            data = bytes(self._data)
+            na_base = _nested_array_data_base_file(entry_base, na_fd, fields, data)
+            if na_base is None:
+                messagebox.showerror("Import YDK", "Could not resolve the deck pointer for this row.")
+                return
+            cur_len = int(se._read_nested_array_count(entry_base, na_fd))
+            byte_len = bool(na_fd.get("count_is_byte_length"))
+            # ``*bytes`` count fields hold byte length; otherwise the uint is card/element count (stride × count = bytes).
+            old_span = max(0, cur_len if byte_len else cur_len * stride)
+            reloc = _ptr_word_off_and_alloc_start(entry_base, na_fd, fields, data)
+            if reloc is None:
+                messagebox.showerror(
+                    "Import YDK",
+                    "This pointer-backed deck layout is not relocatable (expected a GBA pointer field).",
+                )
+                return
+            _poff, alloc_lo, na_chk = reloc
+            if na_chk != na_base:
+                messagebox.showerror("Import YDK", "Internal: nested base mismatch.")
+                return
+            data_lo = int(na_base)
+            old_hi = data_lo + old_span
+            need_bytes = len(new_blob)
+            if (
+                external_literal
+                and need_bytes > old_span
+                and new_len > cur_len
+            ):
+                if messagebox.askyesno(
+                    "Import YDK - update slot count",
+                    f"The deck needs {new_len} cards ({need_bytes} bytes) but the Format hard-codes "
+                    f"/{cf_name.strip()} slots ({old_span} bytes).\n\n"
+                    f"Update [[NamedAnchors]] Format for {struct_name!r} so `{na_nm}<…>/{cf_name.strip()}>` "
+                    f"becomes `…/{new_len}`? (Saves the structure TOML.)\n\n"
+                    "Yes — rewrite the constant and continue.\n"
+                    "No — cancel this import.",
+                ):
+                    anchor = info.get("anchor") or {}
+                    fmt_cur = str(anchor.get("Format", "") or "")
+                    new_fmt = _replace_nested_array_slash_count_in_format(
+                        fmt_cur, na_nm, cf_name.strip(), new_len
+                    )
+                    if new_fmt is None:
+                        messagebox.showerror(
+                            "Import YDK",
+                            f"Could not find `{na_nm}<…>/{cf_name.strip()}>` in the anchor Format; "
+                            "edit the TOML manually.",
+                        )
+                        return
+                    ok_u, err_u, _ = self.update_named_anchor_address_and_format(
+                        struct_name, new_format=new_fmt
+                    )
+                    if not ok_u:
+                        messagebox.showerror("Import YDK", err_u or "Could not save TOML.")
+                        return
+                    self._invalidate_struct_anchors_cache()
+                    se.refresh_anchors()
+                    se._on_combo_select()
+                    info2 = self.find_struct_anchor_by_name(struct_name)
+                    if not info2:
+                        messagebox.showerror(
+                            "Import YDK", "Struct anchor missing after TOML update (reload structure TOML?)."
+                        )
+                        return
+                    info = info2
+                    fields = list(info2.get("fields") or [])
+                    na_fd2 = next(
+                        (
+                            f
+                            for f in fields
+                            if f.get("type") == "nested_array"
+                            and str(f.get("name")) == na_nm
+                        ),
+                        None,
+                    )
+                    if not na_fd2:
+                        messagebox.showerror("Import YDK", "Nested deck field missing after TOML refresh.")
+                        return
+                    na_fd = na_fd2
+                    continue
+                messagebox.showinfo("Import YDK", "Import cancelled.")
+                return
+            break
+
         # Card u16 data starts at ``na_base`` (e.g. *offset+10); ``alloc_lo`` is the pointer target (allocation head).
-        data_lo = int(na_base)
-        old_hi = data_lo + old_span
-        need_bytes = len(new_blob)
-        mx = min((1 << (8 * rsz)) - 1, 65535)
+        # ``data_lo``, ``old_hi``, ``need_bytes``, ``reloc``, etc. come from the last loop iteration above.
+        mx = min((1 << (8 * rsz)) - 1, 65535) if not external_literal else 65535
         if byte_len:
             length_val = max(0, min(need_bytes, mx))
         else:
@@ -15750,6 +16004,9 @@ Format = "`f|u8`[u8 arg0]"
             length_val = max(0, min(int(new_len), mx))
 
         def _write_length_field() -> bool:
+            if external_literal:
+                return True
+            assert cf is not None
             roff = se._struct_field_file_off(entry_base, cf)
             if roff is None or roff + rsz > len(self._data):
                 messagebox.showerror("Import YDK", "Could not write the length field.")
@@ -16231,27 +16488,7 @@ Format = "`f|u8`[u8 arg0]"
             return
 
         def _lookup_card_index(raw_tok: str) -> Tuple[Optional[int], Optional[str]]:
-            mk = _password_ydk_token_match_key(raw_tok)
-            if mk is None:
-                return None, None
-            ix = pw_map.get(mk)
-            if ix is not None and 0 <= ix <= 0xFFFF:
-                return int(ix), mk
-            try:
-                w = int(mk, 16) & 0xFFFFFFFF
-                alt = _password_rom_u32_match_key(int.from_bytes(w.to_bytes(4, "little"), "big"))
-                if alt != mk:
-                    ix = pw_map.get(alt)
-                    if ix is not None and 0 <= ix <= 0xFFFF:
-                        return int(ix), alt
-                alt2 = _password_rom_u32_match_key(int.from_bytes(w.to_bytes(4, "big"), "little"))
-                if alt2 not in (mk, alt):
-                    ix = pw_map.get(alt2)
-                    if ix is not None and 0 <= ix <= 0xFFFF:
-                        return int(ix), alt2
-            except (ValueError, OverflowError):
-                pass
-            return None, mk
+            return _password_lookup_token_in_map(pw_map, raw_tok)
 
         out_rows: List[Tuple[int, int]] = []
         invalid_pw: List[str] = []
@@ -16345,23 +16582,28 @@ Format = "`f|u8`[u8 arg0]"
                     "`ydk` [card:…] card table, or a `ydk` pointer+length deck (offset<[…]/length> with u16 cards).",
                 )
                 return
-            na_fd = na_fd_term if na_fd_term else na_fd_pc
-            assert na_fd is not None
-            stride = int(na_fd["inner_stride"])
-            term = bytes(na_fd["terminator"]) if na_fd.get("terminator") is not None else b""
-            if stride < 1:
-                messagebox.showerror("Import YDK", "Invalid nested card stride.")
-                return
-            if na_fd_term:
+            # Match the import branch below: prefer `ydk` pointer+length deck(s) when present. Otherwise
+            # `_struct_per_row_terminator_nested_field` can pick another `!`-terminated nested blob (e.g. drops
+            # with card+chance, stride 4) and wrongly reject import before the file dialog.
+            if na_fd_pc_list:
+                stride = 2
+                term = b""
+            elif na_fd_term:
+                na_fd = na_fd_term
+                stride = int(na_fd["inner_stride"])
+                term = bytes(na_fd["terminator"]) if na_fd.get("terminator") is not None else b""
+                if stride < 1:
+                    messagebox.showerror("Import YDK", "Invalid nested card stride.")
+                    return
                 if not term:
                     messagebox.showerror("Import YDK", "Invalid nested terminator.")
                     return
-            if stride != 2:
-                messagebox.showerror(
-                    "Import YDK",
-                    f"YDK import expects 2-byte card slots (u16); this struct uses inner stride {stride}.",
-                )
-                return
+                if stride != 2:
+                    messagebox.showerror(
+                        "Import YDK",
+                        f"YDK import expects 2-byte card slots (u16); this struct uses inner stride {stride}.",
+                    )
+                    return
 
         path = filedialog.askopenfilename(
             title="Import YDK deck",
@@ -16389,28 +16631,7 @@ Format = "`f|u8`[u8 arg0]"
             return
 
         def _lookup_card_index(raw_tok: str) -> Tuple[Optional[int], Optional[str]]:
-            mk = _password_ydk_token_match_key(raw_tok)
-            if mk is None:
-                return None, None
-            ix = pw_map.get(mk)
-            if ix is not None and 0 <= ix <= 0xFFFF:
-                return int(ix), mk
-            # Same hex digits as u32: try the other endian label (forward / big-endian password wording).
-            try:
-                w = int(mk, 16) & 0xFFFFFFFF
-                alt = _password_rom_u32_match_key(int.from_bytes(w.to_bytes(4, "little"), "big"))
-                if alt != mk:
-                    ix = pw_map.get(alt)
-                    if ix is not None and 0 <= ix <= 0xFFFF:
-                        return int(ix), alt
-                alt2 = _password_rom_u32_match_key(int.from_bytes(w.to_bytes(4, "big"), "little"))
-                if alt2 not in (mk, alt):
-                    ix = pw_map.get(alt2)
-                    if ix is not None and 0 <= ix <= 0xFFFF:
-                        return int(ix), alt2
-            except (ValueError, OverflowError):
-                pass
-            return None, mk
+            return _password_lookup_token_in_map(pw_map, raw_tok)
 
         invalid_pw: List[str] = []
         main_idx: List[int] = []

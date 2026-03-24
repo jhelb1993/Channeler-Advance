@@ -1,5 +1,8 @@
+reshef card sprite decoding
+double clicking graphics highlights all bytes
 more games
 generate toml (other option)
+update readme
 testing
 fix finnicky behaviors
 triple backticks instead of quotes
