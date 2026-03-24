@@ -36,10 +36,10 @@ then
 	echo
 elif [[ "${1##*.}" = "s"||"${1##*.}" = "asm" ]]
 then
-	if [[ ! -f ${1} ]]
+	if [[ ! -f "${1}" ]]
 	then
 		echo "Cannot assemble ${1}: the file does not exist."
-	elif [[ $(stat -c "%s" ${1}) = 0 ]]
+	elif [[ ! -s "${1}" ]]
 	then
 		echo "Cannot assemble ${1}: the file is empty."
 	elif [[ res -gt 0 ]]
@@ -50,14 +50,14 @@ then
 		then
 			rm a.out
 		fi
-		$(${AS} -mthumb -mthumb-interwork ${1})
+		"${AS}" -mthumb -mthumb-interwork "${1}"
 		if [[ $? = 0 ]]
 		then
 			if [[ ${2} = "" ]]
 			then
 				dst=${1%%.*}.bin
 			fi
-			$(${OBJCOPY} -O binary a.out ${dst})
+			"${OBJCOPY}" -O binary a.out "${dst}"
 			if [[ $? != 0 || ! -f ${dst} ]]
 			then
 				rm a.out

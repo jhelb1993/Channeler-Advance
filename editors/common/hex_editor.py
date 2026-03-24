@@ -128,21 +128,53 @@ def _tomli_w_missing_message() -> str:
     )
 
 _ANGR_AVAILABLE = False
+_ANGR_IMPORT_ERROR: Optional[str] = None
 try:
     import angr
     _ANGR_AVAILABLE = True
-except ImportError:
-    pass
+except (ImportError, OSError, RuntimeError) as _angr_import_err:
+    # OSError: native deps / z3 / unicorn load failures common on some Linux/WSL setups
+    _ANGR_IMPORT_ERROR = str(_angr_import_err).strip() or _angr_import_err.__class__.__name__
+
+
+def _pseudo_c_diag(msg: str) -> None:
+    """Print pseudo-C / angr pipeline diagnostics to stderr when CHANNELER_HEX_PSEUDO_C_DEBUG is set."""
+    flag = os.environ.get("CHANNELER_HEX_PSEUDO_C_DEBUG", "").strip().lower()
+    if flag not in ("1", "true", "yes", "on", "debug"):
+        return
+    print(f"[Channeler pseudo-C] {msg}", file=sys.stderr, flush=True)
 
 _CAPSTONE_AVAILABLE = False
+_CAPSTONE_IMPORT_ERROR: Optional[str] = None
+ARM_OP_IMM = None  # type: ignore[misc, assignment]
+ARM_OP_MEM = None  # type: ignore[misc, assignment]
+ARM_REG_PC = None  # type: ignore[misc, assignment]
 try:
     from capstone import Cs, CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_THUMB
-    from capstone.arm import ARM_OP_IMM, ARM_OP_MEM, ARM_REG_PC
-    _CAPSTONE_AVAILABLE = True
-except ImportError:
-    ARM_OP_IMM = None  # type: ignore[misc, assignment]
-    ARM_OP_MEM = None  # type: ignore[misc, assignment]
-    ARM_REG_PC = None  # type: ignore[misc, assignment]
+except (ImportError, OSError, RuntimeError) as _capstone_main_err:
+    _CAPSTONE_IMPORT_ERROR = str(_capstone_main_err).strip() or _capstone_main_err.__class__.__name__
+else:
+    try:
+        try:
+            from capstone.arm import ARM_OP_IMM, ARM_OP_MEM, ARM_REG_PC
+        except ImportError:
+            # Capstone 5+ exposes these under arm_const on some platforms / builds.
+            from capstone.arm_const import ARM_OP_IMM, ARM_OP_MEM, ARM_REG_PC
+    except ImportError as _capstone_arm_err:
+        _CAPSTONE_IMPORT_ERROR = str(_capstone_arm_err).strip() or _capstone_arm_err.__class__.__name__
+    else:
+        _CAPSTONE_AVAILABLE = True
+
+
+def _capstone_missing_hint() -> str:
+    """Human-readable reason + install hint (WSL/Linux often: wrong Python or missing wheel native lib)."""
+    exe = sys.executable
+    err = (_CAPSTONE_IMPORT_ERROR or "").strip()
+    lines = ["(Capstone not available)"]
+    if err:
+        lines.append(err)
+    lines.append(f'Install into this interpreter:  "{exe}" -m pip install -U capstone')
+    return "\n".join(lines)
 
 _PYGMENTS_AVAILABLE = False
 try:
@@ -498,6 +530,9 @@ HEX_DISP_ADDR_END = 10
 HEX_DISP_CARET_START = 10
 HEX_DISP_CARET_END = 26  # exclusive
 HEX_DISP_HEX_START = 28  # column index of first hex digit for byte 0
+# ASCII-only carets: Unicode ›/· often render variable-width in Tk on Linux/WSL and break column alignment.
+HEX_CARET_XREF_MARK = ">"
+HEX_CARET_EMPTY_MARK = "."
 HEX_DIGITS = "0123456789ABCDEFabcdef"
 # Goto box: letters/digits/dot/underscore (hex offsets + NamedAnchor names like data.header.title)
 _GOTO_ALLOWED_CHARS = set(string.ascii_letters + string.digits + "._")
@@ -869,56 +904,56 @@ def _init_pcs() -> None:
     _fill_pcs("ÀÁÂÇÈÉÊËÌÎÏ", 0x01)
     _fill_pcs("ÒÓÔŒÙÚÛÑßàá", 0x0B)
     _fill_pcs("çèéêëìîïòóôœùúûñºª", 0x10)
-    _PCS_BYTE_TO_CHAR[0x2C] = "·"  # \e
+    _PCS_BYTE_TO_CHAR[0x2C] = "."  # \e (ASCII dot: stable width vs middle dot in Tk on Linux/WSL)
     _PCS_BYTE_TO_CHAR[0x2D] = "&"
     _PCS_BYTE_TO_CHAR[0x2E] = "+"   # \+
     _fill_pcs("Lv=;", 0x34)  # \Lv = ;
     for i in range(0x38, 0x48):
         if i not in _PCS_BYTE_TO_CHAR:
-            _PCS_BYTE_TO_CHAR[i] = "·"
-    _PCS_BYTE_TO_CHAR[0x48] = "·"  # \r
+            _PCS_BYTE_TO_CHAR[i] = "."
+    _PCS_BYTE_TO_CHAR[0x48] = "."  # \r
     for i in range(0x49, 0x51):
         if i not in _PCS_BYTE_TO_CHAR:
-            _PCS_BYTE_TO_CHAR[i] = "·"
+            _PCS_BYTE_TO_CHAR[i] = "."
     _fill_pcs("¿¡PmPKBLoCÍ", 0x51)  # \pk \mn \Po \Ke \Bl \Lo \Ck Í (10 chars)
     _fill_pcs("%()", 0x5B)
     for i in range(0x5E, 0x68):
         if i not in _PCS_BYTE_TO_CHAR:
-            _PCS_BYTE_TO_CHAR[i] = "·"
+            _PCS_BYTE_TO_CHAR[i] = "."
     _PCS_BYTE_TO_CHAR[0x68] = "â"
     for i in range(0x69, 0x6F):
         if i not in _PCS_BYTE_TO_CHAR:
-            _PCS_BYTE_TO_CHAR[i] = "·"
+            _PCS_BYTE_TO_CHAR[i] = "."
     _PCS_BYTE_TO_CHAR[0x6F] = "í"
-    _fill_pcs("↑↓←→", 0x79)  # \au \ad \al \ar
+    _fill_pcs("^v<>", 0x79)  # \au \ad \al \ar (ASCII arrows; Unicode arrows are often double-width in Tk on Linux)
     for i in range(0x7D, 0x84):
         if i not in _PCS_BYTE_TO_CHAR:
-            _PCS_BYTE_TO_CHAR[i] = "·"
-    _PCS_BYTE_TO_CHAR[0x84] = "·"  # \d
+            _PCS_BYTE_TO_CHAR[i] = "."
+    _PCS_BYTE_TO_CHAR[0x84] = "."  # \d
     _fill_pcs("<>", 0x85)  # \< \>
     for i in range(0x87, 0xA1):
         if i not in _PCS_BYTE_TO_CHAR:
-            _PCS_BYTE_TO_CHAR[i] = "·"
+            _PCS_BYTE_TO_CHAR[i] = "."
     _fill_pcs("0123456789", 0xA1)
-    _fill_pcs("!?.-·'°$,*//", 0xAB)  # \. \qo \qc \sm \sf
+    _fill_pcs("!?.-.'°$,*//", 0xAB)  # \. \qo \qc \sm \sf
     _fill_pcs("ABCDEFGHIJKLMNOPQRSTUVWXYZ", 0xBB)
     _fill_pcs("abcdefghijklmnopqrstuvwxyz", 0xD5)
     for i in range(0xEF, 0xF0):
         if i not in _PCS_BYTE_TO_CHAR:
-            _PCS_BYTE_TO_CHAR[i] = "·"
+            _PCS_BYTE_TO_CHAR[i] = "."
     _fill_pcs(":ÄÖÜäöü", 0xF0)
-    _PCS_BYTE_TO_CHAR[0xF7] = "·"  # \?
-    _PCS_BYTE_TO_CHAR[0xF8] = "·"  # \btn
-    _PCS_BYTE_TO_CHAR[0xF9] = "·"  # \9
-    _PCS_BYTE_TO_CHAR[0xFA] = "\u00B6"  # \l (¶ pilcrow)
-    _PCS_BYTE_TO_CHAR[0xFB] = "\u00B6"  # \pn
-    _PCS_BYTE_TO_CHAR[0xFC] = "·"  # \CC
+    _PCS_BYTE_TO_CHAR[0xF7] = "."  # \?
+    _PCS_BYTE_TO_CHAR[0xF8] = "."  # \btn
+    _PCS_BYTE_TO_CHAR[0xF9] = "."  # \9
+    _PCS_BYTE_TO_CHAR[0xFA] = "P"  # \l (ASCII: pilcrow is wide in some fonts on Linux/WSL)
+    _PCS_BYTE_TO_CHAR[0xFB] = "P"  # \pn
+    _PCS_BYTE_TO_CHAR[0xFC] = "."  # \CC
     _PCS_BYTE_TO_CHAR[0xFD] = "\\"  # \\
-    _PCS_BYTE_TO_CHAR[0xFE] = "\u00B6"  # \n (¶)
+    _PCS_BYTE_TO_CHAR[0xFE] = "P"  # \n (paragraph)
     _PCS_BYTE_TO_CHAR[0xFF] = '"'
     for i in range(0x100):
         if i not in _PCS_BYTE_TO_CHAR:
-            _PCS_BYTE_TO_CHAR[i] = "·"
+            _PCS_BYTE_TO_CHAR[i] = "."
 
 
 # Reverse map for typing: display char -> PCS byte (lowest byte wins for duplicates)
@@ -929,7 +964,7 @@ def _init_pcs_reverse() -> None:
     if _PCS_CHAR_TO_BYTE:
         return
     for b in range(0x100):
-        c = _PCS_BYTE_TO_CHAR.get(b, "·")
+        c = _PCS_BYTE_TO_CHAR.get(b, ".")
         if c not in _PCS_CHAR_TO_BYTE:
             _PCS_CHAR_TO_BYTE[c] = b
 
@@ -2861,7 +2896,7 @@ class PcsStringTableFrame(ttk.Frame):
                 else:
                     enc = encode_pcs_string(text, info["width"])
                     parts = enc[: enc.index(0xFF)] if 0xFF in enc else enc
-                    disp = "".join(_PCS_BYTE_TO_CHAR.get(b, "·") for b in parts)
+                    disp = "".join(_PCS_BYTE_TO_CHAR.get(b, ".") for b in parts)
                 self._hex.write_bytes_at(off, enc)
                 self._tree.set(self._edit_iid, "val", disp)
             except (ValueError, TypeError, KeyError):
@@ -2887,7 +2922,7 @@ class PcsStringTableFrame(ttk.Frame):
                 else:
                     enc = encode_pcs_string(text, info["width"])
                     parts = enc[: enc.index(0xFF)] if 0xFF in enc else enc
-                    disp = "".join(_PCS_BYTE_TO_CHAR.get(b, "·") for b in parts)
+                    disp = "".join(_PCS_BYTE_TO_CHAR.get(b, ".") for b in parts)
                 self._hex.write_bytes_at(off, enc)
                 self._tree.set(self._edit_iid, "val", disp)
             except (ValueError, TypeError, KeyError):
@@ -3001,7 +3036,7 @@ class PcsStringTableFrame(ttk.Frame):
                 for b in chunk:
                     if b == 0xFF:
                         break
-                    chars.append(_PCS_BYTE_TO_CHAR.get(b, "·"))
+                    chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
                 disp = "".join(chars)
             self._tree.insert("", tk.END, values=(str(i), disp), iid=f"pcs_{i}")
 
@@ -8467,7 +8502,7 @@ class StructEditorFrame(ttk.Frame):
             b = data[off + i]
             if b == 0xFF:
                 break
-            chars.append(_PCS_BYTE_TO_CHAR.get(b, "·"))
+            chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
         return "".join(chars)
 
     def _update_entry_index_name_label(self) -> None:
@@ -9040,7 +9075,7 @@ class StructEditorFrame(ttk.Frame):
             for b in raw:
                 if b == 0xFF:
                     break
-                chars.append(_PCS_BYTE_TO_CHAR.get(b, "·"))
+                chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
             return "".join(chars)
         if ftype == "ascii":
             return decode_ascii_slot(raw)
@@ -9101,7 +9136,7 @@ class StructEditorFrame(ttk.Frame):
             b = data[file_off + i]
             if b == 0xFF:
                 break
-            chars.append(_PCS_BYTE_TO_CHAR.get(b, "·"))
+            chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
         return "".join(chars)
 
     def _resolve_enum(self, value: int, enum_ref: str) -> Optional[str]:
@@ -9141,7 +9176,7 @@ class StructEditorFrame(ttk.Frame):
                         b = data[entry_off + i]
                         if b == 0xFF:
                             break
-                        chars.append(_PCS_BYTE_TO_CHAR.get(b, "·"))
+                        chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
                     preview = "".join(chars)
                 return f"{value} ({preview})"
         return None
@@ -9544,6 +9579,7 @@ class HexEditorFrame(ttk.Frame):
         self._hackmew_asm_start: Optional[int] = None
         self._hackmew_asm_end: Optional[int] = None
         self._pseudo_c_pane_visible = False
+        self._pseudo_c_angr_generation = 0  # ignore stale angr thread completions (WSL / fast refresh)
         self._c_inject_mode = False
         self._c_inject_region: Optional[Tuple[int, int]] = None  # [start, end) file offsets for repoint-all skip
         self._c_inject_elf_symbols: Dict[str, int] = {}  # last successful link: nm .text symbol -> ROM file offset
@@ -9722,7 +9758,7 @@ class HexEditorFrame(ttk.Frame):
         self._c_inject_offset_entry.pack(side=tk.LEFT, padx=(0, 8))
         ttk.Label(pc_toolbar, text="Compiled:", font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 2))
         ttk.Label(pc_toolbar, textvariable=self._c_inject_size_var, font=("Consolas", 8)).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Label(pc_toolbar, text="Ctrl+Shift+4 edit · 5 compile · 6 apply patches", font=("Consolas", 8), foreground="#555").pack(
+        ttk.Label(pc_toolbar, text="Ctrl+Shift+4 edit, 5 compile, 6 apply patches", font=("Consolas", 8), foreground="#555").pack(
             side=tk.LEFT
         )
 
@@ -9882,7 +9918,7 @@ class HexEditorFrame(ttk.Frame):
         _stb.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         ttk.Label(
             _stb,
-            text="Ctrl+Shift+Enter — run   ·   Ctrl+Shift+7 — close",
+            text="Ctrl+Shift+Enter — run   |   Ctrl+Shift+7 — close",
             font=("Consolas", 8),
             foreground="#555",
         ).pack(side=tk.LEFT)
@@ -10367,7 +10403,7 @@ class HexEditorFrame(ttk.Frame):
         return "\n".join(lines)
 
     def _compile_hackmew_asm(self, event: Optional[tk.Event] = None) -> Optional[str]:
-        """Compile edited HackMew ASM via deps/thumb.bat and insert .bin into ROM. Bound to Ctrl+I."""
+        """Compile edited HackMew ASM via deps/thumb.bat (Windows) or deps/thumb.sh (macOS/Linux) and insert .bin. Ctrl+I."""
         if not self._hackmew_mode or not self._asm_pane_visible:
             return "break"
         if self._hackmew_asm_start is None or self._hackmew_asm_end is None:
@@ -10382,13 +10418,17 @@ class HexEditorFrame(ttk.Frame):
         original_size = self._hackmew_asm_end - self._hackmew_asm_start
 
         deps_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "deps")
-        thumb_bat = os.path.join(deps_dir, "thumb.bat")
-        if not os.path.isfile(thumb_bat):
-            messagebox.showerror("Compile Error", f"thumb.bat not found at:\n{thumb_bat}")
-            return "break"
+        if os.name == "nt":
+            thumb_tool = os.path.join(deps_dir, "thumb.bat")
+            if not os.path.isfile(thumb_tool):
+                messagebox.showerror("Compile Error", f"thumb.bat not found at:\n{thumb_tool}")
+                return "break"
+        else:
+            thumb_tool = os.path.join(deps_dir, "thumb.sh")
+            if not os.path.isfile(thumb_tool):
+                messagebox.showerror("Compile Error", f"thumb.sh not found at:\n{thumb_tool}")
+                return "break"
 
-        import tempfile
-        import subprocess
         with tempfile.TemporaryDirectory() as tmpdir:
             asm_path = os.path.join(tmpdir, "edit.asm")
             bin_path = os.path.join(tmpdir, "edit.bin")
@@ -10397,12 +10437,16 @@ class HexEditorFrame(ttk.Frame):
             with open(asm_path, "w", encoding="utf-8") as f:
                 f.write(preamble + asm_text + "\n")
 
+            if os.name == "nt":
+                cmd = [os.environ.get("COMSPEC", "cmd.exe"), "/c", thumb_tool, asm_path, bin_path]
+            else:
+                bash = shutil.which("bash") or "/bin/bash"
+                cmd = [bash, thumb_tool, asm_path, bin_path]
             result = subprocess.run(
-                [thumb_bat, asm_path, bin_path],
+                cmd,
                 cwd=deps_dir,
                 capture_output=True,
                 text=True,
-                shell=True,
             )
             if result.returncode != 0 or not os.path.isfile(bin_path):
                 err = (result.stdout + "\n" + result.stderr).strip()
@@ -11653,7 +11697,7 @@ class HexEditorFrame(ttk.Frame):
 
     def _byte_to_char(self, b: int) -> str:
         if self._encoding == "pcs":
-            return _PCS_BYTE_TO_CHAR.get(b, "·")
+            return _PCS_BYTE_TO_CHAR.get(b, ".")
         return chr(b) if 32 <= b < 127 else "."
 
     def _on_ascii_key(self, event: tk.Event) -> Optional[str]:
@@ -12864,15 +12908,32 @@ Format = "`f|u8`[u8 arg0]"
         return lines
 
     def _extract_angr_function_body(self, text: str) -> str:
-        """Extract the function body (from opening brace to end) from angr decompilation."""
+        """Extract the function body (from opening brace to end) from angr decompilation.
+
+        angr/clinic labels vary by version (``sub_``, ``FUN_``, ``func_``). On some Linux/WSL setups
+        the decompiler uses a different prefix than ``sub_``; without a match we would drop the whole body.
+        """
+        if not text or not text.strip():
+            return ""
         lines = text.splitlines()
+        header = re.compile(r"\b(?:sub_|FUN_|func_)[0-9a-fA-F]+\s*\(", re.IGNORECASE)
         for i, line in enumerate(lines):
-            if re.search(r"\bsub_[a-fA-F0-9]+\s*\(", line):
+            if header.search(line):
                 rest = "\n".join(lines[i:])
                 match = re.search(r"\{", rest)
                 if match:
-                    return rest[match.start():]
+                    return rest[match.start() :]
                 break
+        # Fallback: skip leading block comments, then take from first ``{`` (whole translation unit).
+        stripped = text.lstrip()
+        while stripped.startswith("/*"):
+            endc = stripped.find("*/")
+            if endc < 0:
+                break
+            stripped = stripped[endc + 2 :].lstrip()
+        m = re.search(r"\{", stripped)
+        if m:
+            return stripped[m.start() :]
         return ""
 
     def _indent_function_body(self, text: str, spaces: int = 4) -> str:
@@ -16450,8 +16511,12 @@ Format = "`f|u8`[u8 arg0]"
         try:
             self._text_asm.configure(state=tk.NORMAL)
             self._text_asm.delete("1.0", tk.END)
-            if not self._data or not _CAPSTONE_AVAILABLE:
-                self._text_asm.insert(tk.END, "(No data or Capstone not available)")
+            if not self._data:
+                self._text_asm.insert(tk.END, "(No data loaded)")
+                self._text_asm.configure(state=tk.DISABLED)
+                return
+            if not _CAPSTONE_AVAILABLE:
+                self._text_asm.insert(tk.END, _capstone_missing_hint())
                 self._text_asm.configure(state=tk.DISABLED)
                 return
             mode = CS_MODE_THUMB if self._asm_mode == "thumb" else CS_MODE_ARM
@@ -16555,8 +16620,11 @@ Format = "`f|u8`[u8 arg0]"
         """Show editable HackMew-style ASM in the ASM pane. Records region for Ctrl+I compile."""
         self._text_asm.configure(state=tk.NORMAL)
         self._text_asm.delete("1.0", tk.END)
-        if not self._data or not _CAPSTONE_AVAILABLE:
-            self._text_asm.insert(tk.END, "(No data or Capstone not available)")
+        if not self._data:
+            self._text_asm.insert(tk.END, "(No data loaded)")
+            return
+        if not _CAPSTONE_AVAILABLE:
+            self._text_asm.insert(tk.END, _capstone_missing_hint())
             return
         lines = self._build_asm_export_lines_with_labels(hackmew=True)
         if not lines:
@@ -16590,33 +16658,73 @@ Format = "`f|u8`[u8 arg0]"
             return
         data_copy = bytes(self._data)
         if _ANGR_AVAILABLE:
+            self._pseudo_c_angr_generation += 1
+            gen = self._pseudo_c_angr_generation
+            _pseudo_c_diag(
+                f"refresh: angr path start=0x{start:X} end=0x{end:X} len={len(data_copy)} "
+                f"thumb={self._asm_mode == 'thumb'} generation={gen}"
+            )
             self._text_pseudo_c.insert(tk.END, "Decompiling with angr (CFG + Decompiler)...")
             self._text_pseudo_c.configure(state=tk.DISABLED)
             thread = threading.Thread(
                 target=self._angr_decompile_worker,
-                args=(start, end, data_copy),
+                args=(start, end, data_copy, gen),
                 daemon=True,
             )
             thread.start()
         else:
+            _pseudo_c_diag(
+                f"refresh: angr unavailable (_ANGR_AVAILABLE=False); "
+                f"import_err={_ANGR_IMPORT_ERROR!r} — using Capstone only. "
+                f"start=0x{start:X} end=0x{end:X}"
+            )
             self._refresh_pseudo_c_capstone_fallback(start, end, align)
 
-    def _angr_decompile_worker(self, start: int, end: int, data_copy: bytes) -> None:
+    @staticmethod
+    def _angr_decompiler_output_is_success(result: Optional[str]) -> bool:
+        """True when ``_angr_decompile_impl`` produced text to show (not a failure sentinel)."""
+        if result is None or not str(result).strip():
+            return False
+        s = result.lstrip()
+        if s.startswith("(angr failed:"):
+            return False
+        if s.startswith("(angr decompilation failed)"):
+            return False
+        return True
+
+    def _angr_decompile_worker(self, start: int, end: int, data_copy: bytes, generation: int) -> None:
         """Background worker: run angr CFG + Decompiler, then schedule UI update."""
         result: Optional[str] = None
         try:
             result = self._angr_decompile_impl(start, end, data_copy)
         except Exception as e:
             result = f"(angr failed: {e})"
-        if result and not result.startswith("(angr "):
-            self.after(0, lambda: self._angr_decompile_done(result))
+            _pseudo_c_diag(f"worker gen={generation}: exception in _angr_decompile_impl: {e!r}")
+        ok = self._angr_decompiler_output_is_success(result)
+        preview = (result[:200] + "…") if isinstance(result, str) and len(result) > 200 else result
+        _pseudo_c_diag(
+            f"worker gen={generation}: success={ok} result_type={type(result).__name__!s} preview={preview!r}"
+        )
+        if ok:
+            self.after(0, lambda r=result, g=generation: self._angr_decompile_done(r, g))
         else:
             align = 4
-            self.after(0, lambda: self._angr_fallback_to_capstone(start, end, align, result))
+            self.after(
+                0,
+                lambda g=generation, s=start, e=end, err=result, al=align: self._angr_fallback_to_capstone(
+                    s, e, al, err, g
+                ),
+            )
 
-    def _angr_decompile_done(self, text: str) -> None:
+    def _angr_decompile_done(self, text: str, generation: int) -> None:
         """Called on main thread after angr decompilation completes."""
+        if generation != self._pseudo_c_angr_generation:
+            _pseudo_c_diag(
+                f"decompile_done: stale gen={generation} current={self._pseudo_c_angr_generation} (ignored)"
+            )
+            return
         if not self._pseudo_c_pane_visible:
+            _pseudo_c_diag(f"decompile_done: gen={generation} pane not visible (ignored)")
             return
         if self._c_inject_mode:
             return
@@ -16626,16 +16734,37 @@ Format = "`f|u8`[u8 arg0]"
         self._apply_syntax_highlighting(self._text_pseudo_c, "c")
         self._text_pseudo_c.configure(state=tk.DISABLED)
 
-    def _angr_fallback_to_capstone(self, start: int, end: int, align: int, angr_error: Optional[str]) -> None:
+    def _angr_fallback_to_capstone(
+        self, start: int, end: int, align: int, angr_error: Optional[str], generation: int
+    ) -> None:
         """When angr fails, show error + Capstone pseudo-C fallback."""
+        if generation != self._pseudo_c_angr_generation:
+            _pseudo_c_diag(
+                f"fallback_to_capstone: stale gen={generation} current={self._pseudo_c_angr_generation} (ignored)"
+            )
+            return
         if not self._pseudo_c_pane_visible:
+            _pseudo_c_diag(f"fallback_to_capstone: gen={generation} pane not visible (ignored)")
             return
         if self._c_inject_mode:
+            _pseudo_c_diag(f"fallback_to_capstone: gen={generation} c_inject_mode (ignored)")
             return
+        err_s = (angr_error or "").strip()
+        _pseudo_c_diag(
+            f"fallback_to_capstone: gen={generation} start=0x{start:X} end=0x{end:X} "
+            f"angr_error_empty={not err_s} err_preview={err_s[:160]!r}"
+        )
         self._text_pseudo_c.configure(state=tk.NORMAL)
         self._text_pseudo_c.delete("1.0", tk.END)
-        if angr_error:
-            self._text_pseudo_c.insert(tk.END, angr_error + "\n\n--- Capstone pseudo-C fallback ---\n\n")
+        if err_s:
+            self._text_pseudo_c.insert(tk.END, err_s + "\n\n--- Capstone pseudo-C fallback ---\n\n")
+        else:
+            self._text_pseudo_c.insert(
+                tk.END,
+                "(angr failed: empty or missing failure text from worker — "
+                "see stderr with CHANNELER_HEX_PSEUDO_C_DEBUG=1)\n\n"
+                "--- Capstone pseudo-C fallback ---\n\n",
+            )
         self._refresh_pseudo_c_capstone_fallback(start, end, align)
 
     def _angr_decompile_impl(self, start: int, end: int, data_copy: bytes) -> Optional[str]:
@@ -16663,13 +16792,46 @@ Format = "`f|u8`[u8 arg0]"
         )
         out_lines: List[str] = []
         errors: List[str] = []
+        n_kb_funcs = len(cfg.kb.functions) if cfg.kb.functions else 0
+        _pseudo_c_diag(
+            f"impl: entry_addr=0x{entry_addr & 0xFFFFFFFF:X} region=[0x{region_start:X},0x{region_end:X}) "
+            f"cfg.kb.functions count={n_kb_funcs}"
+        )
+        if not cfg.kb.functions:
+            _pseudo_c_diag("impl: early return — CFG found no functions in range")
+            return (
+                "(angr failed: CFG found no functions in this range. "
+                "Select more bytes around the routine, or toggle Thumb vs ARM mode.)"
+            )
+
+        def _func_overlaps_region(f_addr: int, func: object, r0: int, r1: int) -> bool:
+            """Half-open ROM intervals [r0, r1) vs function [f_addr, f_hi).
+
+            angr often leaves ``size == 0`` until later analysis; the old check used
+            ``f_addr + size > r0``, which drops the entry function when ``size`` is 0 and
+            ``f_addr == r0`` — then no Decompiler ran and the UI showed only Capstone fallback.
+            """
+            if r0 >= r1:
+                return False
+            sz = getattr(func, "size", None)
+            if sz is None or int(sz) <= 0:
+                f_hi = f_addr + 1
+            else:
+                f_hi = f_addr + int(sz)
+            return f_addr < r1 and f_hi > r0
+
         funcs_in_region = [
             (addr, func)
             for addr, func in cfg.kb.functions.items()
-            if func.addr < region_end and (func.addr + (func.size or 0)) > region_start
+            if _func_overlaps_region(addr, func, region_start, region_end)
         ]
+        _pseudo_c_diag(
+            f"impl: funcs_in_region={len(funcs_in_region)} "
+            f"addrs={[hex(a & 0xFFFFFFFF) for a, _ in funcs_in_region[:12]]}"
+        )
         if not funcs_in_region:
             funcs_in_region = list(cfg.kb.functions.items())
+            _pseudo_c_diag(f"impl: overlap empty — using all {len(funcs_in_region)} cfg functions")
         constants = {c["Name"]: c.get("Value", 0) for c in self._toml_data.get("Constants", [])}
         for addr, func in sorted(funcs_in_region, key=lambda x: x[0]):
             try:
@@ -16702,28 +16864,51 @@ Format = "`f|u8`[u8 arg0]"
                             body = self._rewrite_decimal_addresses_to_hex(body)
                             body = self._indent_function_body(body)
                             repl.append(body)
+                        else:
+                            # Body parse failed (angr naming/layout differs, e.g. Linux/WSL); keep full codegen.
+                            repl.append("/* angr decompiler (raw output; TOML signature above) */")
+                            repl.append(raw_codegen.strip())
                         out_lines.extend(repl)
                     else:
                         out_lines.append(f"/* sub_{addr:08X} */")
                         out_lines.append(raw_codegen.strip())
                     out_lines.append("")
+                else:
+                    why = "no decompiler text"
+                    if dec is None:
+                        why = "Decompiler() returned None"
+                    elif not getattr(dec, "codegen", None):
+                        why = "no codegen object"
+                    elif not getattr(dec.codegen, "text", None):
+                        why = "empty codegen.text"
+                    errors.append(f"sub_{addr & 0xFFFFFFFF:08X}: {why}")
             except Exception as e:
                 err_msg = str(e).replace("\n", " ")[:120]
                 errors.append(f"sub_{addr:08X}: {err_msg}")
         if errors and not out_lines:
+            _pseudo_c_diag(f"impl: return decompilation-failed errors count={len(errors)} first={errors[:3]!r}")
             return "(angr decompilation failed)\n\n" + "\n".join(errors[:8]) + (
                 "\n\n(... more)" if len(errors) > 8 else ""
             )
         if out_lines:
             if errors:
                 out_lines.insert(0, "/* Some functions failed: " + "; ".join(errors[:2]) + " */\n")
+            _pseudo_c_diag(f"impl: success out_lines blocks={len(out_lines)} errors={len(errors)}")
             return self._apply_symbol_names_to_decompiler_text("\n".join(out_lines))
-        return None
+        _pseudo_c_diag("impl: no out_lines and no fatal error list — returning no-text sentinel")
+        return (
+            "(angr failed: decompiler returned no text for this range. "
+            "You may be seeing only the Capstone line-by-line fallback below — "
+            "widen the selection or confirm Thumb/ARM matches the code.)"
+        )
 
     def _refresh_pseudo_c_capstone_fallback(self, start: int, end: int, align: int) -> None:
         """Fallback: pattern-based pseudo-C when angr unavailable."""
+        _pseudo_c_diag(
+            f"capstone_fallback: start=0x{start:X} end=0x{end:X} capstone_ok={_CAPSTONE_AVAILABLE}"
+        )
         if not _CAPSTONE_AVAILABLE:
-            self._text_pseudo_c.insert(tk.END, "(Capstone not available)")
+            self._text_pseudo_c.insert(tk.END, _capstone_missing_hint())
             self._text_pseudo_c.configure(state=tk.DISABLED)
             return
         mode = CS_MODE_THUMB if self._asm_mode == "thumb" else CS_MODE_ARM
@@ -17147,7 +17332,7 @@ Format = "`f|u8`[u8 arg0]"
                 has = False
                 if self._xref_index_valid:
                     has = bo in self._xref_rom_word or bo in self._xref_bl
-                carets.append("›" if has else "·")
+                carets.append(HEX_CARET_XREF_MARK if has else HEX_CARET_EMPTY_MARK)
             caret_str = "".join(carets)
             hex_lines.append(f"{rs:08X}  {caret_str}  {hx.ljust(3 * BYTES_PER_ROW - 1)}\n")
             ascii_lines.append(f"|{asc}|\n")
@@ -17473,7 +17658,7 @@ Format = "`f|u8`[u8 arg0]"
             cn_i = int(cn)
         except (ValueError, TypeError):
             cn_i = HEX_DISP_HEX_START
-        # Caret strip (blue ›): show incoming xref picker
+        # Caret strip (blue >): show incoming xref picker
         if HEX_DISP_CARET_START <= cn_i < HEX_DISP_CARET_END:
             try:
                 line, _ = idx.split(".")
