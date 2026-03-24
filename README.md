@@ -6,42 +6,43 @@ A ROM hacking tool for Game Boy Advance games, built with Python and Tkinter —
 
 **Releases & changelog:** [GitHub Releases — Channeler-Advance](https://github.com/Soul-8691/Channeler-Advance/releases) (e.g. demo **v0.1.0** notes).
 
-## Recent changes (since v0.1.1.1)
+## Recent changes (since [v0.1.1.2](https://github.com/Soul-8691/Channeler-Advance/releases/tag/v0.1.1.2))
 
-Changes on `main` after tag **v0.1.1.1**. If [GitHub’s compare view](https://github.com/Soul-8691/Channeler-Advance/compare/v0.1.1.1...main) fails to load, use `git diff v0.1.1.1...main` locally.
+Changes on `main` after tag **v0.1.1.2**. That release already summarizes earlier beta work (Find fixes, YDK / banlist import, WCT06 TOML updates, address formatting, sample files, and more — see the release page). For a full file diff, use [compare `v0.1.1.2…main`](https://github.com/Soul-8691/Channeler-Advance/compare/v0.1.1.2...main) or locally: `git diff v0.1.1.2...main`.
 
-### Editor, navigation, and shortcuts
+### Performance
 
-- **Find** and **Goto / jump-to** behavior improved (struct search, anchors, and following pointers).
-- Global **Ctrl+S** (save) is documented with other hex shortcuts; **Ctrl+Shift+1–7** cover Tools slots **1–3**, pseudo-C inject (**4–6**), and the **Python script** pane (**7**).
+- **Hex editor:** faster refresh / analysis paths (less redundant work when the viewport and ROM slice are unchanged).
 
-### Structure TOML
+### PCS / Table tool (Tools slot 1)
 
-- Saved **`Address`** values can omit unnecessary quoting (cleaner TOML).
-- **Format normalization** no longer corrupts valid **`[card:…]/countField>`** inside nested layouts such as **`pack<[card:…]/cardamount>…]`** (so pack pointer tables resolve in the struct list).
+- **Find** (basic): search/filter rows in the PCS string table view.
 
-### MatchedWords and repointing
+### Cross-platform
 
-- Expanded **MatchedWords** handling and **dynamic repointing** when growing or relocating data.
+- Better **macOS / Linux** behavior (paths, helpers, and related editor plumbing); **`deps/thumb.sh`** adjustments for non-Windows environments.
 
-### YDK deck import (File → Import YDK deck…)
+### Text and symbols
 
-- **Main / extra** decks: combined handling, size checks, and **0xFF padding** so imports do not blindly overwrite ROM past the current allocation when space is tight.
-- **Card IDs** use **`[[List]]` keys** (e.g. lists that start at a non-zero id), not raw 0…*n* indices — requires resolving the **`[card:ListName…]`** token even when extra fields follow (e.g. **`[card:cardnames copies:]`**).
+- **Unicode / symbol** handling improvements in the editor UI (labels, lists, and PCS-related display).
 
-### Banlist import (File → Import banlist…)
+### Setup documentation
 
-- **EDOPro**-style **`.conf`** / **`.lflist`** files: parse **`!`** name, **`#`** comments, **`$` / `~`** section markers, **`--`** line comments; import **forbidden / limited / semi-limited** (skip **unlimited** / status **3**).
-- Enabled when the selected struct’s **`Format`** includes **`ban`** and a **`[card:… copies:]`** row layout; updates **literal row counts**, **MatchedWord**-driven counts, and can **repoint** when the table outgrows free space.
+- **README** setup steps expanded (e.g. **venv** on macOS/Linux, **`python -m pip`** alignment, notes on **Tkinter**, **Capstone**, and **angr**). The intro already states cross-platform support.
 
-### Bundled / sample TOML
+### Structure TOML and Reshef
 
-- Large updates to **`wct06_test.toml`**; maintenance passes on **`EDS.toml`**.
-- Additional reference tables: **`WCT04.toml`**, **`WWE.toml`**.
+- Bundled **`Reshef.toml`** for *Yu-Gi-Oh! Reshef of Chaos* (tables, lists, and struct layouts). **`editors/common/TOML.toml`** and the hex/struct editor were extended for **`seq`** parallel columns, pointer-backed string fields, nested-array validation with a shared **`count`**, and related edge cases.
+
+### Goto and Tools interaction
+
+- **Goto** applies when you press **Enter** (main or numpad), not on every keystroke — easier to finish typing an address or anchor name before navigating.
+- **Tools + focus:** opening/syncing the PCS / Struct / Graphics tools no longer steals keyboard focus from **Goto** or other entries when you are still typing there.
+- **Double-click in ROM:** if the byte is inside a **PCS** or **struct** NamedAnchor table, the Tools pane jumps to the **row that contains that byte** (and the view scrolls if needed); the whole table stays selected, with the caret on the clicked byte. (Double-clicking a **pointer word** in the hex columns still **follows the pointer** first, as before.)
 
 ## ROM and structure TOML
 
-- Use the bundled **`FireRed.toml`** when hacking FireRed, or **`WCT06.toml`** for *Yu-Gi-Oh! Ultimate Masters: World Championship Tournament 2006*.
+- Use the bundled **`FireRed.toml`** when hacking FireRed, **`WCT06.toml`** for *Yu-Gi-Oh! Ultimate Masters: World Championship Tournament 2006*, or **`Reshef.toml`** for *Yu-Gi-Oh! Reshef of Chaos*.
 - By default, the editor looks for **`{YourRomBasename}.toml`** next to the ROM. You can load another file with **File → Load structure TOML**.
 - **Authoritative DSL notes** for anchors and `Format` strings also live in **`editors/common/TOML.toml`** (commented reference). The summary below matches that file.
 
@@ -105,6 +106,7 @@ Common tokens include **`ucp4`**, **`ucp4:`** index runs, **`lzp4` / `lzp8`**, *
 
 - **Pokémon FireRed** – Uses [pret/pokefirered](https://github.com/pret/pokefirered) for C code reference
 - **Yu-Gi-Oh! Ultimate Masters: World Championship Tournament 2006** – Uses [Soul-8691/ygowct06](https://github.com/Soul-8691/ygowct06) for ARM7TDMI ASM reference
+- **Yu-Gi-Oh! Reshef of Chaos** – Bundled structure file **`Reshef.toml`** (load via **File → Load structure TOML** or place next to your ROM as **`{basename}.toml`**)
 
 ## Setup
 
@@ -202,7 +204,7 @@ These apply when the main hex view (or the overall window, for global toggles) h
 | **Ctrl+D** | Toggle **pseudo-C** pane |
 | **Ctrl+End** | Jump to **end** of ROM |
 | **Ctrl+F** | Open **Find** (hex mode: space-separated token **`xx`** or **`XX`** matches any byte, e.g. `00 xx 08 XX 09 xx 10`) |
-| **Ctrl+G** | Focus the **Goto** (file offset) field |
+| **Ctrl+G** | Focus the **Goto** field (type an offset or anchor name, then **Enter** to jump) |
 | **Ctrl+H** | Toggle **HackMew** mode (when available) |
 | **Ctrl+Home** | Jump to **start** of ROM |
 | **Ctrl+I** | **Compile** HackMew ASM (when HackMew mode and the disassembly pane are active) |
@@ -242,7 +244,7 @@ These apply when the main hex view (or the overall window, for global toggles) h
 | **Enter** | Commit inline edit (also **FocusOut**) |
 | **Escape** | Cancel inline edit |
 | **↑** / **↓** | While editing PCS inline field — move to **previous/next row** |
-| **Enter** in various fields | Apply (Goto, struct index, graphics table row, list enum, etc.) |
+| **Enter** in various fields | Apply (**Goto** after typing, struct index, graphics table row, list enum, etc.) |
 
 ### Dialogs
 
@@ -267,7 +269,7 @@ High-level capabilities include:
 
 - General editing: write, insert (**Insert** key toggles insert mode), delete, copy, paste-overwrite (**Ctrl+B**) / paste-insert (**Ctrl+V**), find/replace, goto.
 - Hex / ASCII / PCS text; table and struct editing from TOML; repointing text and pointers (including optional **FF**-fill of old space when relocating).
-- In-tool editing of TOML anchor formats; **double-click** pointers to follow (red highlight); **double-click** the start of an ASM routine in the hex view to highlight through the end (when applicable).
+- In-tool editing of TOML anchor formats; **double-click** pointers to follow (red highlight); **double-click** the start of an ASM routine in the hex view to highlight through the end (when applicable); **double-click** bytes inside a PCS/struct **NamedAnchor** table to select that row in the Tools pane.
 - **Ctrl+T** / **Ctrl+Shift+1–3** to show or focus Tools slots.
 - **Ctrl+Shift+4–7** for pseudo-C inject workflow and Python script pane.
 - Disassembly (**Ctrl+P**), HackMew ASM (**Ctrl+H**), pseudo-C (**Ctrl+D**), **Ctrl+M** anchor browser.
