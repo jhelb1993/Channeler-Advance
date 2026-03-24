@@ -1084,15 +1084,6 @@ def _normalize_offset_inner_card_before_count_slash(t: str) -> str:
     )
 
 
-def _normalize_nested_array_slash_count_bracket_order(t: str) -> str:
-    """Fix mistaken ``…]/countField>]`` when the ``]`` that should close ``name<[`` was written *after* ``/countField>``.
-
-    Correct form is ``…]/countField>``. A common typo is ``[inner[card:x]/length>]`` (one ``]`` short before
-    ``/length>``); normalize to ``[inner[card:x]]/length>`` by rewriting the tail ``]/count>`` + extra ``]``.
-    """
-    return re.sub(r"(\])(/(\w+)>\s*\])", r"\1]/\3>", str(t or ""))
-
-
 def _normalize_ydk_deck_struct_shorthand_format(t: str) -> str:
     """Expand minimal `` `ydk` `` deck lines so :func:`_parse_struct_fields` accepts them.
 
@@ -1153,7 +1144,6 @@ def _normalize_shorthand_bracket_terminator_format(s: str) -> str:
     t = _normalize_offset_padding_dual_ydeck_main_extra(t)
     t = _normalize_offset_angle_open_bracket_before_ydk(t)
     t = _normalize_offset_inner_card_before_count_slash(t)
-    t = _normalize_nested_array_slash_count_bracket_order(t)
     t = _normalize_ban_deck_struct_shorthand_format(t)
     t = _normalize_ydk_deck_struct_shorthand_format(t)
     if "<[" in t and "!>" in t:
@@ -1182,9 +1172,47 @@ def _strip_trailing_ydk_struct_format_tag(t: str) -> str:
     return s
 
 
+def _strip_seq_struct_format_prefix(t: str) -> str:
+    """Remove leading `` `seq` `` so the struct parses; :func:`_struct_format_has_seq_marker` reads *fmt_raw*."""
+    s = str(t or "").strip()
+    m = re.match(r"^\s*`seq`\s*", s, re.IGNORECASE)
+    if m:
+        return s[m.end() :].lstrip()
+    return s
+
+
+def _struct_format_has_seq_marker(fmt_raw: str) -> bool:
+    """True when the Format starts with `` `seq` `` (parallel nested columns indexed together)."""
+    return bool(re.search(r"`\s*seq\s*`", str(fmt_raw or ""), re.IGNORECASE))
+
+
+def _struct_seq_parallel_eligible(fields: List[Dict[str, Any]]) -> Optional[str]:
+    """If every non-helper field is an external-count nested array with the same ``/ref``, return that ref name."""
+    refs: List[str] = []
+    for f in fields:
+        if f.get("type") == "helper":
+            continue
+        if f.get("type") != "nested_array":
+            return None
+        if f.get("terminator"):
+            return None
+        if not f.get("count_field_external"):
+            return None
+        cf = str(f.get("count_field") or "").strip()
+        if not cf:
+            return None
+        refs.append(cf)
+    if len(refs) < 1:
+        return None
+    if len(set(refs)) != 1:
+        return None
+    return refs[0]
+
+
 def normalize_named_anchor_format(raw: Any) -> str:
     """Whitespace-strip; expand ``[…]!HEX`` terminator shorthand and `` `ban` `` / `` `ydk` `` deck lines for struct NamedAnchors."""
-    t = _normalize_shorthand_bracket_terminator_format(str(raw or "").strip())
+    t = _strip_seq_struct_format_prefix(str(raw or "").strip())
+    t = _normalize_shorthand_bracket_terminator_format(t)
     return _strip_trailing_ydk_struct_format_tag(t)
 
 
@@ -1222,6 +1250,41 @@ def measure_pcs_rom_slot_capacity(data: Any, off: int, max_scan: int = 8192) -> 
     while i < end and data[i] == 0xFF:
         i += 1
     return i - off
+
+
+def ascii_cstring_encoded_payload_length(text: str) -> int:
+    """Byte length of Latin-1 text plus a NUL terminator (``field<''>`` ASCII pointer fields)."""
+    return len(text.encode("latin-1", errors="replace")) + 1
+
+
+def measure_ascii_cstring_rom_slot_capacity(data: Any, off: int, max_scan: int = 8192) -> int:
+    """Contiguous bytes at ``off`` usable for one C string: body through first 0x00, then trailing 0xFF padding."""
+    n = len(data)
+    if off < 0 or off >= n:
+        return 0
+    end = min(n, off + max_scan)
+    i = off
+    while i < end:
+        if data[i] == 0x00:
+            i += 1
+            break
+        i += 1
+    else:
+        return end - off
+    while i < end and data[i] == 0xFF:
+        i += 1
+    return i - off
+
+
+def encode_ascii_cstring(text: str, cap: int) -> bytes:
+    """Write Latin-1 ``text`` + ``0x00``, padded with ``0xFF`` to ``cap`` bytes."""
+    if cap <= 0:
+        return b""
+    body = text.encode("latin-1", errors="replace")[: max(0, cap - 1)]
+    out = bytearray(body + b"\x00")
+    while len(out) < cap:
+        out.append(0xFF)
+    return bytes(out[:cap])
 
 
 def find_disjoint_ff_gap_start(
@@ -5465,7 +5528,7 @@ def _struct_field_payload_file_off(
     if fd.get("at_ptr_field"):
         pfn = str(fd["at_ptr_field"])
         pfd = next((x for x in fields if str(x.get("name")) == pfn), None)
-        if not pfd or pfd.get("type") not in ("ptr", "pcs_ptr"):
+        if not pfd or pfd.get("type") not in ("ptr", "pcs_ptr", "ascii_ptr"):
             return None
         poff = entry_base + int(pfd["offset"])
         if poff + 4 > len(data):
@@ -5487,7 +5550,7 @@ def _struct_field_payload_file_off(
 
 
 def _validate_at_ptr_payload_fields(fields: List[Dict[str, Any]]) -> bool:
-    """Each ``at_ptr_field`` reference must name an earlier ``ptr`` / ``pcs_ptr`` field."""
+    """Each ``at_ptr_field`` reference must name an earlier ``ptr`` / ``pcs_ptr`` / ``ascii_ptr`` field."""
     by_name = {str(f.get("name")): f for f in fields if f.get("name")}
     idx_by_name = {str(f.get("name")): i for i, f in enumerate(fields) if f.get("name")}
     for fd in fields:
@@ -5495,7 +5558,7 @@ def _validate_at_ptr_payload_fields(fields: List[Dict[str, Any]]) -> bool:
         if not pfn:
             continue
         pfd = by_name.get(str(pfn))
-        if not pfd or pfd.get("type") not in ("ptr", "pcs_ptr"):
+        if not pfd or pfd.get("type") not in ("ptr", "pcs_ptr", "ascii_ptr"):
             return False
         i_fd = idx_by_name.get(str(fd.get("name", "")))
         i_p = idx_by_name.get(str(pfn))
@@ -5692,10 +5755,17 @@ def _validate_nested_array_fields(fields: List[Dict[str, Any]]) -> bool:
     ``!HEX>`` terminator bytes (even-length hex -> raw bytes) and must be the **last** field.
 
     Valid layouts:
-    - **Count first:** ``count`` appears before ``name<[inner]/count>``, and the nested field must be **last**
-      (e.g. ``[cost:: … pack<[inner]/cardamount>]``) - ``pack`` holds a 4-byte pointer; inner rows at ``*pack``.
+    - **Count first:** ``count`` uint appears before ``name<[inner]/count>``. Fixed fields (uint/ptr/PCS/…)
+      may appear between ``count`` and the nested field; several nested fields may share the **same** count
+      uint (e.g. ``[count. padding:. ptr<> drops<…/count> spawnrate<…/count> …]``).
+    - **Count before one packed nested (legacy tail):** ``[cost:: … pack<[inner]/cardamount>]`` — ``pack`` last
+      holds a 4-byte pointer; inner rows at ``*pack``.
     - **Count last:** ``name<[inner]/count>`` appears before ``count``, and the **count** field must be **last**
       (e.g. ``[options<…/count> count::]``) - **implicit** pointer at row offset 0 unless ``*base_ptr`` is used.
+    - **External TOML count:** ``/ref`` where ``ref`` is **not** a uint field in this struct — row count is
+      resolved from the same rules as ``]ref`` on the table (``[[List]]`` span, MatchedWord, PCS row count,
+      etc.). Only **pointer-backed** nested data (4-byte GBA pointer at ``name`` or a ``ptr`` field). You can
+      repeat several such fields in one row (e.g. multiple pointers, each with ``/cardnumbers``).
     """
     names = [str(f.get("name", "")) for f in fields]
     for i, fd in enumerate(fields):
@@ -5707,35 +5777,50 @@ def _validate_nested_array_fields(fields: List[Dict[str, Any]]) -> bool:
                 return False
             continue
         cf_name = str(fd.get("count_field") or "")
-        if not cf_name or cf_name not in names:
+        if not cf_name:
             return False
+        cf_uint = next(
+            (
+                f
+                for f in fields
+                if str(f.get("name")) == cf_name and f.get("type") == "uint"
+            ),
+            None,
+        )
+        if cf_uint is None:
+            # Count from TOML / ROM metadata (same as ``]ref``), not a uint column in this struct.
+            fd["count_field_external"] = True
+            ptr_ok = bool(fd.get("nested_ptr_is_self_field") or fd.get("base_ptr_field"))
+            if not ptr_ok:
+                return False
+            continue
+        fd["count_field_external"] = False
         ci = names.index(cf_name)
         ni = names.index(str(fd["name"]))
         if ci < ni:
-            # ``[main: maindeck<…/main> …]`` - count immediately before its nested field.
-            if ni != ci + 1:
-                return False
-            if ni < len(fields) - 1:
-                j = ni + 1
-                while j < len(fields):
-                    fj = fields[j]
-                    if fj.get("type") == "helper":
-                        j += 1
-                        continue
-                    if fj.get("type") == "uint":
-                        if j + 1 < len(fields) and fields[j + 1].get("type") == "nested_array":
-                            nxt = fields[j + 1]
-                            if str(nxt.get("count_field") or "") != str(fj.get("name") or ""):
-                                return False
-                            j += 2
-                            continue
-                        for k in range(j, len(fields)):
-                            fk = fields[k]
-                            if fk.get("type") == "helper":
-                                continue
-                            if fk.get("type") not in ("uint", "pcs", "ascii"):
-                                return False
-                        break
+            # Between the count uint and this nested field: fixed slots and/or other nested arrays that
+            # share the same ``/count`` uint (same element count for each pointer column).
+            _PLAIN_BEFORE_NESTED = (
+                "uint",
+                "pcs",
+                "ascii",
+                "ptr",
+                "pcs_ptr",
+                "ascii_ptr",
+                "gfx_sprite",
+                "gfx_tileset",
+                "gfx_tilemap",
+                "gfx_palette",
+            )
+            for k in range(ci + 1, ni):
+                fk = fields[k]
+                if fk.get("type") == "helper":
+                    continue
+                if fk.get("type") == "nested_array":
+                    if str(fk.get("count_field") or "") != cf_name:
+                        return False
+                    continue
+                if fk.get("type") not in _PLAIN_BEFORE_NESTED:
                     return False
         elif ni < ci:
             # Nested field before count: count uint is usually last (``[options<…/c> c::]``). Allow
@@ -5752,7 +5837,7 @@ def _validate_nested_array_fields(fields: List[Dict[str, Any]]) -> bool:
         bpf = fd.get("base_ptr_field")
         if bpf:
             bf = next((x for x in fields if str(x.get("name")) == str(bpf)), None)
-            if bf is None or bf.get("type") not in ("ptr", "pcs_ptr"):
+            if bf is None or bf.get("type") not in ("ptr", "pcs_ptr", "ascii_ptr"):
                 return False
             if names.index(str(bpf)) >= ni:
                 return False
@@ -6066,7 +6151,7 @@ def _nested_array_data_base_file(
     if not bpf:
         return entry_base + int(na_fd["offset"])
     pfd = next((f for f in fields if str(f.get("name")) == str(bpf)), None)
-    if not pfd or pfd.get("type") not in ("ptr", "pcs_ptr"):
+    if not pfd or pfd.get("type") not in ("ptr", "pcs_ptr", "ascii_ptr"):
         return None
     poff = entry_base + int(pfd["offset"])
     if poff + 4 > len(data):
@@ -6118,7 +6203,7 @@ def _ptr_word_off_and_alloc_start(
     if not bpf:
         return None
     pfd = next((f for f in fields if str(f.get("name")) == str(bpf)), None)
-    if not pfd or pfd.get("type") not in ("ptr", "pcs_ptr"):
+    if not pfd or pfd.get("type") not in ("ptr", "pcs_ptr", "ascii_ptr"):
         return None
     poff = entry_base + int(pfd["offset"])
     if poff + 4 > len(data):
@@ -6425,6 +6510,16 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
     if m:
         return {"name": m.group(1), "size": int(m.group(2)), "type": "ascii", "enum": None}
 
+    m_asc_ptr = re.match(r"^(\w+)<''>\s*$", token.strip())
+    if m_asc_ptr:
+        return {
+            "name": m_asc_ptr.group(1),
+            "size": 4,
+            "type": "ascii_ptr",
+            "enum": None,
+            "hex": True,
+        }
+
     if token.endswith('<"">'):
         nm = re.match(r'^(\w+)', token)
         return {"name": nm.group(1) if nm else token, "size": 4, "type": "pcs_ptr", "enum": None}
@@ -6651,6 +6746,7 @@ class StructEditorFrame(ttk.Frame):
         self._entry_index_context_list: Optional[str] = None
         self._struct_filter_job: Optional[str] = None
         self._struct_match_entries: List[Tuple[str, str, Optional[int]]] = []
+        self._seq_parallel = False
         self._build()
 
     def _entry_pcs_row_for_struct_index(self, struct_idx: int) -> Optional[int]:
@@ -6690,6 +6786,8 @@ class StructEditorFrame(ttk.Frame):
 
     def _entry_file_offset(self, entry_idx: int) -> int:
         """ROM file offset of struct row ``entry_idx`` (packed ``!HEX`` tables scan previous rows)."""
+        if self._seq_parallel and not self._struct_packed_terminator:
+            return self._base_off
         if not self._struct_packed_terminator or not self._packed_terminator_fd:
             return self._base_off + entry_idx * self._struct_size
         data = self._hex.get_data()
@@ -6827,9 +6925,10 @@ class StructEditorFrame(ttk.Frame):
         # pcs_ptr: edit GBA pointer and PCS text (relocates into 0xFF gaps if string grows)
         self._ptr_text_frame = ttk.Frame(self)
         self._ptr_text_frame.columnconfigure(1, weight=1)
-        ttk.Label(self._ptr_text_frame, text="pcs_ptr field", font=("Consolas", 8, "bold")).grid(
-            row=0, column=0, columnspan=3, sticky="w"
+        self._ptr_text_title = ttk.Label(
+            self._ptr_text_frame, text="pcs_ptr field", font=("Consolas", 8, "bold")
         )
+        self._ptr_text_title.grid(row=0, column=0, columnspan=3, sticky="w")
         ttk.Label(self._ptr_text_frame, text="Pointer (GBA):", font=("Consolas", 8)).grid(
             row=1, column=0, sticky="w", padx=(0, 4), pady=(0, 2)
         )
@@ -6842,9 +6941,8 @@ class StructEditorFrame(ttk.Frame):
         ttk.Button(
             self._ptr_text_frame, text="Set pointer", command=self._on_ptr_pointer_apply
         ).grid(row=1, column=2, sticky="e", pady=(0, 2))
-        ttk.Label(self._ptr_text_frame, text="PCS text:", font=("Consolas", 8)).grid(
-            row=2, column=0, sticky="nw", padx=(0, 4), pady=(0, 2)
-        )
+        self._ptr_text_sublabel = ttk.Label(self._ptr_text_frame, text="PCS text:", font=("Consolas", 8))
+        self._ptr_text_sublabel.grid(row=2, column=0, sticky="nw", padx=(0, 4), pady=(0, 2))
         self._ptr_text_entry = ttk.Entry(self._ptr_text_frame, font=("Consolas", 9))
         self._ptr_text_entry.grid(row=2, column=1, sticky="ew", padx=(0, 4), pady=(0, 2))
         self._ptr_text_entry.bind("<Return>", lambda e: self._on_ptr_text_update())
@@ -7530,11 +7628,17 @@ class StructEditorFrame(ttk.Frame):
             self._ptr_text_fi = None
             return
         fd = self._fields[fi]
-        if fd["type"] != "pcs_ptr":
+        if fd["type"] not in ("pcs_ptr", "ascii_ptr"):
             self._ptr_text_frame.grid_remove()
             self._ptr_text_fi = None
             return
         self._ptr_text_fi = fi
+        if fd["type"] == "ascii_ptr":
+            self._ptr_text_title.config(text="ascii_ptr field (NUL-terminated)")
+            self._ptr_text_sublabel.config(text="ASCII text:")
+        else:
+            self._ptr_text_title.config(text="pcs_ptr field")
+            self._ptr_text_sublabel.config(text="PCS text:")
         self._ptr_text_frame.grid(row=4, column=0, sticky="ew", pady=(0, 2))
         data = self._hex.get_data()
         if not data:
@@ -7549,7 +7653,10 @@ class StructEditorFrame(ttk.Frame):
         ptr = int.from_bytes(data[foff:foff + 4], "little")
         self._ptr_addr_var.set(f"0x{ptr:08X}")
         if (ptr >> 24) in (0x08, 0x09):
-            text = self._read_pcs_at_pointer(ptr - GBA_ROM_BASE)
+            if fd["type"] == "ascii_ptr":
+                text = self._read_ascii_at_pointer(ptr - GBA_ROM_BASE)
+            else:
+                text = self._read_pcs_at_pointer(ptr - GBA_ROM_BASE)
         else:
             text = ""
         self._ptr_text_entry.delete(0, tk.END)
@@ -7559,7 +7666,7 @@ class StructEditorFrame(ttk.Frame):
         if fi < 0 or fi >= len(self._fields):
             return None
         fd = self._fields[fi]
-        if fd["type"] != "pcs_ptr":
+        if fd["type"] not in ("pcs_ptr", "ascii_ptr"):
             return None
         try:
             entry_idx = int(self._idx_var.get())
@@ -7709,13 +7816,101 @@ class StructEditorFrame(ttk.Frame):
             self._hex.write_bytes_at(target_off, bytes([0xFF]) * cap)
         return True
 
+    def _apply_ascii_ptr_string_write(
+        self, fi: int, new_text: str, *, file_off: Optional[int] = None
+    ) -> bool:
+        """Write Latin-1 + NUL at the current pointer; grow into trailing 0xFF padding or relocate like PCS."""
+        foff = file_off if file_off is not None else self._pcs_ptr_field_file_off(fi)
+        if foff is None:
+            return False
+        data = self._hex.get_data()
+        if not data:
+            return False
+        ptr = int.from_bytes(data[foff:foff + 4], "little")
+        if (ptr >> 24) not in (0x08, 0x09):
+            messagebox.showwarning(
+                "Struct",
+                "Pointer must target ROM (0x08xxxxxx or 0x09xxxxxx). Set it under “Pointer (GBA)” first.",
+            )
+            return False
+        target_off = ptr - GBA_ROM_BASE
+        if target_off < 0 or target_off >= len(data):
+            messagebox.showwarning("Struct", "Pointer is outside the ROM file range.")
+            return False
+        need = ascii_cstring_encoded_payload_length(new_text)
+        cap = measure_ascii_cstring_rom_slot_capacity(data, target_off)
+        if need <= cap:
+            enc = encode_ascii_cstring(new_text, cap)
+            self._hex.write_bytes_at(target_off, enc)
+            return True
+        excl_lo, excl_hi = target_off, target_off + max(cap, 1)
+        w_lo, w_hi_ex, w_err = self._parse_ff_gap_search_window()
+        if w_err:
+            messagebox.showerror("Struct", w_err)
+            return False
+        if w_lo is not None and w_hi_ex is not None and (w_hi_ex - w_lo) < need:
+            messagebox.showerror(
+                "Struct",
+                f"The chosen search range is only {w_hi_ex - w_lo} byte(s) wide; "
+                f"the string needs {need} consecutive 0xFF byte(s) for relocation.",
+            )
+            return False
+        gap = find_disjoint_ff_gap_start(
+            data, need, excl_lo, excl_hi, window_lo=w_lo, window_hi=w_hi_ex
+        )
+        if gap is None:
+            hint = (
+                "\n\nAdjust “FF gap search from / through” to a known padding region, "
+                "or clear those fields to search the whole ROM."
+                if w_lo is not None
+                else "\n\nTry limiting the search to a region you know is padding (false positives often come "
+                "from unrelated 0xFF runs elsewhere in the ROM)."
+            )
+            messagebox.showerror(
+                "Struct",
+                f"This string needs {need} byte(s) (text + 0x00 end), but only {cap} byte(s) fit "
+                f"at the current address (including any 0xFF padding after the string).\n\n"
+                f"No qualifying block of {need} consecutive 0xFF bytes was found in the search range."
+                f"{hint}",
+            )
+            return False
+        gba_gap = gap + GBA_ROM_BASE
+        if w_lo is not None and w_hi_ex is not None:
+            range_note = (
+                f"\n\nSearch was limited to file 0x{w_lo:X} … 0x{w_hi_ex - 1:X} (inclusive)."
+            )
+        else:
+            range_note = "\n\nSearch used the entire ROM (set “FF gap search” fields to restrict)."
+        if not messagebox.askyesno(
+            "Relocate ASCII string",
+            f"The string needs {need} byte(s) (including 0x00 terminator), but only {cap} byte(s) "
+            f"are available at the current address.\n\n"
+            f"Found a 0xFF padding region large enough at:\n"
+            f"  file offset 0x{gap:X}\n"
+            f"  GBA address 0x{gba_gap:08X}\n\n"
+            f"Write the string there and update this field’s pointer?"
+            f"{range_note}",
+        ):
+            return False
+        enc = encode_ascii_cstring(new_text, need)
+        self._hex.write_bytes_at(gap, enc)
+        self._hex.write_bytes_at(foff, gba_gap.to_bytes(4, "little"))
+        self._ptr_addr_var.set(f"0x{gba_gap:08X}")
+        if messagebox.askyesno(
+            "Clear old string",
+            f"Fill the previous slot ({cap} byte(s) at GBA 0x{target_off + GBA_ROM_BASE:08X}) "
+            f"with 0xFF (recommended)?",
+        ):
+            self._hex.write_bytes_at(target_off, bytes([0xFF]) * cap)
+        return True
+
     def _on_ptr_pointer_apply(self) -> None:
         """Write the GBA pointer from the panel into the struct field."""
         fi = self._ptr_text_fi
         if fi is None or fi >= len(self._fields):
             return
         fd = self._fields[fi]
-        if fd["type"] != "pcs_ptr":
+        if fd["type"] not in ("pcs_ptr", "ascii_ptr"):
             return
         foff = self._pcs_ptr_field_file_off(fi)
         if foff is None:
@@ -7731,15 +7926,20 @@ class StructEditorFrame(ttk.Frame):
         self._update_ptr_text_panel()
 
     def _on_ptr_text_update(self) -> None:
-        """Apply PCS text using padding / 0xFF gap relocation rules."""
+        """Apply PCS or ASCII-at-pointer text using padding / 0xFF gap relocation rules."""
         fi = self._ptr_text_fi
         if fi is None or fi >= len(self._fields):
             return
         fd = self._fields[fi]
-        if fd["type"] != "pcs_ptr":
+        if fd["type"] not in ("pcs_ptr", "ascii_ptr"):
             return
         new_text = self._ptr_text_entry.get()
-        if self._apply_pcs_ptr_string_write(fi, new_text):
+        ok = (
+            self._apply_pcs_ptr_string_write(fi, new_text)
+            if fd["type"] == "pcs_ptr"
+            else self._apply_ascii_ptr_string_write(fi, new_text)
+        )
+        if ok:
             self._refresh_pcs_ptr_tree_row(fi)
             self._update_ptr_text_panel()
 
@@ -8326,11 +8526,13 @@ class StructEditorFrame(ttk.Frame):
     def _on_combo_select(self, event: Optional[tk.Event] = None) -> None:
         info = self._selected_struct_anchor()
         if not info:
+            self._seq_parallel = False
             self._tree_expand_slots_frame.grid_remove()
             self._struct_new_rows_btn.grid_remove()
             return
         self._fields = info["fields"]
-        self._entry_count = info["count"]
+        self._seq_parallel = bool(info.get("seq_parallel"))
+        self._entry_count = int(info.get("seq_entry_count") or info["count"])
         self._struct_size = info["struct_size"]
         self._base_off = info["base_off"]
         self._struct_packed_terminator = bool(info.get("packed_terminator"))
@@ -8373,6 +8575,8 @@ class StructEditorFrame(ttk.Frame):
         else:
             self._tree_expand_slots_frame.grid_remove()
         if info.get("packed_terminator") and info.get("packed_terminator_fd"):
+            self._struct_new_rows_btn.grid_remove()
+        elif info.get("seq_parallel"):
             self._struct_new_rows_btn.grid_remove()
         else:
             self._struct_new_rows_btn.grid()
@@ -8700,20 +8904,24 @@ class StructEditorFrame(ttk.Frame):
     def _read_nested_array_count(self, entry_base: int, na_fd: Dict[str, Any]) -> int:
         cf_name = str(na_fd.get("count_field") or "")
         cf = next((f for f in self._fields if f.get("name") == cf_name), None)
-        if not cf or cf.get("type") != "uint":
-            return 0
-        data = self._hex.get_data()
-        if not data:
-            return 0
-        roff = self._struct_field_file_off(entry_base, cf)
-        if roff is None:
-            return 0
-        rsz = int(cf["size"])
-        if roff + rsz > len(data):
-            return 0
-        raw = int.from_bytes(data[roff : roff + rsz], "little")
-        mx = min((1 << (8 * rsz)) - 1, 65535)
-        return max(0, min(raw, mx))
+        if cf and cf.get("type") == "uint":
+            data = self._hex.get_data()
+            if not data:
+                return 0
+            roff = self._struct_field_file_off(entry_base, cf)
+            if roff is None:
+                return 0
+            rsz = int(cf["size"])
+            if roff + rsz > len(data):
+                return 0
+            raw = int.from_bytes(data[roff : roff + rsz], "little")
+            mx = min((1 << (8 * rsz)) - 1, 65535)
+            return max(0, min(raw, mx))
+        if na_fd.get("count_field_external"):
+            n = self._hex._resolve_struct_count(cf_name)
+            if n is not None:
+                return max(0, min(int(n), 65535))
+        return 0
 
     def _nested_array_data_base(self, entry_base: int, na_fd: Dict[str, Any], data: bytes) -> Optional[int]:
         """File offset where nested rows live: ptr @ ``name``, implicit ptr@0 + count, ``*base_ptr``, or inline."""
@@ -8743,7 +8951,7 @@ class StructEditorFrame(ttk.Frame):
         if not bpf:
             return entry_base + int(na_fd["offset"])
         pfd = next((f for f in self._fields if str(f.get("name")) == str(bpf)), None)
-        if not pfd or pfd.get("type") not in ("ptr", "pcs_ptr"):
+        if not pfd or pfd.get("type") not in ("ptr", "pcs_ptr", "ascii_ptr"):
             return None
         poff = entry_base + int(pfd["offset"])
         if poff + 4 > len(data):
@@ -8820,9 +9028,36 @@ class StructEditorFrame(ttk.Frame):
                     stride = int(fd["inner_stride"])
                     na_base = self._nested_array_data_base(off, fd, bytes(data))
                     if na_base is None:
+                        # Pointer is null or not a ROM pointer (0x08/0x09): still show the column in ``seq``
+                        # parallel mode so every /count field stays visible.
+                        if self._seq_parallel:
+                            poff = off + int(fd.get("offset") or 0)
+                            pv = 0
+                            if poff + 4 <= len(data):
+                                pv = int.from_bytes(data[poff : poff + 4], "little")
+                            bad = (pv >> 24) not in (0x08, 0x09)
+                            hint = (
+                                f"(pointer not ROM; raw 0x{pv:08X})"
+                                if bad
+                                else "(could not resolve *ptr)"
+                            )
+                            for ij, ifd in enumerate(inner):
+                                if _struct_field_omitted_from_editor_tree(ifd):
+                                    continue
+                                label = f"{fd['name']}[{entry_idx}].{ifd['name']}"
+                                self._tree.insert(
+                                    "",
+                                    tk.END,
+                                    values=(label, hint),
+                                    iid=f"sf_na_{fi}_{entry_idx}_{ij}_noptr",
+                                )
                         continue
                     n_sub = self._read_nested_array_element_count(off, fd, na_base)
-                    for ai in range(n_sub):
+                    if self._seq_parallel:
+                        ai_loop = [entry_idx] if 0 <= entry_idx < n_sub else []
+                    else:
+                        ai_loop = list(range(n_sub))
+                    for ai in ai_loop:
                         for ij, ifd in enumerate(inner):
                             if _struct_field_omitted_from_editor_tree(ifd):
                                 continue
@@ -9125,6 +9360,16 @@ class StructEditorFrame(ttk.Frame):
                     return f"0x{ptr:08X} -> {preview}"
                 return f"0x{ptr:08X}"
             return ""
+        if ftype == "ascii_ptr":
+            if len(raw) >= 4:
+                ptr = int.from_bytes(raw[:4], "little")
+                if (ptr >> 24) in (0x08, 0x09):
+                    preview = self._read_ascii_at_pointer(ptr - GBA_ROM_BASE)
+                    if len(preview) > 48:
+                        preview = preview[:45] + "..."
+                    return f"0x{ptr:08X} -> {preview}"
+                return f"0x{ptr:08X}"
+            return ""
         if ftype == "ptr":
             if len(raw) >= 4:
                 ptr = int.from_bytes(raw[:4], "little")
@@ -9174,6 +9419,18 @@ class StructEditorFrame(ttk.Frame):
                 break
             chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
         return "".join(chars)
+
+    def _read_ascii_at_pointer(self, file_off: int) -> str:
+        """Latin-1 text at ``file_off`` up to first ``0x00`` (``field<''>`` pointer fields)."""
+        data = self._hex.get_data()
+        if not data or file_off < 0 or file_off >= len(data):
+            return ""
+        end = data.find(b"\x00", file_off, min(len(data), file_off + 4096))
+        if end < 0:
+            chunk = data[file_off : min(len(data), file_off + 4096)]
+        else:
+            chunk = data[file_off:end]
+        return chunk.decode("latin-1", errors="replace")
 
     def _resolve_enum(self, value: int, enum_ref: str) -> Optional[str]:
         base, delta = _split_enum_field_ref(enum_ref)
@@ -9319,6 +9576,14 @@ class StructEditorFrame(ttk.Frame):
                         raw_val = vals[1].split(" -> ", 1)[0].strip()
                     else:
                         raw_val = vals[1]
+        elif fd["type"] == "ascii_ptr":
+            rom = self._hex.get_data()
+            if rom and foff + 4 <= len(rom):
+                ptr = int.from_bytes(rom[foff:foff + 4], "little")
+                if (ptr >> 24) in (0x08, 0x09):
+                    raw_val = self._read_ascii_at_pointer(ptr - GBA_ROM_BASE)
+                else:
+                    raw_val = vals[1].split(" -> ", 1)[-1].strip() if " -> " in vals[1] else vals[1]
         elif fd["type"] == "gfx_sprite":
             raw_val = vals[1].split()[0].strip() if vals[1] else vals[1]
         elif " -> " in raw_val:
@@ -9442,6 +9707,27 @@ class StructEditorFrame(ttk.Frame):
                     )
                     self._cancel_inline_edit()
                     return
+            elif fd["type"] == "ascii_ptr":
+                ptr = int.from_bytes(data[foff:foff + 4], "little")
+                if re.fullmatch(r"0[xX][0-9A-Fa-f]{1,8}", text):
+                    try:
+                        val = int(text, 0)
+                    except ValueError:
+                        self._cancel_inline_edit()
+                        return
+                    self._hex.write_bytes_at(foff, val.to_bytes(4, "little"))
+                elif (ptr >> 24) in (0x08, 0x09):
+                    if not self._apply_ascii_ptr_string_write(fi, raw_edit, file_off=foff):
+                        self._cancel_inline_edit()
+                        return
+                else:
+                    messagebox.showwarning(
+                        "Struct",
+                        "This pointer does not target ROM. Set Pointer (GBA) in the panel below, "
+                        "or type a ROM address (e.g. 0x08XXXXXX) here.",
+                    )
+                    self._cancel_inline_edit()
+                    return
             elif fd["type"] in ("uint", "ptr", "gfx_sprite", "gfx_tileset", "gfx_tilemap", "gfx_palette"):
                 try:
                     val = int(text, 0)
@@ -9524,6 +9810,28 @@ class StructEditorFrame(ttk.Frame):
                 self._hex.write_bytes_at(foff, val.to_bytes(4, "little"))
             elif (ptr >> 24) in (0x08, 0x09):
                 if not self._apply_pcs_ptr_string_write(fi, raw_edit):
+                    self._cancel_inline_edit()
+                    return
+                skip_tree_refresh = True
+            else:
+                messagebox.showwarning(
+                    "Struct",
+                    "This pointer does not target ROM. Set Pointer (GBA) in the panel below, "
+                    "or type a ROM address (e.g. 0x08XXXXXX) here.",
+                )
+                self._cancel_inline_edit()
+                return
+        elif fd["type"] == "ascii_ptr":
+            ptr = int.from_bytes(data[foff:foff + 4], "little")
+            if re.fullmatch(r"0[xX][0-9A-Fa-f]{1,8}", text):
+                try:
+                    val = int(text, 0)
+                except ValueError:
+                    self._cancel_inline_edit()
+                    return
+                self._hex.write_bytes_at(foff, val.to_bytes(4, "little"))
+            elif (ptr >> 24) in (0x08, 0x09):
+                if not self._apply_ascii_ptr_string_write(fi, raw_edit):
                     self._cancel_inline_edit()
                     return
                 skip_tree_refresh = True
@@ -13575,7 +13883,27 @@ Format = "`f|u8`[u8 arg0]"
                         self._get_pcs_table_anchors(), count_raw
                     )
             count_ref_str: Optional[str] = str(count_raw).strip() if isinstance(count_raw, str) else None
-            result.append({
+            seq_parallel = False
+            seq_entry_count: Optional[int] = None
+            if _struct_format_has_seq_marker(fmt_raw):
+                sref = _struct_seq_parallel_eligible(fields)
+                if sref is not None:
+                    n_seq = self._resolve_struct_count(sref)
+                    if n_seq is not None and n_seq > 0:
+                        seq_parallel = True
+                        seq_entry_count = int(n_seq)
+                        count_ref_str = str(sref).strip()
+                        cref = _struct_count_ref_base_name(str(sref))
+                        lk = normalize_named_anchor_lookup_key(cref)
+                        if lk and lk in _load_toml_lists(self._toml_data):
+                            entry_label_list = lk
+                            entry_label_pcs = None
+                        else:
+                            entry_label_pcs = _find_pcs_table_for_struct_suffix(
+                                self._get_pcs_table_anchors(), sref
+                            )
+                            entry_label_list = None
+            anchor_entry: Dict[str, Any] = {
                 "name": name, "anchor": anchor, "fields": fields,
                 "count": count, "struct_size": struct_size, "base_off": base_off,
                 "count_ref": count_ref_str,
@@ -13598,7 +13926,11 @@ Format = "`f|u8`[u8 arg0]"
                     if _struct_format_has_ban_import_marker(fmt_raw)
                     else None
                 ),
-            })
+            }
+            if seq_parallel:
+                anchor_entry["seq_parallel"] = True
+                anchor_entry["seq_entry_count"] = seq_entry_count
+            result.append(anchor_entry)
         result.sort(key=lambda x: str(x["name"]).lower())
         self._struct_anchors_cache = result
         return result
@@ -14279,6 +14611,8 @@ Format = "`f|u8`[u8 arg0]"
         """Grow a ``!``-terminated nested table: packed rows at the anchor base, or slots inside the selected row's blob."""
         if n <= 0:
             return False, "Count must be positive."
+        if struct_info.get("seq_parallel"):
+            return False, "``seq`` parallel structs do not use nested slot expansion here."
         if not self._data:
             return False, "No ROM loaded."
         if not self._toml_path or not os.path.isfile(self._toml_path):
@@ -14296,6 +14630,11 @@ Format = "`f|u8`[u8 arg0]"
         """Add ``n`` top-level struct rows (fixed stride or packed ``!`` at the table base)."""
         if n <= 0:
             return False, "Count must be positive."
+        if struct_info.get("seq_parallel"):
+            return (
+                False,
+                "``seq`` structs use one ROM row; parallel entry count comes from each field's /count ref.",
+            )
         if not self._data:
             return False, "No ROM loaded."
         if not self._toml_path or not os.path.isfile(self._toml_path):
@@ -15064,6 +15403,13 @@ Format = "`f|u8`[u8 arg0]"
         entry_base = base_off + entry_idx * int(info["struct_size"])
         stride = int(na_fd["inner_stride"])
         cf_name = str(na_fd.get("count_field") or "")
+        if na_fd.get("count_field_external"):
+            messagebox.showerror(
+                "Import YDK",
+                f"Nested length is resolved from TOML/ROM metadata ({cf_name!r}), not a struct uint field; "
+                "YDK import cannot rewrite that length.",
+            )
+            return
         cf = next((f for f in fields if str(f.get("name")) == cf_name), None)
         if not cf or cf.get("type") != "uint":
             messagebox.showerror("Import YDK", f"Count field {cf_name!r} not found for this layout.")

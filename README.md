@@ -279,6 +279,10 @@ High-level capabilities include:
 
 ## Credits
 
-- **[pret/pokefirered](https://github.com/pret/pokefirered)** — decomp and **gbagfx**-aligned behavior used throughout graphics code.
+- **[Hex Maniac Advance](https://github.com/huderlem/hex-maniac-advance)** — primary inspiration for this kind of GBA ROM editor (thanks to **[haven1433](https://github.com/haven1433)** and contributors).
+- **[gbagfx](https://github.com/pret/pokefirered/tree/master/tools/gbagfx)** — pret’s reference graphics tool (the same `tools/gbagfx` tree is shared across pret disassemblies, e.g. FireRed and Emerald) for encoding alignment in Channeler’s Python graphics path.
+- **[Tilemap Studio](https://github.com/Rangi42/tilemap-studio)** (**Rangi42**) — image→tiles workflow and palette conventions that informed tilemap import behavior.
+- **Kertra** — for discovering and documenting the **6bpp** Yu-Gi-Oh! card sprite layout used in WCT-era titles.
+- **[pret/pokefirered](https://github.com/pret/pokefirered)** — decomp reference and **gbagfx**-aligned behavior used throughout graphics code.
 - **HackMew** and the THUMB assembler tooling referenced for ASM workflows.
 - Tooling built with **Cursor** (often **Composer**).

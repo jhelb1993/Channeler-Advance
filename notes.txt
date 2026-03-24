@@ -1,3 +1,5 @@
+fix goto when in labeled bytes
+make tables jump to index
 triple backticks instead of quotes
 toml writing extra bug
 .hma scripts

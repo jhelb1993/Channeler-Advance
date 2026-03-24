@@ -1,0 +1,1813 @@
+[[NamedAnchors]]
+Name = '''data.cards.stats'''
+Address = 0xB478
+Format = '''`seq`[atks<[atk:]/cardnumbers> defs<[def:]/cardnumbers> costs<[cost::]/cardnumbers> attributes<[attribute.]/cardnumbers> levels<[level.]/cardnumbers> types<[type.]/cardnumbers> colors<[color.]/cardnumbers> spellEffects<[spellEffect.]/cardnumbers> monsterEffects<[monsterEffect.]/cardnumbers> trapEffects<[trapEffect.]/cardnumbers> ritualEffects<[ritualEffect.]/cardnumbers> effect5s<[effect5.]/cardnumbers> descriptions<[description<''>]/cardnumbers>]1'''
+
+[[NamedAnchors]]
+Name = '''data.shop.cards.spawnrates'''
+Address = 0x0C8020
+Format = '''[card:cardnumbers spawnrate:]795'''
+
+[[NamedAnchors]]
+Name = '''data.cards.duelists'''
+Address = 0x0BCA00
+Format = '''[id: field: deck<> goodDrops<> shopCards<> badDrops<> playerLP: lifePoints: capacityYield:: minDomino: maxDomino: unk20. padding:. duelMusic: winMusic: lossMusic: unk2A:]duelists'''
+
+[[NamedAnchors]]
+Name = '''data.drops.0Dummynodrops'''
+Address = 0xbed20
+Format = '''[card:cardnumbers dropchance:]1'''
+
+[[NamedAnchors]]
+Name = '''data.drops.1RedhatguyDominoSquareN'''
+Address = 0xbed24
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.2PurplehairguyDominoSquareN'''
+Address = 0xbed60
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.3SpikyhairguyDominoSquareNE'''
+Address = 0xbed9c
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.4TomoyaHanasakiGlassesguyDominoSquareNE'''
+Address = 0xbedd8
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.5PurpletopwomanDominoSquareSE'''
+Address = 0xbee14
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.6RedheadwomanDominoSquareSE'''
+Address = 0xbee50
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.7DuelistDominoSquareS'''
+Address = 0xbee8c
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.8KojiNagumoYellowhairedmanDominoSquareSW'''
+Address = 0xbeec8
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.9MohawkguyDominoSquareSW'''
+Address = 0xbef04
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.10PinkhairguyDominoSquarebackstreetN'''
+Address = 0xbef40
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.11BrownhairguyDominoSquaregraveyardpathNE'''
+Address = 0xbef7c
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.12Roland'''
+Address = 0xbefb8
+Format = '''[card:cardnumbers dropchance:]22'''
+
+[[NamedAnchors]]
+Name = '''data.drops.13Mokuba'''
+Address = 0xbf010
+Format = '''[card:cardnumbers dropchance:]10'''
+
+[[NamedAnchors]]
+Name = '''data.drops.14Yugi'''
+Address = 0xbf038
+Format = '''[card:cardnumbers dropchance:]8'''
+
+[[NamedAnchors]]
+Name = '''data.drops.15Joey'''
+Address = 0xbf058
+Format = '''[card:cardnumbers dropchance:]10'''
+
+[[NamedAnchors]]
+Name = '''data.drops.16DominoStationoutside'''
+Address = 0xbf080
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.17MushroomheadDominoStationplatform'''
+Address = 0xbf0bc
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.18BluepuffycoatDominoStationplatform'''
+Address = 0xbf0f8
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.19BrownhairDominoStationplatform'''
+Address = 0xbf134
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.20BlackspikyhairDominoStationplatform'''
+Address = 0xbf170
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.21PurpleclothingoptionaltrainguardDominoStationplatform'''
+Address = 0xbf1ac
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.22BaldmanDominoStationplatform'''
+Address = 0xbf1e8
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.23BluetopDominoStationfirstcarriage'''
+Address = 0xbf224
+Format = '''[card:cardnumbers dropchance:]14'''
+
+[[NamedAnchors]]
+Name = '''data.drops.24LonghairDominoStationfirstcarriage'''
+Address = 0xbf25c
+Format = '''[card:cardnumbers dropchance:]14'''
+
+[[NamedAnchors]]
+Name = '''data.drops.25FirsttraincarriageguardwhiteclothesDominoStation'''
+Address = 0xbf294
+Format = '''[card:cardnumbers dropchance:]14'''
+
+[[NamedAnchors]]
+Name = '''data.drops.26UpperclassfatherWhitesuitmanDominoStationthirdcarriage'''
+Address = 0xbf2cc
+Format = '''[card:cardnumbers dropchance:]21'''
+
+[[NamedAnchors]]
+Name = '''data.drops.27UpperclassdaughterLongblackhairwomanDominoStationthirdcarriage'''
+Address = 0xbf320
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.28BaldmanDominoStationthirdcarriage'''
+Address = 0xbf35c
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.29EgyptExhibitionplatform'''
+Address = 0xbf398
+Format = '''[card:cardnumbers dropchance:]14'''
+
+[[NamedAnchors]]
+Name = '''data.drops.30ImoriEgyptExhibitionmanbeforebeatingMillenniumGuardian'''
+Address = 0xbf3d0
+Format = '''[card:cardnumbers dropchance:]14'''
+
+[[NamedAnchors]]
+Name = '''data.drops.31Takeshi'''
+Address = 0xbf408
+Format = '''[card:cardnumbers dropchance:]41'''
+
+[[NamedAnchors]]
+Name = '''data.drops.32JeanClaudeMagnumfirstencounterDominoPier'''
+Address = 0xbf4ac
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.33MaifirstencounterDominoPier'''
+Address = 0xbf4f0
+Format = '''[card:cardnumbers dropchance:]19'''
+
+[[NamedAnchors]]
+Name = '''data.drops.34PurplehairwomanonshipmiddleroomDominoPier'''
+Address = 0xbf53c
+Format = '''[card:cardnumbers dropchance:]16'''
+
+[[NamedAnchors]]
+Name = '''data.drops.35MillenniumGuardianDominoPier'''
+Address = 0xbf57c
+Format = '''[card:cardnumbers dropchance:]19'''
+
+[[NamedAnchors]]
+Name = '''data.drops.36BonzfirstencounterItaly'''
+Address = 0xbf5c8
+Format = '''[card:cardnumbers dropchance:]19'''
+
+[[NamedAnchors]]
+Name = '''data.drops.37MillenniumGuardianItaly'''
+Address = 0xbf614
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.38maybeunusedforDoxsinglefightChina'''
+Address = 0xbf658
+Format = '''[card:cardnumbers dropchance:]2'''
+
+[[NamedAnchors]]
+Name = '''data.drops.39ParasinglefightChina'''
+Address = 0xbf660
+Format = '''[card:cardnumbers dropchance:]7'''
+
+[[NamedAnchors]]
+Name = '''data.drops.40ParatagfightChina'''
+Address = 0xbf67c
+Format = '''[card:cardnumbers dropchance:]4'''
+
+[[NamedAnchors]]
+Name = '''data.drops.41DoxtagfightChina'''
+Address = 0xbf68c
+Format = '''[card:cardnumbers dropchance:]4'''
+
+[[NamedAnchors]]
+Name = '''data.drops.42MillenniumGuardianChina'''
+Address = 0xbf69c
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.43Leichter'''
+Address = 0xbf6e0
+Format = '''[card:cardnumbers dropchance:]5'''
+
+[[NamedAnchors]]
+Name = '''data.drops.44ShortergreyblackhairCanada'''
+Address = 0xbf6f4
+Format = '''[card:cardnumbers dropchance:]16'''
+
+[[NamedAnchors]]
+Name = '''data.drops.45BlueglassesdiggerCanada'''
+Address = 0xbf734
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.46RexfirstencounterCanada'''
+Address = 0xbf778
+Format = '''[card:cardnumbers dropchance:]13'''
+
+[[NamedAnchors]]
+Name = '''data.drops.47MillenniumGuardianCanada'''
+Address = 0xbf7ac
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.48MakofirstencounterGalapagosIslands'''
+Address = 0xbf7e8
+Format = '''[card:cardnumbers dropchance:]16'''
+
+[[NamedAnchors]]
+Name = '''data.drops.49WeevilfirstencounterGalapagosIslands'''
+Address = 0xbf828
+Format = '''[card:cardnumbers dropchance:]24'''
+
+[[NamedAnchors]]
+Name = '''data.drops.50MimicofDoomfirstencounterGalapagosIslands'''
+Address = 0xbf888
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.51SeekersecondencounterKaibaCorpshow'''
+Address = 0xbf8cc
+Format = '''[card:cardnumbers dropchance:]5'''
+
+[[NamedAnchors]]
+Name = '''data.drops.52GhoulattackingpurpleshirtDominoSquareSE'''
+Address = 0xbf8e0
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.53GhoulattackingredheadDominoSquareSE'''
+Address = 0xbf91c
+Format = '''[card:cardnumbers dropchance:]19'''
+
+[[NamedAnchors]]
+Name = '''data.drops.54RexsecondencounterDominoSquareSE'''
+Address = 0xbf968
+Format = '''[card:cardnumbers dropchance:]16'''
+
+[[NamedAnchors]]
+Name = '''data.drops.55GhoulDominoSquareN'''
+Address = 0xbf9a8
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.56WeevilsecondencounterDominoSquareN'''
+Address = 0xbf9ec
+Format = '''[card:cardnumbers dropchance:]22'''
+
+[[NamedAnchors]]
+Name = '''data.drops.57GhoulappearingafterZombyraDominoSquareNE'''
+Address = 0xbfa44
+Format = '''[card:cardnumbers dropchance:]16'''
+
+[[NamedAnchors]]
+Name = '''data.drops.58MaisecondencounterDominoSquareNE'''
+Address = 0xbfa84
+Format = '''[card:cardnumbers dropchance:]23'''
+
+[[NamedAnchors]]
+Name = '''data.drops.59GhoulDominoSquareS'''
+Address = 0xbfae0
+Format = '''[card:cardnumbers dropchance:]20'''
+
+[[NamedAnchors]]
+Name = '''data.drops.60BonzsecondencounterDominoSquareS'''
+Address = 0xbfb30
+Format = '''[card:cardnumbers dropchance:]16'''
+
+[[NamedAnchors]]
+Name = '''data.drops.61GhoulDominoSquareSW'''
+Address = 0xbfb70
+Format = '''[card:cardnumbers dropchance:]19'''
+
+[[NamedAnchors]]
+Name = '''data.drops.62MakosecondencounterDominoSquareSW'''
+Address = 0xbfbbc
+Format = '''[card:cardnumbers dropchance:]19'''
+
+[[NamedAnchors]]
+Name = '''data.drops.63SeekerfirstencounterDominoSquareNW'''
+Address = 0xbfc08
+Format = '''[card:cardnumbers dropchance:]6'''
+
+[[NamedAnchors]]
+Name = '''data.drops.64EspaRobafirstencounterDominoSquareNW'''
+Address = 0xbfc20
+Format = '''[card:cardnumbers dropchance:]16'''
+
+[[NamedAnchors]]
+Name = '''data.drops.65GhoulItaly'''
+Address = 0xbfc60
+Format = '''[card:cardnumbers dropchance:]26'''
+
+[[NamedAnchors]]
+Name = '''data.drops.66GhoulonrightvsRexCanada'''
+Address = 0xbfcc8
+Format = '''[card:cardnumbers dropchance:]18'''
+
+[[NamedAnchors]]
+Name = '''data.drops.67GhoulonleftvsRexCanada'''
+Address = 0xbfd10
+Format = '''[card:cardnumbers dropchance:]18'''
+
+[[NamedAnchors]]
+Name = '''data.drops.68Lumis'''
+Address = 0xbfd58
+Format = '''[card:cardnumbers dropchance:]4'''
+
+[[NamedAnchors]]
+Name = '''data.drops.69Umbra'''
+Address = 0xbfd68
+Format = '''[card:cardnumbers dropchance:]4'''
+
+[[NamedAnchors]]
+Name = '''data.drops.70Strings'''
+Address = 0xbfd78
+Format = '''[card:cardnumbers dropchance:]6'''
+
+[[NamedAnchors]]
+Name = '''data.drops.71GhoulsguardingDominoStationentrance'''
+Address = 0xbfd90
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.72FirsttrainGhoulDominoStation'''
+Address = 0xbfdd4
+Format = '''[card:cardnumbers dropchance:]14'''
+
+[[NamedAnchors]]
+Name = '''data.drops.73SecondtrainGhoulDominoStation'''
+Address = 0xbfe0c
+Format = '''[card:cardnumbers dropchance:]14'''
+
+[[NamedAnchors]]
+Name = '''data.drops.74ThirdtrainGhoulDominoStation'''
+Address = 0xbfe44
+Format = '''[card:cardnumbers dropchance:]14'''
+
+[[NamedAnchors]]
+Name = '''data.drops.75GhoultrioaftertrainEgyptExhibition'''
+Address = 0xbfe7c
+Format = '''[card:cardnumbers dropchance:]14'''
+
+[[NamedAnchors]]
+Name = '''data.drops.76GhoulatticketbarriersEgyptExhibition'''
+Address = 0xbfeb4
+Format = '''[card:cardnumbers dropchance:]14'''
+
+[[NamedAnchors]]
+Name = '''data.drops.77Keith'''
+Address = 0xbfeec
+Format = '''[card:cardnumbers dropchance:]12'''
+
+[[NamedAnchors]]
+Name = '''data.drops.78FirstParadoxchallengeMillenniumGuardianChina'''
+Address = 0xbff1c
+Format = '''[card:cardnumbers dropchance:]18'''
+
+[[NamedAnchors]]
+Name = '''data.drops.79SecondParadoxchallengeMillenniumGuardianChina'''
+Address = 0xbff64
+Format = '''[card:cardnumbers dropchance:]16'''
+
+[[NamedAnchors]]
+Name = '''data.drops.80ThirdParadoxchallengeMillenniumGuardianChina'''
+Address = 0xbffa4
+Format = '''[card:cardnumbers dropchance:]18'''
+
+[[NamedAnchors]]
+Name = '''data.drops.81FourthParadoxchallengeMillenniumGuardianChina'''
+Address = 0xbffec
+Format = '''[card:cardnumbers dropchance:]18'''
+
+[[NamedAnchors]]
+Name = '''data.drops.82FifthParadoxchallengeMillenniumGuardianChina'''
+Address = 0xc0034
+Format = '''[card:cardnumbers dropchance:]14'''
+
+[[NamedAnchors]]
+Name = '''data.drops.83ParadoxChina'''
+Address = 0xc006c
+Format = '''[card:cardnumbers dropchance:]21'''
+
+[[NamedAnchors]]
+Name = '''data.drops.84EspaRobaspiritcardmatchDominoSquare'''
+Address = 0xc00c0
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.85RedhatguyDominoSquareNrematch'''
+Address = 0xc0104
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.86PurplehairguyDominoSquareNrematch'''
+Address = 0xc0148
+Format = '''[card:cardnumbers dropchance:]18'''
+
+[[NamedAnchors]]
+Name = '''data.drops.87SpikyhairguyDominoSquareNErematch'''
+Address = 0xc0190
+Format = '''[card:cardnumbers dropchance:]18'''
+
+[[NamedAnchors]]
+Name = '''data.drops.88TomoyaHanasakirematchGlassesguyDominoSquareNE'''
+Address = 0xc01d8
+Format = '''[card:cardnumbers dropchance:]23'''
+
+[[NamedAnchors]]
+Name = '''data.drops.89RedheadwomanDominoSquareSErematch'''
+Address = 0xc0234
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.90KojiNagumorematchYellowhairedmanDominoSquareSW'''
+Address = 0xc0278
+Format = '''[card:cardnumbers dropchance:]18'''
+
+[[NamedAnchors]]
+Name = '''data.drops.91MohawkguyDominoSquareSWrematch'''
+Address = 0xc02c0
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.92Tristanthirddeckrematch'''
+Address = 0xc0304
+Format = '''[card:cardnumbers dropchance:]23'''
+
+[[NamedAnchors]]
+Name = '''data.drops.93Dukerematch'''
+Address = 0xc0360
+Format = '''[card:cardnumbers dropchance:]16'''
+
+[[NamedAnchors]]
+Name = '''data.drops.94maybeunusedforpinkhairguyDominoSquarebackstreetNrematch'''
+Address = 0xc03a0
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.95BrownhairguyDominoSquaregraveyardpathNErematch'''
+Address = 0xc03dc
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.96EgyptExhibitionplatformrematch'''
+Address = 0xc0420
+Format = '''[card:cardnumbers dropchance:]19'''
+
+[[NamedAnchors]]
+Name = '''data.drops.97MaispiritcardmatchDominoPier'''
+Address = 0xc046c
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.98ButleresquemanonshipmiddleroomDominoPier'''
+Address = 0xc04b0
+Format = '''[card:cardnumbers dropchance:]40'''
+
+[[NamedAnchors]]
+Name = '''data.drops.99PurplehairwomanonshipmiddleroomDominoPierrematch'''
+Address = 0xc0550
+Format = '''[card:cardnumbers dropchance:]16'''
+
+[[NamedAnchors]]
+Name = '''data.drops.100BonzspiritcardmatchItaly'''
+Address = 0xc0590
+Format = '''[card:cardnumbers dropchance:]20'''
+
+[[NamedAnchors]]
+Name = '''data.drops.101ShortergreyblackhairCanadarematch'''
+Address = 0xc05e0
+Format = '''[card:cardnumbers dropchance:]21'''
+
+[[NamedAnchors]]
+Name = '''data.drops.102RexspiritcardmatchCanada'''
+Address = 0xc0634
+Format = '''[card:cardnumbers dropchance:]20'''
+
+[[NamedAnchors]]
+Name = '''data.drops.103MakospiritcardmatchGalapagos'''
+Address = 0xc0684
+Format = '''[card:cardnumbers dropchance:]21'''
+
+[[NamedAnchors]]
+Name = '''data.drops.104WeevilspiritcardmatchGalapagos'''
+Address = 0xc06d8
+Format = '''[card:cardnumbers dropchance:]19'''
+
+[[NamedAnchors]]
+Name = '''data.drops.105CablecarChevaliersallthreePegasusIsland'''
+Address = 0xc0724
+Format = '''[card:cardnumbers dropchance:]24'''
+
+[[NamedAnchors]]
+Name = '''data.drops.106RightChevalierDungeonfirstroom'''
+Address = 0xc0784
+Format = '''[card:cardnumbers dropchance:]22'''
+
+[[NamedAnchors]]
+Name = '''data.drops.107LeftChevalierDungeonfirstroom'''
+Address = 0xc07dc
+Format = '''[card:cardnumbers dropchance:]22'''
+
+[[NamedAnchors]]
+Name = '''data.drops.108LavaroomChevalierDungeon'''
+Address = 0xc0834
+Format = '''[card:cardnumbers dropchance:]16'''
+
+[[NamedAnchors]]
+Name = '''data.drops.109MountainroomChevalierDungeon'''
+Address = 0xc0874
+Format = '''[card:cardnumbers dropchance:]18'''
+
+[[NamedAnchors]]
+Name = '''data.drops.110SecondlavaroomChevalierDungeon'''
+Address = 0xc08bc
+Format = '''[card:cardnumbers dropchance:]18'''
+
+[[NamedAnchors]]
+Name = '''data.drops.111BridgeroomChevalierDungeon'''
+Address = 0xc0904
+Format = '''[card:cardnumbers dropchance:]18'''
+
+[[NamedAnchors]]
+Name = '''data.drops.112PostParaDoxChevalierDungeon'''
+Address = 0xc094c
+Format = '''[card:cardnumbers dropchance:]21'''
+
+[[NamedAnchors]]
+Name = '''data.drops.113SpiritBonzPegasusCastle'''
+Address = 0xc09a0
+Format = '''[card:cardnumbers dropchance:]12'''
+
+[[NamedAnchors]]
+Name = '''data.drops.114SpiritRexPegasusCastle'''
+Address = 0xc09d0
+Format = '''[card:cardnumbers dropchance:]12'''
+
+[[NamedAnchors]]
+Name = '''data.drops.115SpiritWeevilPegasusCastle'''
+Address = 0xc0a00
+Format = '''[card:cardnumbers dropchance:]12'''
+
+[[NamedAnchors]]
+Name = '''data.drops.116SpiritMakoPegasusCastle'''
+Address = 0xc0a30
+Format = '''[card:cardnumbers dropchance:]12'''
+
+[[NamedAnchors]]
+Name = '''data.drops.117SpiritEspaRobaPegasusCastle'''
+Address = 0xc0a60
+Format = '''[card:cardnumbers dropchance:]12'''
+
+[[NamedAnchors]]
+Name = '''data.drops.118SpiritMaiPegasusCastle'''
+Address = 0xc0a90
+Format = '''[card:cardnumbers dropchance:]12'''
+
+[[NamedAnchors]]
+Name = '''data.drops.119MindControlledMokuba'''
+Address = 0xc0ac0
+Format = '''[card:cardnumbers dropchance:]22'''
+
+[[NamedAnchors]]
+Name = '''data.drops.120KaibaPegasusCastle'''
+Address = 0xc0b18
+Format = '''[card:cardnumbers dropchance:]2'''
+
+[[NamedAnchors]]
+Name = '''data.drops.121SolChevalskyPegasusCastle'''
+Address = 0xc0b20
+Format = '''[card:cardnumbers dropchance:]8'''
+
+[[NamedAnchors]]
+Name = '''data.drops.122Reshef'''
+Address = 0xc0b40
+Format = '''[card:cardnumbers dropchance:]16'''
+
+[[NamedAnchors]]
+Name = '''data.drops.123Tristanearlygame'''
+Address = 0xc0b80
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.124Dukeearlygame'''
+Address = 0xc0bbc
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.125Tristanbetweenearlygameandthirddecknotsurewhenhestartsusingthis'''
+Address = 0xc0c00
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.126RobotMonkeyfirstoneGalapagos'''
+Address = 0xc0c3c
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.127RobotMonkeyEastofthetwobananaguardsGalapagos'''
+Address = 0xc0c80
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.128RobotMonkeyWestofthetwobananaguardsGalapagos'''
+Address = 0xc0cc4
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.129RobotMonkeytempleGalapagos'''
+Address = 0xc0d08
+Format = '''[card:cardnumbers dropchance:]15'''
+
+[[NamedAnchors]]
+Name = '''data.drops.130Rebecca'''
+Address = 0xc0d44
+Format = '''[card:cardnumbers dropchance:]24'''
+
+[[NamedAnchors]]
+Name = '''data.drops.131JeanClaudeMagnumsecondencounterItaly'''
+Address = 0xc0da4
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.132JohnnySteps'''
+Address = 0xc0de8
+Format = '''[card:cardnumbers dropchance:]19'''
+
+[[NamedAnchors]]
+Name = '''data.drops.133Crump'''
+Address = 0xc0e34
+Format = '''[card:cardnumbers dropchance:]7'''
+
+[[NamedAnchors]]
+Name = '''data.drops.134Noah'''
+Address = 0xc0e50
+Format = '''[card:cardnumbers dropchance:]16'''
+
+[[NamedAnchors]]
+Name = '''data.drops.135YamiMarik'''
+Address = 0xc0e90
+Format = '''[card:cardnumbers dropchance:]19'''
+
+[[NamedAnchors]]
+Name = '''data.drops.136YamiBakura'''
+Address = 0xc0edc
+Format = '''[card:cardnumbers dropchance:]26'''
+
+[[NamedAnchors]]
+Name = '''data.drops.137YamiYugi'''
+Address = 0xc0f44
+Format = '''[card:cardnumbers dropchance:]24'''
+
+[[NamedAnchors]]
+Name = '''data.drops.138MindControlledJoey'''
+Address = 0xc0fa4
+Format = '''[card:cardnumbers dropchance:]19'''
+
+[[NamedAnchors]]
+Name = '''data.drops.139KaibaHallofEternity'''
+Address = 0xc0ff0
+Format = '''[card:cardnumbers dropchance:]19'''
+
+[[NamedAnchors]]
+Name = '''data.drops.140SolChevalskyHallofEternity'''
+Address = 0xc103c
+Format = '''[card:cardnumbers dropchance:]20'''
+
+[[NamedAnchors]]
+Name = '''data.drops.141ParadoxHallofEternity'''
+Address = 0xc108c
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.142Shadi'''
+Address = 0xc10d0
+Format = '''[card:cardnumbers dropchance:]16'''
+
+[[NamedAnchors]]
+Name = '''data.drops.143DuelComputerNovice'''
+Address = 0xc1110
+Format = '''[card:cardnumbers dropchance:]18'''
+
+[[NamedAnchors]]
+Name = '''data.drops.144DuelComputerStandard'''
+Address = 0xc1158
+Format = '''[card:cardnumbers dropchance:]28'''
+
+[[NamedAnchors]]
+Name = '''data.drops.145DuelComputerExpert'''
+Address = 0xc11c8
+Format = '''[card:cardnumbers dropchance:]40'''
+
+[[NamedAnchors]]
+Name = '''data.drops.146EspaRobapostspiritcardduelDominoSquare'''
+Address = 0xc1268
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.147MaipostspiritcardduelDominoPier'''
+Address = 0xc12ac
+Format = '''[card:cardnumbers dropchance:]19'''
+
+[[NamedAnchors]]
+Name = '''data.drops.148BonzpostspiritcardduelItaly'''
+Address = 0xc12f8
+Format = '''[card:cardnumbers dropchance:]20'''
+
+[[NamedAnchors]]
+Name = '''data.drops.149RexpostspiritcardduelCanada'''
+Address = 0xc1348
+Format = '''[card:cardnumbers dropchance:]20'''
+
+[[NamedAnchors]]
+Name = '''data.drops.150MakopostspiritcardduelGalapagos'''
+Address = 0xc1398
+Format = '''[card:cardnumbers dropchance:]21'''
+
+[[NamedAnchors]]
+Name = '''data.drops.151WeevilpostspiritcardduelGalapagos'''
+Address = 0xc13ec
+Format = '''[card:cardnumbers dropchance:]19'''
+
+[[NamedAnchors]]
+Name = '''data.drops.152MonkeyRobotshop'''
+Address = 0xc1438
+Format = '''[card:cardnumbers dropchance:]14'''
+
+[[NamedAnchors]]
+Name = '''data.drops.153PanikDominoStationtrain'''
+Address = 0xc1470
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.154MillenniumguardianEgyptExhibition'''
+Address = 0xc14b4
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.155PuppeteerofDoom'''
+Address = 0xc14f8
+Format = '''[card:cardnumbers dropchance:]17'''
+
+[[NamedAnchors]]
+Name = '''data.drops.156Arkana'''
+Address = 0xc153c
+Format = '''[card:cardnumbers dropchance:]16'''
+
+[[NamedAnchors]]
+Name = '''data.drops.157Odion'''
+Address = 0xc157c
+Format = '''[card:cardnumbers dropchance:]33'''
+
+[[NamedAnchors]]
+Name = '''data.drops.158Marik'''
+Address = 0xc1600
+Format = '''[card:cardnumbers dropchance:]29'''
+
+[[NamedAnchors]]
+Name = '''data.drops.159DominoStationguard'''
+Address = 0xc1674
+Format = '''[card:cardnumbers dropchance:]41'''
+
+[[NamedAnchors]]
+Name = '''data.drops.160PanikrematchPegasusIsland'''
+Address = 0xc1718
+Format = '''[card:cardnumbers dropchance:]7'''
+
+[[NamedAnchors]]
+Name = '''data.drops.161MimicofDoomrematchPegasusIsland'''
+Address = 0xc1734
+Format = '''[card:cardnumbers dropchance:]11'''
+
+[[NamedAnchors]]
+Name = '''data.drops.162ParatagteamrematchPegasusIsland'''
+Address = 0xc1760
+Format = '''[card:cardnumbers dropchance:]2'''
+
+[[NamedAnchors]]
+Name = '''data.drops.163DoxtagteamrematchPegasusIsland'''
+Address = 0xc1768
+Format = '''[card:cardnumbers dropchance:]2'''
+
+[[List]]
+Name = '''duelists'''
+0 = [
+	'''0Dummy''',
+	'''1RedhatguyDominoSquareN''',
+	'''2PurplehairguyDominoSquareN''',
+	'''3SpikyhairguyDominoSquareNE''',
+	'''4TomoyaHanasakiGlassesguyDominoSquareNE''',
+	'''5PurpletopwomanDominoSquareSE''',
+	'''6RedheadwomanDominoSquareSE''',
+	'''7DuelistDominoSquareS''',
+	'''8KojiNagumoYellowhairedmanDominoSquareSW''',
+	'''9MohawkguyDominoSquareSW''',
+	'''10PinkhairguyDominoSquarebackstreetN''',
+	'''11BrownhairguyDominoSquaregraveyardpathNE''',
+	'''12Roland''',
+	'''13Mokuba''',
+	'''14Yugi''',
+	'''15Joey''',
+	'''16DominoStationoutside''',
+	'''17MushroomheadDominoStationplatform''',
+	'''18BluepuffycoatDominoStationplatform''',
+	'''19BrownhairDominoStationplatform''',
+	'''20BlackspikyhairDominoStationplatform''',
+	'''21PurpleclothingoptionaltrainguardDominoStationplatform''',
+	'''22BaldmanDominoStationplatform''',
+	'''23BluetopDominoStationfirstcarriage''',
+	'''24LonghairDominoStationfirstcarriage''',
+	'''25FirsttraincarriageguardwhiteclothesDominoStation''',
+	'''26UpperclassfatherWhitesuitmanDominoStationthirdcarriage''',
+	'''27UpperclassdaughterLongblackhairwomanDominoStationthirdcarriage''',
+	'''28BaldmanDominoStationthirdcarriage''',
+	'''29EgyptExhibitionplatform''',
+	'''30ImoriEgyptExhibitionmanbeforebeatingMillenniumGuardian''',
+	'''31Takeshi''',
+	'''32JeanClaudeMagnumfirstencounterDominoPier''',
+	'''33MaifirstencounterDominoPier''',
+	'''34PurplehairwomanonshipmiddleroomDominoPier''',
+	'''35MillenniumGuardianDominoPier''',
+	'''36BonzfirstencounterItaly''',
+	'''37MillenniumGuardianItaly''',
+	'''38maybeunusedforDoxsinglefightChina''',
+	'''39ParasinglefightChina''',
+	'''40ParatagfightChina''',
+	'''41DoxtagfightChina''',
+	'''42MillenniumGuardianChina''',
+	'''43Leichter''',
+	'''44ShortergreyblackhairCanada''',
+	'''45BlueglassesdiggerCanada''',
+	'''46RexfirstencounterCanada''',
+	'''47MillenniumGuardianCanada''',
+	'''48MakofirstencounterGalapagosIslands''',
+	'''49WeevilfirstencounterGalapagosIslands''',
+	'''50MimicofDoomfirstencounterGalapagosIslands''',
+	'''51SeekersecondencounterKaibaCorpshow''',
+	'''52GhoulattackingpurpleshirtDominoSquareSE''',
+	'''53GhoulattackingredheadDominoSquareSE''',
+	'''54RexsecondencounterDominoSquareSE''',
+	'''55GhoulDominoSquareN''',
+	'''56WeevilsecondencounterDominoSquareN''',
+	'''57GhoulappearingafterZombyraDominoSquareNE''',
+	'''58MaisecondencounterDominoSquareNE''',
+	'''59GhoulDominoSquareS''',
+	'''60BonzsecondencounterDominoSquareS''',
+	'''61GhoulDominoSquareSW''',
+	'''62MakosecondencounterDominoSquareSW''',
+	'''63SeekerfirstencounterDominoSquareNW''',
+	'''64EspaRobafirstencounterDominoSquareNW''',
+	'''65GhoulItaly''',
+	'''66GhoulonrightvsRexCanada''',
+	'''67GhoulonleftvsRexCanada''',
+	'''68Lumis''',
+	'''69Umbra''',
+	'''70Strings''',
+	'''71GhoulsguardingDominoStationentrance''',
+	'''72FirsttrainGhoulDominoStation''',
+	'''73SecondtrainGhoulDominoStation''',
+	'''74ThirdtrainGhoulDominoStation''',
+	'''75GhoultrioaftertrainEgyptExhibition''',
+	'''76GhoulatticketbarriersEgyptExhibition''',
+	'''77Keith''',
+	'''78FirstParadoxchallengeMillenniumGuardianChina''',
+	'''79SecondParadoxchallengeMillenniumGuardianChina''',
+	'''80ThirdParadoxchallengeMillenniumGuardianChina''',
+	'''81FourthParadoxchallengeMillenniumGuardianChina''',
+	'''82FifthParadoxchallengeMillenniumGuardianChina''',
+	'''83ParadoxChina''',
+	'''84EspaRobaspiritcardmatchDominoSquare''',
+	'''85RedhatguyDominoSquareNrematch''',
+	'''86PurplehairguyDominoSquareNrematch''',
+	'''87SpikyhairguyDominoSquareNErematch''',
+	'''88TomoyaHanasakirematchGlassesguyDominoSquareNE''',
+	'''89RedheadwomanDominoSquareSErematch''',
+	'''90KojiNagumorematchYellowhairedmanDominoSquareSW''',
+	'''91MohawkguyDominoSquareSWrematch''',
+	'''92Tristanthirddeckrematch''',
+	'''93Dukerematch''',
+	'''94maybeunusedforpinkhairguyDominoSquarebackstreetNrematch''',
+	'''95BrownhairguyDominoSquaregraveyardpathNErematch''',
+	'''96EgyptExhibitionplatformrematch''',
+	'''97MaispiritcardmatchDominoPier''',
+	'''98ButleresquemanonshipmiddleroomDominoPier''',
+	'''99PurplehairwomanonshipmiddleroomDominoPierrematch''',
+	'''100BonzspiritcardmatchItaly''',
+	'''101ShortergreyblackhairCanadarematch''',
+	'''102RexspiritcardmatchCanada''',
+	'''103MakospiritcardmatchGalapagos''',
+	'''104WeevilspiritcardmatchGalapagos''',
+	'''105CablecarChevaliersallthreePegasusIsland''',
+	'''106RightChevalierDungeonfirstroom''',
+	'''107LeftChevalierDungeonfirstroom''',
+	'''108LavaroomChevalierDungeon''',
+	'''109MountainroomChevalierDungeon''',
+	'''110SecondlavaroomChevalierDungeon''',
+	'''111BridgeroomChevalierDungeon''',
+	'''112PostParaDoxChevalierDungeon''',
+	'''113SpiritBonzPegasusCastle''',
+	'''114SpiritRexPegasusCastle''',
+	'''115SpiritWeevilPegasusCastle''',
+	'''116SpiritMakoPegasusCastle''',
+	'''117SpiritEspaRobaPegasusCastle''',
+	'''118SpiritMaiPegasusCastle''',
+	'''119MindControlledMokuba''',
+	'''120KaibaPegasusCastle''',
+	'''121SolChevalskyPegasusCastle''',
+	'''122Reshef''',
+	'''123Tristanearlygame''',
+	'''124Dukeearlygame''',
+	'''125Tristanbetweenearlygameandthirddecknotsurewhenhestartsusingthis''',
+	'''126RobotMonkeyfirstoneGalapagos''',
+	'''127RobotMonkeyEastofthetwobananaguardsGalapagos''',
+	'''128RobotMonkeyWestofthetwobananaguardsGalapagos''',
+	'''129RobotMonkeytempleGalapagos''',
+	'''130Rebecca''',
+	'''131JeanClaudeMagnumsecondencounterItaly''',
+	'''132JohnnySteps''',
+	'''133Crump''',
+	'''134Noah''',
+	'''135YamiMarik''',
+	'''136YamiBakura''',
+	'''137YamiYugi''',
+	'''138MindControlledJoey''',
+	'''139KaibaHallofEternity''',
+	'''140SolChevalskyHallofEternity''',
+	'''141ParadoxHallofEternity''',
+	'''142Shadi''',
+	'''143DuelComputerNovice''',
+	'''144DuelComputerStandard''',
+	'''145DuelComputerExpert''',
+	'''146EspaRobapostspiritcardduelDominoSquare''',
+	'''147MaipostspiritcardduelDominoPier''',
+	'''148BonzpostspiritcardduelItaly''',
+	'''149RexpostspiritcardduelCanada''',
+	'''150MakopostspiritcardduelGalapagos''',
+	'''151WeevilpostspiritcardduelGalapagos''',
+	'''152MonkeyRobotshop''',
+	'''153PanikDominoStationtrain''',
+	'''154MillenniumguardianEgyptExhibition''',
+	'''155PuppeteerofDoom''',
+	'''156Arkana''',
+	'''157Odion''',
+	'''158Marik''',
+	'''159DominoStationguard''',
+	'''160PanikrematchPegasusIsland''',
+	'''161MimicofDoomrematchPegasusIsland''',
+	'''162ParatagteamrematchPegasusIsland''',
+	'''163DoxtagteamrematchPegasusIsland''',
+]
+
+#################################
+#################################
+#################################
+#################################
+[[List]]
+Name = '''cardnumbers'''
+0 = [
+   '''None''',
+   '''Blue-Eyes White Dragon''',
+   '''Mystical Elf''',
+   '''Hitotsu-Me Giant''',
+   '''Baby Dragon''',
+   '''Ryu-Kishin''',
+   '''Feral Imp''',
+   '''Winged Dragon, Guardian of the Fortress #1''',
+   '''Mushroom Man''',
+   '''Shadow Specter''',
+   '''Blackland Fire Dragon''',
+   '''Sword Arm of Dragon''',
+   '''Swamp Battleguard''',
+   '''The Stern Mystic''',
+   '''Battle Steer''',
+   '''Flame Swordsman''',
+   '''Time Wizard''',
+   '''Right Leg of the Forbidden One''',
+   '''Left Leg of the Forbidden One''',
+   '''Right Arm of the Forbidden One''',
+   '''Left Arm of the Forbidden One''',
+   '''Exodia the Forbidden One''',
+   '''Summoned Skull''',
+   '''The Wicked Worm Beast''',
+   '''Skull Servant''',
+   '''Horn Imp''',
+   '''Battle Ox''',
+   '''Beaver Warrior''',
+   '''Rock Ogre Grotto #1''',
+   '''Mountain Warrior''',
+   '''Zombie Warrior''',
+   '''Koumori Dragon''',
+   '''Two-Headed King Rex''',
+   '''Judge Man''',
+   '''Saggi the Dark Clown''',
+   '''Dark Magician''',
+   '''The Snake Hair''',
+   '''Gaia the Dragon Champion''',
+   '''Gaia The Fierce Knight''',
+   '''Curse of Dragon''',
+   '''Dragon Piper''',
+   '''Celtic Guardian''',
+   '''Illusionist Faceless Mage''',
+   '''Karbonala Warrior''',
+   '''Rogue Doll''',
+   '''Oscillo Hero #2''',
+   '''Griffore''',
+   '''Torike''',
+   '''Sangan''',
+   '''Big Insect''',
+   '''Basic Insect''',
+   '''Armored Lizard''',
+   '''Hercules Beetle''',
+   '''Killer Needle''',
+   '''Gokibore''',
+   '''Giant Flea''',
+   '''Larvae Moth''',
+   '''Great Moth''',
+   '''Kuriboh''',
+   '''Mammoth Graveyard''',
+   '''Great White''',
+   '''Wolf''',
+   '''Harpie Lady''',
+   '''Harpie Lady Sisters''',
+   '''Tiger Axe''',
+   '''Silver Fang''',
+   '''Kojikocy''',
+   '''Perfectly Ultimate Great Moth''',
+   '''Garoozis''',
+   '''Thousand Dragon''',
+   '''Fiend Kraken''',
+   '''Jellyfish''',
+   '''Cocoon of Evolution''',
+   '''Kairyu-Shin''',
+   '''Giant Soldier of Stone''',
+   '''Man-Eating Plant''',
+   '''Krokodilus''',
+   '''Grappler''',
+   '''Axe Raider''',
+   '''Megazowler''',
+   '''Uraby''',
+   '''Crawling Dragon #2''',
+   '''Red-Eyes B. Dragon''',
+   '''Castle of Dark Illusions''',
+   '''Reaper of the Cards''',
+   '''King of Yamimakai''',
+   '''Barox''',
+   '''Dark Chimera''',
+   '''Metal Guardian''',
+   '''Catapult Turtle''',
+   '''Gyakutenno Megami''',
+   '''Mystic Horseman''',
+   '''Rabid Horseman''',
+   '''Zanki''',
+   '''Crawling Dragon''',
+   '''Crass Clown''',
+   '''Armored Zombie''',
+   '''Dragon Zombie''',
+   '''Clown Zombie''',
+   '''Pumpking the King of Ghosts''',
+   '''Battle Warrior''',
+   '''Wings of Wicked Flame''',
+   '''Mask of Darkness''',
+   '''Baron of the Fiend Sword''',
+   '''Curtain of the Dark Ones''',
+   '''Tomozaurus''',
+   '''Spirit of the Winds''',
+   '''Shining Abyss''',
+   '''Headless Knight''',
+   '''Goddess with the Third Eye''',
+   '''Ruklamba the Spirit King''',
+   '''Doma The Angel of Silence''',
+   '''Keldo''',
+   '''Soldier Ari''',
+   '''White Magical Hat''',
+   '''Gearfried the Iron Knight''',
+   '''Nightmare Scorpion''',
+   '''Spirit of the Books''',
+   '''XYZ-Dragon Cannon''',
+   '''Humanoid Slime''',
+   '''Dream Clown''',
+   '''Sleeping Lion''',
+   '''Yamatano Dragon Scroll''',
+   '''Dark Plant''',
+   '''Worm Drake''',
+   '''Faith Bird''',
+   '''Orion the Battle King''',
+   '''Ansatsu''',
+   '''LaMoon''',
+   '''Nemuriko''',
+   '''Weather Control''',
+   '''Octoberser''',
+   '''Humanoid Worm Drake''',
+   '''Charubin the Fire Knight''',
+   '''Revival Jam''',
+   '''Fiend's Hand''',
+   '''None (136)''',
+   '''Buster Blader''',
+   '''Dark Necrofear''',
+   '''Blue-Eyed Silver Zombie''',
+   '''Toad Master''',
+   '''Spiked Snail''',
+   '''Flame Manipulator''',
+   '''Necrolancer the Timelord''',
+   '''Djinn the Watcher of the Wind''',
+   '''The Bewitching Phantom Thief''',
+   '''Temple of Skulls''',
+   '''Monster Egg''',
+   '''The Shadow Who Controls the Dark''',
+   '''X-Head Cannon''',
+   '''Akihiron''',
+   '''Orgoth the Relentless''',
+   '''The Melting Red Shadow''',
+   '''Dokuroizo the Grim Reaper''',
+   '''Fire Reaper''',
+   '''Larvas''',
+   '''Hard Armor''',
+   '''Firegrass''',
+   '''Cyber Jar''',
+   '''Dig Beak''',
+   '''M-Warrior #1''',
+   '''M-Warrior #2''',
+   '''Banisher of the Light''',
+   '''Lisark''',
+   '''Des Feral Imp''',
+   '''The Judgement Hand''',
+   '''Mysterious Puppeteer''',
+   '''Ancient Jar''',
+   '''Darkfire Dragon''',
+   '''Dark King of the Abyss''',
+   '''Spirit of the Harp''',
+   '''Big Eye''',
+   '''Armaill''',
+   '''Giant Rat''',
+   '''Senju of the Thousand Hands''',
+   '''UFO Turtle''',
+   '''Fire Eye''',
+   '''Monsturtle''',
+   '''Claw Reacher''',
+   '''Phantom Dewan''',
+   '''Arlownay''',
+   '''Flash Assailant''',
+   '''Karate Man''',
+   '''Lucky Trinket''',
+   '''Genin''',
+   '''Dark Zebra''',
+   '''Fiend Reflection #2''',
+   '''Gate Deeg''',
+   '''Giant Germ''',
+   '''Fusionist''',
+   '''Nimble Momonga''',
+   '''LaLa Li-oon''',
+   '''Key Mace''',
+   '''Final Destiny''',
+   '''Heavy Storm''',
+   '''Doron''',
+   '''Cyclon Laser''',
+   '''Boar Soldier''',
+   '''Happy Lover''',
+   '''Penguin Knight''',
+   '''Petit Dragon''',
+   '''Frenzied Panda''',
+   '''Air Marmot of Nefariousness''',
+   '''Phantom Ghost''',
+   '''Mother Grizzly''',
+   '''Flying Kamakiri #1''',
+   '''Twin Long Rods #1''',
+   '''Droll Bird''',
+   '''Petit Angel''',
+   '''Winged Cleaver''',
+   '''Hinotama Soul''',
+   '''Kaminarikozou''',
+   '''Meotoko''',
+   '''Aqua Madoor''',
+   '''Kagemusha of the Blue Flame''',
+   '''Flame Ghost''',
+   '''Nightmare Penguin''',
+   '''B. Skull Dragon''',
+   '''Two-Mouth Darkruler''',
+   '''Solitude''',
+   '''Masked Sorcerer''',
+   '''Kumootoko''',
+   '''Ceremonial Bell''',
+   '''Roaring Ocean Snake''',
+   '''Trap Master''',
+   '''Fiend Sword''',
+   '''Sonic Bird''',
+   '''Mystic Tomato''',
+   '''Wood Remains''',
+   '''Hourglass of Life''',
+   '''Rare Fish''',
+   '''Wood Clown''',
+   '''Kotodama''',
+   '''Jam Breeding Machine''',
+   '''Obelisk the Tormentor''',
+   '''Wodan the Resident of the Forest''',
+   '''Perfect Machine King''',
+   '''Haniwa''',
+   '''Slifer the Sky Dragon''',
+   '''Vishwar Randi''',
+   '''The Winged Dragon of Ra (Battle Mode)''',
+   '''Dark Assailant''',
+   '''Candle of Fate''',
+   '''Water Element''',
+   '''Dissolverock''',
+   '''Flying Fish''',
+   '''One Who Hunts Souls''',
+   '''Root Water''',
+   '''Amphibian Beast''',
+   '''Water Omotics''',
+   '''Alligator's Sword Dragon''',
+   '''Enchanting Mermaid''',
+   '''Nekogal #1''',
+   '''Rocket Warrior''',
+   '''Aqua Serpent''',
+   '''Prevent Rat''',
+   '''Dimensional Warrior''',
+   '''The Legendary Fisherman''',
+   '''Beastking of the Swamps''',
+   '''Satellite Cannon''',
+   '''Lunar Queen Elzaim''',
+   '''Wicked Mirror''',
+   '''The Little Swordsman of Aile''',
+   '''Rock Ogre Grotto #2''',
+   '''Wing Egg Elf''',
+   '''The Furious Sea King''',
+   '''Princess of Tsurugi''',
+   '''Morphing Jar #2''',
+   '''Vorse Raider''',
+   '''Versago the Destroyer''',
+   '''Wetha''',
+   '''Megirus Light''',
+   '''Mavelus''',
+   '''Ancient Tree of Enlightenment''',
+   '''Green Phantom King''',
+   '''Ground Attacker Bugroth''',
+   '''Ray & Temperature''',
+   '''Flame Champion''',
+   '''Petit Moth''',
+   '''Twin-Headed Fire Dragon''',
+   '''Darkfire Soldier #1''',
+   '''Mystic Clown''',
+   '''Mystical Sheep #2''',
+   '''Holograh''',
+   '''Tao the Chanter''',
+   '''Serpent Marauder''',
+   '''Mr. Volcano''',
+   '''Ogre of the Black Shadow''',
+   '''Darkfire Soldier #2''',
+   '''Change Slime''',
+   '''Moon Envoy''',
+   '''Fireyarou''',
+   '''Kiseitai''',
+   '''Masaki the Legendary Swordsman''',
+   '''Dragoness the Wicked Knight''',
+   '''Cyber Falcon''',
+   '''One-Eyed Shield Dragon''',
+   '''The Winged Dragon of Ra (Sphere Mode)''',
+   '''Wicked Dragon with the Ersatz Head''',
+   '''Sonic Maid''',
+   '''Kurama''',
+   '''Legendary Sword''',
+   '''Sword of Dark Destruction''',
+   '''Dark Energy''',
+   '''Axe of Despair''',
+   '''Laser Cannon Armor''',
+   '''Insect Armor with Laser Cannon''',
+   '''Elf's Light''',
+   '''Beast Fangs''',
+   '''Steel Shell''',
+   '''Vile Germs''',
+   '''Black Pendant''',
+   '''Silver Bow and Arrow''',
+   '''Horn of Light''',
+   '''Horn of the Unicorn''',
+   '''Dragon Treasure''',
+   '''Electro-Whip''',
+   '''Cyber Shield''',
+   '''Elegant Egotist''',
+   '''Mystical Moon''',
+   '''Stop Defense''',
+   '''Malevolent Nuzzler''',
+   '''Violet Crystal''',
+   '''Book of Secret Arts''',
+   '''Invigoration''',
+   '''Machine Conversion Factory''',
+   '''Raise Body Heat''',
+   '''Follow Wind''',
+   '''Power of Kaishin''',
+   '''Dragon Capture Jar''',
+   '''Forest''',
+   '''Wasteland''',
+   '''Mountain''',
+   '''Sogen''',
+   '''Umi''',
+   '''Yami''',
+   '''Dark Hole''',
+   '''Raigeki''',
+   '''Mooyan Curry''',
+   '''Red Medicine''',
+   '''Goblin's Secret Remedy''',
+   '''Soul of the Pure''',
+   '''Dian Keto the Cure Master''',
+   '''Sparks''',
+   '''Hinotama''',
+   '''Final Flame''',
+   '''Ookazi''',
+   '''Tremendous Fire''',
+   '''Swords of Revealing Light''',
+   '''Spellbinding Circle''',
+   '''Dark-Piercing Light''',
+   '''Yaranzo''',
+   '''Kanan the Swordmistress''',
+   '''Takriminos''',
+   '''Stuffed Animal''',
+   '''Megasonic Eye''',
+   '''Super War-Lion''',
+   '''Yamadron''',
+   '''Seiyaryu''',
+   '''Three-Legged Zombies''',
+   '''Zera The Mant''',
+   '''Flying Penguin''',
+   '''Millennium Shield''',
+   '''Fairy's Gift''',
+   '''Black Luster Soldier''',
+   '''Fiend's Mirror''',
+   '''Labyrinth Wall''',
+   '''Jirai Gumo''',
+   '''Shadow Ghoul''',
+   '''Wall Shadow''',
+   '''Labyrinth Tank''',
+   '''Sanga of the Thunder''',
+   '''Kazejin''',
+   '''Suijin''',
+   '''Gate Guardian''',
+   '''Dungeon Worm''',
+   '''Monster Tamer''',
+   '''Ryu-Kishin Powered''',
+   '''Swordstalker''',
+   '''La Jinn the Mystical Genie of the Lamp''',
+   '''Blue-Eyes Ultimate Dragon''',
+   '''Toon Alligator''',
+   '''Rude Kaiser''',
+   '''Parrot Dragon''',
+   '''Dark Rabbit''',
+   '''Bickuribox''',
+   '''Harpie's Pet Dragon''',
+   '''Mystic Lamp''',
+   '''Pendulum Machine''',
+   '''Giltia the D. Knight''',
+   '''Launcher Spider''',
+   '''Zoa''',
+   '''Metalzoa''',
+   '''Zone Eater''',
+   '''Steel Scorpion''',
+   '''Dancing Elf''',
+   '''Ocubeam''',
+   '''Leghul''',
+   '''Ooguchi''',
+   '''Gamma The Magnet Warrior''',
+   '''Emperor of the Land and Sea''',
+   '''Ushi Oni''',
+   '''Monster Eye''',
+   '''Leogun''',
+   '''Tatsunootoshigo''',
+   '''Saber Slasher''',
+   '''Kaiser Sea Horse''',
+   '''Machine King''',
+   '''Giant Mech-Soldier''',
+   '''Metal Dragon''',
+   '''Mechanical Spider''',
+   '''Bat''',
+   '''The Winged Dragon of Ra (Phoenix Mode)''',
+   '''Cyber Soldier''',
+   '''Shovel Crusher''',
+   '''Mechanicalchaser''',
+   '''Blocker''',
+   '''Blast Juggler''',
+   '''Golgoil''',
+   '''Flying Kamakiri #2''',
+   '''Cyber-Stein''',
+   '''Cyber Commander''',
+   '''Jinzo #7''',
+   '''Dice Armadillo''',
+   '''Sky Dragon''',
+   '''Thunder Dragon''',
+   '''Stone D.''',
+   '''Kaiser Dragon''',
+   '''Magician of Faith''',
+   '''Goddess of Whim''',
+   '''Gradius''',
+   '''Ice Water''',
+   '''Waterdragon Fairy''',
+   '''Ancient Elf''',
+   '''Harpie's Brother''',
+   '''Aeris''',
+   '''White Dolphin''',
+   '''Deepsea Shark''',
+   '''Metal Fish''',
+   '''Grand Tiki Elder''',
+   '''7 Colored Fish''',
+   '''Mech Bass''',
+   '''Aqua Dragon''',
+   '''Sea King Dragon''',
+   '''Turu-Purun''',
+   '''Giant Rex''',
+   '''Aqua Snake''',
+   '''Giant Red Seasnake''',
+   '''Spike Seadra''',
+   '''30,000-Year White Turtle''',
+   '''Kappa Avenger''',
+   '''Kanikabuto''',
+   '''Zarigun''',
+   '''Millennium Golem''',
+   '''Destroyer Golem''',
+   '''Barrel Rock''',
+   '''Minomushi Warrior''',
+   '''The Masked Beast''',
+   '''Kaminari Attack''',
+   '''Tripwire Beast''',
+   '''Bolt Escargot''',
+   '''Bolt Penguin''',
+   '''The Immortal of Thunder''',
+   '''Electric Snake''',
+   '''Wing Eagle''',
+   '''Punished Eagle''',
+   '''Skull Red Bird''',
+   '''Crimson Sunbird''',
+   '''Queen Bird''',
+   '''Armed Ninja''',
+   '''Magical Ghost''',
+   '''Soul Hunter''',
+   '''The Earl of Demise''',
+   '''Vermillion Sparrow''',
+   '''Sea Kamen''',
+   '''Sinister Serpent''',
+   '''Ganigumo''',
+   '''Alinsection''',
+   '''Insect Soldiers of the Sky''',
+   '''Cockroach Knight''',
+   '''Kuwagata A''',
+   '''Burglar''',
+   '''Pragtical''',
+   '''Garvas''',
+   '''Ameba''',
+   '''Korogashi''',
+   '''Boo Koo''',
+   '''Flower Wolf''',
+   '''Rainbow Flower''',
+   '''Barrel Lily''',
+   '''Needle Ball''',
+   '''Peacock''',
+   '''Hoshiningen''',
+   '''Maha Vailo''',
+   '''Rainbow Marine Mermaid''',
+   '''Musician King''',
+   '''Wilmee''',
+   '''Yado Karu''',
+   '''Morinphen''',
+   '''Boneheimer''',
+   '''Dragon Seeker''',
+   '''Man-Eater Bug''',
+   '''Penguin Torpedo''',
+   '''Turtle Raccoon''',
+   '''Flame Dancer''',
+   '''Prisman''',
+   '''Gale Dogra''',
+   '''Crazy Fish''',
+   '''Cyber Saurus''',
+   '''Bracchio-raidus''',
+   '''Laughing Flower''',
+   '''Bean Soldier''',
+   '''Cannon Soldier''',
+   '''Guardian of the Throne Room''',
+   '''Asura Priest''',
+   '''The Statue of Easter Island''',
+   '''Muka Muka''',
+   '''Zombyra the Dark''',
+   '''Boulder Tortoise''',
+   '''Fire Kraken''',
+   '''Turtle Bird''',
+   '''Skullbird''',
+   '''Monstrous Bird''',
+   '''The Bistro Butcher''',
+   '''Star Boy''',
+   '''Spirit of the Mountain''',
+   '''Earthbound Spirit''',
+   '''Milus Radiant''',
+   '''Togex''',
+   '''Flame Cerebrus''',
+   '''Embodiment of Apophis''',
+   '''Mystical Sand''',
+   '''Gemini Elf''',
+   '''Kwagar Hercules''',
+   '''Minar''',
+   '''Ancient Lamp''',
+   '''Mechaleon''',
+   '''Mega Thunderball''',
+   '''Niwatori''',
+   '''Amazon Chain Master''',
+   '''Skelengel''',
+   '''Hane-Hane''',
+   '''Misairuzame''',
+   '''Thunder Nyan Nyan''',
+   '''Dharma Cannon''',
+   '''Skelgon''',
+   '''Wow Warrior''',
+   '''Griggle''',
+   '''Bone Mouse''',
+   '''Frog the Jam''',
+   '''Last Tusk Mammoth''',
+   '''Dark Elf''',
+   '''Winged Dragon, Guardian of the Fortress #2''',
+   '''Mushroom Man #2''',
+   '''Lava Battleguard''',
+   '''Queen's Knight''',
+   '''Injection Fairy Lily''',
+   '''Jack's Knight''',
+   '''Pot the Trick''',
+   '''Oscillo Hero''',
+   '''Invader from Another Dimension''',
+   '''Lesser Dragon''',
+   '''Needle Worm''',
+   '''King's Knight''',
+   '''Great Mammoth of Goldfine''',
+   '''Gil Garth''',
+   '''Yormungarde''',
+   '''Darkworld Thorns''',
+   '''Blade Knight''',
+   '''Gernia''',
+   '''Trakadon''',
+   '''B. Dragon Jungle King''',
+   '''Empress Judge''',
+   '''Little D''',
+   '''Witch of the Black Forest''',
+   '''Y-Dragon Head''',
+   '''Giant Scorpion of the Tundra''',
+   '''Crow Goblin''',
+   '''Dark Magician Knight''',
+   '''Abyss Flower''',
+   '''Patrol Robo''',
+   '''Takuhee''',
+   '''Dark Witch''',
+   '''Destiny Board''',
+   '''Spirit Message "I"''',
+   '''Spirit Message "N"''',
+   '''Spirit Message "A"''',
+   '''Spirit Message "L"''',
+   '''Living Vase''',
+   '''Tentacle Plant''',
+   '''Z-Metal Tank''',
+   '''Morphing Jar''',
+   '''Muse-A''',
+   '''XY-Dragon Cannon''',
+   '''Rose Spectre of Dunn''',
+   '''Fiend Reflection #1''',
+   '''XZ-Tank Cannon''',
+   '''YZ-Tank Dragon''',
+   '''Little Chimera''',
+   '''Violent Rain''',
+   '''Exodia Necross''',
+   '''Monster Reborn''',
+   '''Penguin Soldier''',
+   '''Fairy Dragon''',
+   '''Helpoemer''',
+   '''Lava Golem''',
+   '''Newdoria''',
+   '''Dark Jeroid''',
+   '''Shining Friendship''',
+   '''Gravedigger Ghoul''',
+   '''Electric Lizard''',
+   '''Hiro's Shadow Scout''',
+   '''Lady of Faith''',
+   '''Twin-Headed Thunder Dragon''',
+   '''Hunter Spider''',
+   '''Armored Starfish''',
+   '''Executor - Makyura''',
+   '''Marine Beast''',
+   '''Warrior of Tradition''',
+   '''Byser Shock''',
+   '''Snakeyashi''',
+   '''Succubus Knight''',
+   '''Ill Witch''',
+   '''Viser Des''',
+   '''High Tide Gyojin''',
+   '''Fairy of the Fountain''',
+   '''Amazon of the Seas''',
+   '''Nekogal #2''',
+   '''Witch's Apprentice''',
+   '''Puppet Master''',
+   '''Amazon Fighter''',
+   '''Maiden of the Moonlight''',
+   '''Stone Ogre Grotto''',
+   '''Amazon Sword Woman''',
+   '''Vampire Lord''',
+   '''Queen's Double''',
+   '''Dark Paladin''',
+   '''Trent''',
+   '''Queen of Autumn Leaves''',
+   '''Amphibious Bugroth''',
+   '''Different Dimension Dragon''',
+   '''Amazon Archers''',
+   '''Mystical Sheep #1''',
+   '''Yamata Dragon''',
+   '''Shinato, King of a Higher Plane''',
+   '''Dark Flare Knight''',
+   '''Mirage Knight''',
+   '''Berserk Dragon''',
+   '''Machine Attacker''',
+   '''Command Angel''',
+   '''Whiptail Crow''',
+   '''Kunai with Chain''',
+   '''Magical Labyrinth''',
+   '''Warrior Elimination''',
+   '''Salamandra''',
+   '''Cursebreaker''',
+   '''Eternal Rest''',
+   '''Megamorph''',
+   '''Metalmorph''',
+   '''Winged Trumpeter''',
+   '''Stain Storm''',
+   '''Crush Card''',
+   '''Eradicating Aerosol''',
+   '''Breath of Light''',
+   '''Eternal Drought''',
+   '''Des Volstgalph''',
+   '''Toon Dark Magician Girl''',
+   '''Gilford the Lightning''',
+   '''Bright Castle''',
+   '''Shadow Spell''',
+   '''Black Luster Ritual''',
+   '''Mystical Beast Serket''',
+   '''Harpie's Feather Duster''',
+   '''Cyber Harpie''',
+   '''Lightning Conger''',
+   '''Exarion Universe''',
+   '''Legendary Fiend''',
+   '''Gadget Soldier''',
+   '''Melchid the Four-Face Beast''',
+   '''Nuvia the Wicked''',
+   '''Masked Beast Des Gardius''',
+   '''House of Adhesive Tape''',
+   '''Eatgaboon''',
+   '''Bear Trap''',
+   '''Invisible Wire''',
+   '''Acid Trap Hole''',
+   '''Widespread Ruin''',
+   '''Goblin Fan''',
+   '''Bad Reaction to Simochi''',
+   '''Reverse Trap''',
+   '''Fake Trap''',
+   '''Valkyrion the Magna Warrior''',
+   '''Torrential Tribute''',
+   '''Beckon to Darkness''',
+   '''Infinite Dismissal''',
+   '''7 Completed''',
+   '''Dark Sage''',
+   '''F.G.D.''',
+   '''Master of Dragon Soldier''',
+   '''Messenger of Peace''',
+   '''Darkness Approaches''',
+   '''Performance of Sword''',
+   '''Hungry Burger''',
+   '''Sengenjin''',
+   '''Skull Guardian''',
+   '''Tri-Horned Dragon''',
+   '''Serpent Night Dragon''',
+   '''Skull Knight''',
+   '''Cosmo Queen''',
+   '''Chakra''',
+   '''Crab Turtle''',
+   '''Mikazukinoyaiba''',
+   '''Meteor Dragon''',
+   '''Meteor B. Dragon''',
+   '''Firewing Pegasus''',
+   '''Psycho-Puppet''',
+   '''Garma Sword''',
+   '''Javelin Beetle''',
+   '''Fortress Whale''',
+   '''Dokurorider''',
+   '''Mask of Shine & Dark''',
+   '''Magician of Black Chaos''',
+   '''Dark Magic Ritual''',
+   '''Slot Machine''',
+   '''Space Megatron''',
+   '''Red Archery Girl''',
+   '''Ryu-Ran''',
+   '''Manga Ryu-Ran''',
+   '''Toon Mermaid''',
+   '''Toon Summoned Skull''',
+   '''Dark-Eyes Illusionist''',
+   '''Relinquished''',
+   '''Jigen Bakudan''',
+   '''Thousand-Eyes Idol''',
+   '''Thousand-Eyes Restrict''',
+   '''Steel Ogre Grotto #2''',
+   '''Blast Sphere''',
+   '''Hyozanryu''',
+   '''Alpha The Magnet Warrior''',
+   '''Legion the Fiend Jester''',
+   '''Invitation to a Dark Sleep''',
+   '''Lord of D.''',
+   '''Red-Eyes Black Metal Dragon''',
+   '''Barrel Dragon''',
+   '''Hannibal Necromancer''',
+   '''Panther Warrior''',
+   '''Three-Headed Geedo''',
+   '''Gazelle the King of Mythical Beasts''',
+   '''Stone Statue of the Aztecs''',
+   '''Berfomet''',
+   '''Chimera the Flying Mythical Beast''',
+   '''Gear Golem the Moving Fortress''',
+   '''Jinzo''',
+   '''Swordsman of Landstar''',
+   '''Cyber Raider''',
+   '''The Fiend Megacyber''',
+   '''Reflect Bounder''',
+   '''Beta The Magnet Warrior''',
+   '''Big Shield Gardna''',
+   '''Doll of Demise''',
+   '''Dark Magician Girl''',
+   '''Alligator's Sword''',
+   '''Insect Queen''',
+   '''Parasite Paracide''',
+   '''Skull-Mark Lady Bug''',
+   '''Tiny Guardian''',
+   '''Pinch Hopper''',
+   '''Blue-Eyes Toon Dragon''',
+   '''The Unhappy Maiden''',
+   '''Wall of Illusion''',
+   '''Neo the Magic Swordsman''',
+   '''Man-Eating Treasure Chest''',
+   '''Chiron the Mage''',
+   '''Sword Hunter''',
+   '''Drill Bug''',
+   '''Deepsea Warrior''',
+   '''Bite Shoes''',
+   '''Spikebot''',
+   '''Beast of Gilfer''',
+   '''The Portrait's Secret''',
+   '''The Gross Ghost of Fled Dreams''',
+   '''Brain Control''',
+   '''Anti Raigeki''',
+   '''Black Illusion Ritual''',
+   '''Change of Heart''',
+   '''Multiply''',
+   '''Exile of the Wicked''',
+   '''Last Day of Witch''',
+   '''Restructer Revolution''',
+   '''Pot of Greed''',
+   '''The Inexperienced Spy''',
+   '''Gate Sword''',
+   '''Steel Fan Fighter''',
+   '''Leopard Girl''',
+   '''The Last Warrior from Another Planet''',
+   '''Dunames Dark Witch''',
+   '''Garnecia Elefantis''',
+   '''Total Defense Shogun''',
+   '''Beast of Talwar''',
+   '''Cyber-Tech Alligator''',
+   '''Talons of Shurilane''',
+]
