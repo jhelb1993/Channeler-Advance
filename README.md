@@ -6,14 +6,16 @@ A ROM hacking tool for Game Boy Advance games, built with Python and Tkinter —
 
 **Releases & changelog:** [GitHub Releases — Channeler-Advance](https://github.com/Soul-8691/Channeler-Advance/releases) (e.g. demo **v0.1.0** notes). Compare any tag to `main` on GitHub (or `git diff <tag>...main` locally) for file-level history.
 
-The hex editor skips redundant analysis when the viewport and ROM slice are unchanged (**faster refresh** on large ROMs). **macOS / Linux** path and helper behavior are exercised in-tree (e.g. **`deps/thumb.sh`**). The PCS table tool includes basic **Find** / filter for rows. Labels and PCS-related UI use improved **Unicode / symbol** handling where it matters for display.
+The hex editor skips redundant analysis when the viewport and ROM slice are unchanged (**faster refresh** on large ROMs). **macOS / Linux** path and helper behavior are exercised in-tree (e.g. **`deps/thumb.sh`**). The PCS table tool includes basic **Find** / filter for rows. Labels and PCS-related UI use improved **Unicode / symbol** handling where it matters for display (including **Linux-safe** label text so ellipsis and similar characters do not render as broken glyphs).
 
 ## ROM and structure TOML
 
-- Use the bundled **`FireRed.toml`** when hacking FireRed, **`WCT06.toml`** for *Yu-Gi-Oh! Ultimate Masters: World Championship Tournament 2006*, or **`Reshef.toml`** for *Yu-Gi-Oh! Reshef of Destruction*.
+- Use the bundled **`FireRed.toml`** when hacking FireRed or **`wct06.toml`** for *Yu-Gi-Oh! Ultimate Masters: World Championship Tournament 2006* (see **Yu-Gi-Oh! structure files** below for other titles).
 - By default, the editor looks for **`{YourRomBasename}.toml`** next to the ROM. You can load another file with **File → Load structure TOML**.
 - **Authoritative DSL notes** for anchors and `Format` strings also live in **`editors/common/TOML.toml`** (commented reference). The summary below matches that file.
-- Bundled **`Reshef.toml`** for *Yu-Gi-Oh! Reshef of Destruction* covers tables, lists, and struct layouts (including YDK-style deck import paths where configured). The struct/hex pipeline supports **`seq`** parallel columns, pointer-backed string fields, nested-array validation tied to a shared **`count`**, and related edge cases documented in **`TOML.toml`**.
+- **Yu-Gi-Oh! structure files:** **`EDS.toml`** (*The Eternal Duelist Soul*) is the most **in-depth** bundled map (broad per-card naming and other tables). **`WCT04.toml`** (*Yu-Gi-Oh! World Championship 2004*), **`WCT05.toml`** (*Yu-Gi-Oh! 7 Trials to Glory: World Championship Tournament 2005*), **`WWE.toml`** (*Yu-Gi-Oh! Worldwide Edition: Stairway to the Destined Duel*), and **`Reshef.toml`** (*Yu-Gi-Oh! Reshef of Destruction*) are **partial** TOMLs—useful anchors and structs, not full game coverage. (On case-insensitive filesystems, names like **`WCT06.toml`** may match **`wct06.toml`**.)
+
+- Bundled **`Reshef.toml`** (*Reshef of Destruction*, **partial**—see above) still documents Reshef-specific workflows: **`.ydk`** deck import, **`.conf` / `.lflist`**-style list paths where configured, **duelist**-related table updates, and **card-sprite** Huff/LZ handling tied to the `reshef` graphics path. The struct/hex pipeline supports **`seq`** parallel columns, pointer-backed string fields, nested-array validation tied to a shared **`count`**, and related edge cases documented in **`TOML.toml`**.
 
 ### Anchor addresses
 
@@ -27,7 +29,9 @@ Inside **`[ … ]count`** struct layouts:
 - **Uint width:** `.` = 1 byte, `:` = 2 bytes per colon (e.g. `field:` = 2 bytes, `field::` = 4 bytes).
 - **List / PCS enums:** `name:listname` or `name:listname+3` / `name:pcs.table-1` — optional trailing signed integer shifts the label index (`ROM index + offset`).
 - **PCS string:** `name""N` — PCS-encoded, `N` bytes wide (`0xFF` terminator; same rules as PCS string tables).
+- **PCS control codes / pret-style `{…}` macros:** expanded using the same **`charmap.txt`** mapping the project ships with (so editor display and length checks stay aligned with the game’s encoding). Expansion and growth rules respect **bracket** boundaries so nested `{…}` text stays well-formed.
 - **Raw Latin-1 / byte string:** `name''N` — `N` bytes, NUL-padded; display stops at first `0x00`.
+- **Pointer-backed text (`pcs_ptr` / `ascii_ptr`):** the Structure tool shows **Pointer (GBA)** plus decoded PCS or ASCII text for **both** top-level fields and **nested-array** inner fields. **Inline** edits and the pointer box accept several pointer forms (`0x…`, eight hex digits without `0x`, larger ROM **file** offsets in decimal) while still treating short edits as **string text** when the current pointer targets ROM (`0x08……` / `0x09……`).
 - **Helper (no ROM bytes):** `name|=a+b+…` — sums named **uint** fields; not editable in the struct grid.
 - **Modifiers (append to a uint token):**
   - **`|h`** — show this **uint** in **hex** in the Structure tool (combine with **`|z`** for signed hex + decimal).
@@ -49,7 +53,6 @@ In a NamedAnchor **struct** `Format`, a nested field can end with **`!HEX`** ins
 
 - **`name<[inner]/count>`** — `count` is the name of a **uint** field in the same struct that gives the number of inner rows (see **count-based nested arrays** above for pointer layout).
 - **`name<[inner]!0000>`** — **even-length hex** is the **terminator** byte pattern (e.g. `!0000` → **`00 00`**). **By default**, **`name`** is a **4-byte GBA pointer**; the terminator-delimited blob is read starting at **`*name`** (same idea as a pointer column — the field name is unrelated to the layout byte offset variable in the parser).
-- **`name<[inner]!0000>inline`** — **legacy / packed inline**: the nested bytes are stored **inline** in the struct row (no pointer). If the struct has **only** this field, consecutive table entries are **packed** back-to-back in ROM until each terminator; the editor scans row-by-row.
 
 The terminator form must be the **last** field in the struct body. Suffix after `]` is still the table length (e.g. `]deckinfo`).
 
@@ -67,7 +70,7 @@ The tools do **not** strip stray `'` / `"` from `Format` (that broke `''N`). Pre
 
 Whole-anchor **Format** (no `[`…`]` struct wrapper) describes sprites, tile sheets, palettes, tilemaps, and tables — decode uses Python + Pillow and aims for **pret/gbagfx**-compatible layouts. You may wrap the value in backticks in TOML, e.g. `` `ucs4x8x8|graphics.items.fossils.palette1` ``.
 
-Common tokens include **`ucp4`**, **`ucp4:`** index runs, **`lzp4` / `lzp8`**, **`ucs4xWxH`** sprites, **`uct4xWxH` / `uct8xWxH`** tile sheets, **`lzt4` / `lzt8`** variable strips, **`ucs6xWxH`**, **`ucm4xMWxMH`** tilemaps, **`lzm4` / `lzm8`**, and **`[rowSpec]count`** graphics tables. In struct layouts, fields can use **pointer + backtick-wrapped graphics specs** inside angle brackets, and composite **tileset** / **tilemap** / **palette** fields; see **`editors/common/TOML.toml`** for full syntax.
+Common tokens include **`ucp4`**, **`ucp4:`** index runs, **`lzp4` / `lzp8`**, **`ucs4xWxH`** sprites, **`uct4xWxH` / `uct8xWxH`** tile sheets, **`lzt4` / `lzt8`** variable strips, **`ucs6xWxH`**, **`ucm4xMWxMH`** tilemaps, **`lzm4` / `lzm8`**, and **`[rowSpec]count`** graphics tables. In struct layouts, fields can use **pointer + backtick-wrapped graphics specs** inside angle brackets, and composite **tileset** / **tilemap** / **palette** fields; see **`editors/common/TOML.toml`** for full syntax. When a struct defines a **`name`** (or similar) column alongside graphics, the Tools **graphics preview** can **resolve palettes automatically** from a sibling **`pal` / `palette`** field or a `` `pal` `` token in the graphics spec.
 
 **`reshef` (Yu-Gi-Oh! Reshef card graphics):** prefix a standalone graphics `Format` or inner struct field spec with `` `reshef` `` so Channeler applies the same **pre-LZ77/Huff byte transform** as [ygodm8](https://github.com/shinny4/ygodm8)’s `ygodm_encode` hook (inverse after decompress for display/import). Use it for Huff- or LZ-compressed card art and palettes that were built with that pipeline—see **[shinny4/ygodm8](https://github.com/shinny4/ygodm8)** (credit below).
 
@@ -78,8 +81,9 @@ Common tokens include **`ucp4`**, **`ucp4:`** index runs, **`lzp4` / `lzp8`**, *
 ## Supported Games
 
 - **Pokémon FireRed** – Uses [pret/pokefirered](https://github.com/pret/pokefirered) for C code reference
-- **Yu-Gi-Oh! Ultimate Masters: World Championship Tournament 2006** – Uses [Soul-8691/ygowct06](https://github.com/Soul-8691/ygowct06) for ARM7TDMI ASM reference
-- **Yu-Gi-Oh! Reshef of Destruction** – Bundled structure file **`Reshef.toml`** (load via **File → Load structure TOML** or place next to your ROM as **`{basename}.toml`**). Card sprite **Huff/LZ** data may require the `` `reshef` `` graphics prefix so decoding matches the game’s **ygodm**-style pre-scramble (see [shinny4/ygodm8](https://github.com/shinny4/ygodm8) in **Credits**).
+- **Yu-Gi-Oh! Ultimate Masters: World Championship Tournament 2006** – Uses [Soul-8691/ygowct06](https://github.com/Soul-8691/ygowct06) for ARM7TDMI ASM reference; bundled **`wct06.toml`**
+- **Yu-Gi-Oh! The Eternal Duelist Soul** – Bundled **`EDS.toml`** (**more in-depth** than the partial TOMLs below)
+- **Yu-Gi-Oh!** (partial TOMLs) – **`WCT04.toml`** (*World Championship 2004*), **`WCT05.toml`** (*7 Trials to Glory: World Championship Tournament 2005*), **`WWE.toml`** (*Worldwide Edition: Stairway to the Destined Duel*), **`Reshef.toml`** (*Reshef of Destruction*). For Reshef, card sprite **Huff/LZ** may require the `` `reshef` `` graphics prefix (see [shinny4/ygodm8](https://github.com/shinny4/ygodm8) in **Credits**). Load with **File → Load structure TOML** or place next to your ROM as **`{basename}.toml`**.
 
 ## Setup
 
@@ -211,7 +215,7 @@ These apply when the main hex view (or the overall window, for global toggles) h
 
 ### Hex view — double-click (hex / ASCII data columns)
 
-- **Graphics NamedAnchor (table):** selects the **row**’s bytes in ROM (for pointer-column palette tables, the **palette blob** at the resolved address). The **graphics table row** control syncs when applicable.
+- **Graphics NamedAnchor (table):** selects the **row**’s bytes in ROM (for pointer-column palette tables, the **palette blob** at the resolved address). **LZ77- or Huffman-compressed** rows use the **measured stream length** so the selection covers the full compressed blob, not just the header. The **graphics table row** control syncs when applicable.
 - **Struct — graphics field:** if the click lies in a **`gfx` / backtick graphics** field, the selection is **just that field** (LZ77/Huff length is **measured** from the stream when the header is valid).
 - **PCS or struct table:** Tools jumps to the **row** that contains the byte; the table range stays highlighted.
 - **Pointer follow:** a **valid GBA ROM `.word`** (0x08…… / 0x09……) is followed **after** graphics-table and pointer-field rules, so struct pointer fields still jump to `*ptr` targets.
@@ -249,11 +253,11 @@ Without using NamedAnchors, **File → Import Sprite / Import Tilemap/Tileset / 
 High-level capabilities include:
 
 - General editing: write, insert (**Insert** key toggles insert mode), delete, copy, paste-overwrite (**Ctrl+B**) / paste-insert (**Ctrl+V**), find/replace, goto.
-- Hex / ASCII / PCS text; table and struct editing from TOML; repointing text and pointers (including optional **FF**-fill of old space when relocating).
-- In-tool editing of TOML anchor formats; **double-click** valid **`.word`** ROM pointers to follow; **double-click** the start of an ASM routine in the hex view to highlight through the end (when applicable). **Double-click** handling for PCS/struct tables, graphics tables, struct **graphics** fields, and pointers is summarized under **Hex view — double-click** above.
-- **Ctrl+T** / **Ctrl+Shift+1–3** to show or focus Tools slots.
+- Hex / ASCII / PCS text; table and struct editing from TOML; repointing text and pointers (including optional **FF**-fill of old space when relocating, without spurious prompts for FF-gap search bounds when the relocation path does not need them).
+- In-tool editing of TOML anchor formats; **double-click** valid **`.word`** ROM pointers to follow—including from **raw bytes** in the hex view when the ROM data is a valid pointer; **double-click** the start of an ASM routine in the hex view to highlight through the end (when applicable). **Thumb** disassembly in the hex pane follows **16-bit** instruction alignment. **Double-click** handling for PCS/struct tables, graphics tables, struct **graphics** fields, and pointers is summarized under **Hex view — double-click** above.
+- **Ctrl+T** / **Ctrl+Shift+1–3** to show or focus Tools slots; struct tables with a **`name`** (or similar) field can drive **automatic row labels** in the Structure tool when configured.
 - **Ctrl+Shift+4–7** for pseudo-C inject workflow and Python script pane.
-- Disassembly (**Ctrl+P**), HackMew ASM (**Ctrl+H**), pseudo-C (**Ctrl+D**), **Ctrl+M** anchor browser.
+- Disassembly (**Ctrl+P**), HackMew ASM (**Ctrl+H**; **Linux** insertion path fixed), pseudo-C (**Ctrl+D**), **Ctrl+M** anchor browser.
 - Graphics: sprites, tilemaps, tilesets, palettes; anchor visual browser.
 
 **Rough roadmap / not implemented yet** (non-exhaustive): auto-generated TOML on ROM open, Python scripting interface, complete pret→TOML function/struct/constant conversion, undo, some FireRed-specific editors (trainer teams, overworld sprites, egg moves).
