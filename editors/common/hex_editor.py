@@ -1151,7 +1151,7 @@ def encode_pcs_string(text: str, width: int) -> bytearray:
     """Encode text to PCS bytes, terminated by 0xFF, padded to width with 0x00.
 
     Control codes may be written in brackets (see :func:`encode_pcs_string_body` in
-    ``pcs_string_view``), e.g. ``[clear_to 49 FC]``, ``[FONT_SMALL]``, ``[fc 06 00]``.
+    ``pcs_string_view``), e.g. ``{CLEAR_TO 0x49}``, ``{FONT_SMALL}``, and legacy ``[fc 06 00]``.
     """
     out = encode_pcs_string_body(text, _PCS_CHAR_TO_BYTE)
     out.append(0xFF)

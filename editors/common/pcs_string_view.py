@@ -4,8 +4,10 @@ PCS string *view* decoding for Tools / struct / enum labels (not the hex editor 
 Decodes ``FD`` / ``F8`` / ``F9`` / ``FC`` using ``editors/firered/pokefirered/charmap.txt`` (pret
 pokefirered) when present: ``STRING = FD``, ``COLOR = FC 01``, ``FONT_SMALL = FC 06 00``, ``@ colors``, etc.
 
-Encoding for the PCS edit field uses :func:`encode_pcs_string_body`: bracket commands such as
-``[clear_to 49 FC]``, ``[FONT_SMALL]``, ``[fc 06 00]``, ``[color:red]`` emit the corresponding bytes.
+Encoding for the PCS edit field uses :func:`encode_pcs_string_body`: pret-style ``{CLEAR_TO 0x49}``,
+``{FONT_SMALL}``, and legacy ``[...]`` forms (``[fc 06 00]``, ``[color:red]``, etc.) emit the corresponding bytes.
+
+``CLEAR_TO`` (``FC 13``) consumes **one** argument byte in pokefirered (see ``strings.c`` ``_("...{CLEAR_TO 0x49}...")``).
 
 HexManiac-style notes: https://github.com/haven1433/HexManiacAdvance/blob/master/src/HexManiac.Core/Models/Code/pcsReference.txt
 
@@ -88,11 +90,11 @@ def _build_pcs_byte_table() -> None:
 
 # --- Fallback FD labels (overridden by charmap ``NAME = FD XX``) ---
 _FD_MACRO: Dict[int, str] = {
-    0x01: "[PLAYER]",
-    0x02: "[STR_VAR_1]",
-    0x03: "[STR_VAR_2]",
-    0x04: "[STR_VAR_3]",
-    0x06: "[RIVAL]",
+    0x01: "{PLAYER}",
+    0x02: "{STR_VAR_1}",
+    0x03: "{STR_VAR_2}",
+    0x04: "{STR_VAR_3}",
+    0x06: "{RIVAL}",
 }
 
 _CHARMAP_FD: Dict[int, str] = {}
@@ -140,7 +142,7 @@ def _load_charmap_txt() -> None:
                     ls,
                 )
                 if m:
-                    _CHARMAP_FD[int(m.group(2), 16)] = f"[{m.group(1)}]"
+                    _CHARMAP_FD[int(m.group(2), 16)] = f"{{{m.group(1)}}}"
                     continue
                 m = re.match(
                     r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*FC\s+([0-9A-Fa-f]{1,2})\s+([0-9A-Fa-f]{1,2})\b",
@@ -148,7 +150,7 @@ def _load_charmap_txt() -> None:
                 )
                 if m:
                     a, b = int(m.group(2), 16), int(m.group(3), 16)
-                    _CHARMAP_FC_PAIR[(a, b)] = f"[{m.group(1)}]"
+                    _CHARMAP_FC_PAIR[(a, b)] = f"{{{m.group(1)}}}"
                     continue
                 m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*FC\s+([0-9A-Fa-f]{1,2})\s*$", ls)
                 if m:
@@ -167,77 +169,77 @@ def _fd_label(second: int) -> str:
 
 # F9 xx — extended symbol set (HexManiac / GBATEK style names)
 _F9_MACRO: Dict[int, str] = {
-    0x00: "[up]",
-    0x01: "[down]",
-    0x02: "[left]",
-    0x03: "[right]",
-    0x04: "[plus]",
-    0x05: "[LV]",
-    0x06: "[PP]",
-    0x07: "[ID]",
-    0x08: "[No]",
-    0x09: "[_]",
-    0x0A: "[1]",
-    0x0B: "[2]",
-    0x0C: "[3]",
-    0x0D: "[4]",
-    0x0E: "[5]",
-    0x0F: "[6]",
-    0x10: "[7]",
-    0x11: "[8]",
-    0x12: "[9]",
-    0x13: "[left_parenthesis]",
-    0x14: "[right_parenthesis]",
-    0x15: "[super_effective]",
-    0x16: "[not_very_effective]",
-    0x17: "[not_effective]",
-    0xD0: "[down_bar]",
-    0xD1: "[vertical_bar]",
-    0xD2: "[up_bar]",
-    0xD3: "[tilde]",
-    0xD4: "[left_parenthesis_bold]",
-    0xD5: "[right_parenthesis_bold]",
-    0xD6: "[subset_of]",
-    0xD7: "[greater_than_short]",
-    0xD8: "[left_eye]",
-    0xD9: "[right_eye]",
-    0xDA: "[commercial_at]",
-    0xDB: "[semicolon]",
-    0xDC: "[bold_plus_1]",
-    0xDD: "[bold_minus]",
-    0xDE: "[bold_equals]",
-    0xDF: "[dazed]",
-    0xE0: "[tongue]",
-    0xE1: "[delta]",
-    0xE2: "[acute]",
-    0xE3: "[grave]",
-    0xE4: "[circle]",
-    0xE5: "[triangle]",
-    0xE6: "[square]",
-    0xE7: "[heart]",
-    0xE8: "[moon]",
-    0xE9: "[eighth_note]",
-    0xEA: "[half_circle]",
-    0xEB: "[thunderbolt]",
-    0xEC: "[leaf]",
-    0xED: "[fire]",
-    0xEE: "[teardrop]",
-    0xEF: "[left_wing]",
-    0xF0: "[right_wing]",
-    0xF1: "[rose]",
-    0xF2: "[unknown_F2]",
-    0xF3: "[unknown_F3]",
-    0xF4: "[frustration_mark]",
-    0xF5: "[sad]",
-    0xF6: "[happy]",
-    0xF7: "[angry]",
-    0xF8: "[excited]",
-    0xF9: "[joyful]",
-    0xFA: "[maliciously_happy]",
-    0xFB: "[upset]",
-    0xFC: "[straight_face]",
-    0xFD: "[surprised]",
-    0xFE: "[outraged]",
+    0x00: "{up}",
+    0x01: "{down}",
+    0x02: "{left}",
+    0x03: "{right}",
+    0x04: "{plus}",
+    0x05: "{LV}",
+    0x06: "{PP}",
+    0x07: "{ID}",
+    0x08: "{No}",
+    0x09: "{_}",
+    0x0A: "{1}",
+    0x0B: "{2}",
+    0x0C: "{3}",
+    0x0D: "{4}",
+    0x0E: "{5}",
+    0x0F: "{6}",
+    0x10: "{7}",
+    0x11: "{8}",
+    0x12: "{9}",
+    0x13: "{left_parenthesis}",
+    0x14: "{right_parenthesis}",
+    0x15: "{super_effective}",
+    0x16: "{not_very_effective}",
+    0x17: "{not_effective}",
+    0xD0: "{down_bar}",
+    0xD1: "{vertical_bar}",
+    0xD2: "{up_bar}",
+    0xD3: "{tilde}",
+    0xD4: "{left_parenthesis_bold}",
+    0xD5: "{right_parenthesis_bold}",
+    0xD6: "{subset_of}",
+    0xD7: "{greater_than_short}",
+    0xD8: "{left_eye}",
+    0xD9: "{right_eye}",
+    0xDA: "{commercial_at}",
+    0xDB: "{semicolon}",
+    0xDC: "{bold_plus_1}",
+    0xDD: "{bold_minus}",
+    0xDE: "{bold_equals}",
+    0xDF: "{dazed}",
+    0xE0: "{tongue}",
+    0xE1: "{delta}",
+    0xE2: "{acute}",
+    0xE3: "{grave}",
+    0xE4: "{circle}",
+    0xE5: "{triangle}",
+    0xE6: "{square}",
+    0xE7: "{heart}",
+    0xE8: "{moon}",
+    0xE9: "{eighth_note}",
+    0xEA: "{half_circle}",
+    0xEB: "{thunderbolt}",
+    0xEC: "{leaf}",
+    0xED: "{fire}",
+    0xEE: "{teardrop}",
+    0xEF: "{left_wing}",
+    0xF0: "{right_wing}",
+    0xF1: "{rose}",
+    0xF2: "{unknown_F2}",
+    0xF3: "{unknown_F3}",
+    0xF4: "{frustration_mark}",
+    0xF5: "{sad}",
+    0xF6: "{happy}",
+    0xF7: "{angry}",
+    0xF8: "{excited}",
+    0xF9: "{joyful}",
+    0xFA: "{maliciously_happy}",
+    0xFB: "{upset}",
+    0xFC: "{straight_face}",
+    0xFD: "{surprised}",
+    0xFE: "{outraged}",
 }
 
 # If charmap has no @ colors section, use FireRed-style names (charmap.txt 454–471)
@@ -274,11 +276,11 @@ def _fc_arg_count(sub: int) -> int:
     """Extra argument bytes after ``FC <sub>`` (pokefirered ``charmap.txt`` *more text functions*)."""
     if sub == 0x00:
         return 0
-    if sub in (0x01, 0x02, 0x03, 0x05, 0x06, 0x08, 0x14):
+    if sub in (0x01, 0x02, 0x03, 0x05, 0x06, 0x08, 0x13, 0x14):
         return 1
     if sub == 0x04:
         return 3
-    if sub in (0x0B, 0x10, 0x13):
+    if sub in (0x0B, 0x10):
         return 2
     if sub in (0x07, 0x09, 0x0A, 0x0C, 0x0D, 0x0E, 0x0F, 0x11, 0x12, 0x15, 0x16, 0x17, 0x18):
         return 0
@@ -291,25 +293,25 @@ def _fc_zero_arg_label(sub: int) -> str:
     _load_charmap_txt()
     name = _CHARMAP_FC_LABEL.get(sub)
     if name:
-        return f"[{name.lower()}]"
+        return f"{{{name}}}"
     # minimal fallbacks if charmap missing
     fb = {
-        0x00: "[name_end]",
-        0x07: "[reset_font]",
-        0x09: "[pause_until_press]",
-        0x0A: "[wait_se]",
-        0x0C: "[escape]",
-        0x0D: "[shift_right]",
-        0x0E: "[shift_down]",
-        0x0F: "[fill_window]",
-        0x11: "[clear]",
-        0x12: "[skip]",
-        0x15: "[jpn]",
-        0x16: "[eng]",
-        0x17: "[pause_music]",
-        0x18: "[resume_music]",
+        0x00: "{NAME_END}",
+        0x07: "{RESET_FONT}",
+        0x09: "{PAUSE_UNTIL_PRESS}",
+        0x0A: "{WAIT_SE}",
+        0x0C: "{ESCAPE}",
+        0x0D: "{SHIFT_RIGHT}",
+        0x0E: "{SHIFT_DOWN}",
+        0x0F: "{FILL_WINDOW}",
+        0x11: "{CLEAR}",
+        0x12: "{SKIP}",
+        0x15: "{JPN}",
+        0x16: "{ENG}",
+        0x17: "{PAUSE_MUSIC}",
+        0x18: "{RESUME_MUSIC}",
     }
-    return fb.get(sub, f"[fc_{sub:02x}]")
+    return fb.get(sub, f"{{fc_{sub:02x}}}")
 
 
 # --- Bracket command encoding (Tools / PCS edit field; charmap-aware) ---
@@ -361,15 +363,20 @@ def _ensure_encode_maps() -> None:
     _ENCODE_BTN_NAME.clear()
 
     for (a, b), lab in _CHARMAP_FC_PAIR.items():
-        name = lab.strip("[]").lower()
-        _ENCODE_FC_FULL[name] = bytes([0xFC, a, b])
+        name = lab.strip("{}").strip("[]")
+        bts = bytes([0xFC, a, b])
+        _ENCODE_FC_FULL[name.lower()] = bts
+        _ENCODE_FC_FULL[name] = bts
 
     for sub, raw in _CHARMAP_FC_LABEL.items():
         if _fc_arg_count(sub) == 0:
-            _ENCODE_FC_ZERO[raw.lower()] = bytes([0xFC, sub])
+            bz = bytes([0xFC, sub])
+            _ENCODE_FC_ZERO[raw.lower()] = bz
+            _ENCODE_FC_ZERO[raw] = bz
 
     for second, lab in _CHARMAP_FD.items():
-        name = lab.strip("[]").lower()
+        name = lab.strip("{}").strip("[]")
+        _ENCODE_FD[name.lower()] = bytes([0xFD, second])
         _ENCODE_FD[name] = bytes([0xFD, second])
 
     for idx, cname in _CHARMAP_COLOR.items():
@@ -383,12 +390,22 @@ def _ensure_encode_maps() -> None:
     _ENCODE_MAPS_BUILT = True
 
 
-def _encode_bracket_inner(inner: str) -> Optional[bytes]:
-    """Parse ``…`` inside ``[…]`` as a PCS control sequence; ``None`` = not a recognized command."""
+def _encode_control_inner(inner: str) -> Optional[bytes]:
+    """Parse ``…`` inside ``[…]`` or pret ``{…}`` as a PCS control sequence; ``None`` = not recognized."""
     _ensure_encode_maps()
     s = inner.strip()
     if not s:
         return None
+
+    m_pret_ct = re.match(
+        r"^\s*CLEAR_TO\s+(0x[0-9a-fA-F]{1,2}|[0-9A-Fa-f]{1,2})\s*$",
+        s,
+        re.I,
+    )
+    if m_pret_ct:
+        v = _parse_hex_byte(m_pret_ct.group(1))
+        if v is not None:
+            return bytes([0xFC, 0x13, v])
 
     mc = re.match(r"^(color|highlight|shadow)\s*:\s*(\S+)\s*$", s, re.I)
     if mc:
@@ -444,10 +461,10 @@ def _encode_bracket_inner(inner: str) -> Optional[bytes]:
             return b"\xFB"
         return None
 
-    if cmd == "clear_to" and len(parts) == 3:
-        b1, b2 = _parse_hex_byte(parts[1]), _parse_hex_byte(parts[2])
-        if b1 is not None and b2 is not None:
-            return bytes([0xFC, 0x13, b1, b2])
+    if cmd == "clear_to" and len(parts) == 2:
+        b1 = _parse_hex_byte(parts[1])
+        if b1 is not None:
+            return bytes([0xFC, 0x13, b1])
         return None
 
     if cmd == "color" and len(parts) == 2:
@@ -549,27 +566,32 @@ def encode_pcs_string_body(text: str, char_to_byte: Dict[str, int]) -> bytearray
     Encode user text to PCS bytes (no ``0xFF`` terminator).
 
     Literal characters use ``char_to_byte`` (same reverse map as the hex editor). Control codes may be
-    written in brackets, e.g. ``[clear_to 49 FC]``, ``[FONT_SMALL]``, ``[fc 06 00]``, ``[color:red]``.
+    written as pret ``{CLEAR_TO 0x49}`` / ``{FONT_SMALL}`` or legacy ``[...]`` (``[fc 06 00]``, ``[color:red]``).
     """
     out = bytearray()
     i = 0
     n = len(text)
     while i < n:
-        if text[i] != "[":
-            b = char_to_byte.get(text[i])
+        c0 = text[i]
+        if c0 not in "[{":
+            b = char_to_byte.get(c0)
             if b is not None:
                 out.append(b)
             i += 1
             continue
-        j = text.find("]", i + 1)
+        if c0 == "[":
+            closer = "]"
+        else:
+            closer = "}"
+        j = text.find(closer, i + 1)
         if j < 0:
-            b = char_to_byte.get("[")
+            b = char_to_byte.get(c0)
             if b is not None:
                 out.append(b)
             i += 1
             continue
         inner = text[i + 1 : j]
-        eb = _encode_bracket_inner(inner)
+        eb = _encode_control_inner(inner)
         if eb is not None:
             out.extend(eb)
         else:
@@ -603,13 +625,13 @@ def decode_pcs_string_view(data: bytes) -> str:
             break
 
         if b == 0xF7:
-            out.append("[dynamic]")
+            out.append("{dynamic}")
             i += 1
             continue
 
         if b == 0xFD:
             if not can_take(2):
-                out.append("[FD?]")
+                out.append("{FD?}")
                 break
             second = data[i + 1]
             lab = _fd_label(second)
@@ -625,37 +647,37 @@ def decode_pcs_string_view(data: bytes) -> str:
 
         if b == 0xF8:
             if not can_take(2):
-                out.append("[btn?]")
+                out.append("{btn?}")
                 break
             bid = data[i + 1]
             if bid < len(_BTN_NAMES):
-                out.append(f"[btn:{_BTN_NAMES[bid]}]")
+                out.append(f"{{btn:{_BTN_NAMES[bid]}}}")
             else:
-                out.append(f"[btn:{bid}]")
+                out.append(f"{{btn:{bid}}}")
             i += 2
             continue
 
         if b == 0xF9:
             if not can_take(2):
-                out.append("[F9?]")
+                out.append("{F9?}")
                 break
             second = data[i + 1]
             macro = _F9_MACRO.get(second)
             if macro:
                 out.append(macro)
             else:
-                out.append(f"[F9:{second:02X}]")
+                out.append(f"{{F9:{second:02X}}}")
             i += 2
             continue
 
         if b == 0xFC:
             if not can_take(2):
-                out.append("[FC?]")
+                out.append("{FC?}")
                 break
             sub = data[i + 1]
             ac = _fc_arg_count(sub)
             if not can_take(2 + ac):
-                out.append(f"[FC:{sub:02X}?]")
+                out.append(f"{{FC:{sub:02X}?}}")
                 break
             args = data[i + 2 : i + 2 + ac]
 
@@ -664,47 +686,47 @@ def decode_pcs_string_view(data: bytes) -> str:
                 if pair:
                     out.append(pair)
                 else:
-                    out.append(f"[font:{args[0]:02X}]")
+                    out.append(f"{{font:{args[0]:02X}}}")
             elif sub == 0x01 and ac == 1:
-                out.append(f"[color:{_color_token(args[0])}]")
+                out.append(f"{{color:{_color_token(args[0])}}}")
             elif sub == 0x02 and ac == 1:
-                out.append(f"[highlight:{_color_token(args[0])}]")
+                out.append(f"{{highlight:{_color_token(args[0])}}}")
             elif sub == 0x03 and ac == 1:
-                out.append(f"[shadow:{_color_token(args[0])}]")
+                out.append(f"{{shadow:{_color_token(args[0])}}}")
             elif sub == 0x04 and ac == 3:
                 out.append(
-                    f"[color_highlight_shadow {args[0]:02X} {args[1]:02X} {args[2]:02X}]"
+                    f"{{color_highlight_shadow {args[0]:02X} {args[1]:02X} {args[2]:02X}}}"
                 )
             elif sub == 0x05 and ac == 1:
-                out.append(f"[palette:{args[0]:02X}]")
+                out.append(f"{{palette:{args[0]:02X}}}")
             elif sub == 0x08 and ac == 1:
-                out.append(f"[pause:{args[0]:02X}]")
+                out.append(f"{{pause:{args[0]:02X}}}")
             elif sub == 0x0B and ac == 2:
-                out.append(f"[play_bgm {args[0]:02X} {args[1]:02X}]")
+                out.append(f"{{play_bgm {args[0]:02X} {args[1]:02X}}}")
             elif sub == 0x10 and ac == 2:
-                out.append(f"[play_se {args[0]:02X} {args[1]:02X}]")
-            elif sub == 0x13 and ac == 2:
-                out.append(f"[clear_to {args[0]:02X} {args[1]:02X}]")
+                out.append(f"{{play_se {args[0]:02X} {args[1]:02X}}}")
+            elif sub == 0x13 and ac == 1:
+                out.append(f"{{CLEAR_TO 0x{args[0]:02X}}}")
             elif sub == 0x14 and ac == 1:
-                out.append(f"[min_letter_spacing:{args[0]:02X}]")
+                out.append(f"{{min_letter_spacing:{args[0]:02X}}}")
             elif ac == 0:
                 out.append(_fc_zero_arg_label(sub))
             else:
                 parts = " ".join(f"{x:02X}" for x in [sub, *args])
-                out.append(f"[FC {parts}]")
+                out.append(f"{{FC {parts}}}")
             i += 2 + ac
             continue
 
         if b == 0xFE:
-            out.append("[newline]")
+            out.append("{newline}")
             i += 1
             continue
         if b == 0xFA:
-            out.append("[linefeed]")
+            out.append("{linefeed}")
             i += 1
             continue
         if b == 0xFB:
-            out.append("[paragraph]")
+            out.append("{paragraph}")
             i += 1
             continue
 
