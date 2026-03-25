@@ -2206,6 +2206,52 @@ def parse_rom_file_offset(s: str) -> Tuple[Optional[int], str]:
     return v, ""
 
 
+def _parse_struct_pointer_edit_literal(text: str) -> Optional[int]:
+    """Parse a user-entered GBA pointer word for struct inline/panel edits.
+
+    Accepts ``0x``/``0X`` hex (like :func:`int` with base 0), exactly eight hex
+    digits without a prefix (common for ``08……`` ROM addresses), decimal values
+    ``>= 0x08000000``, and ROM **file** offsets (decimal ``>= 0x1000``) using
+    the same rules as :func:`parse_rom_file_offset`.
+
+    Returns ``None`` when the text should be treated as string content at a ROM
+    pointer (e.g. short decimal text like ``100``) or is not a valid pointer
+    literal.
+    """
+    s = str(text).strip()
+    if not s:
+        return None
+    if re.fullmatch(r"0[xX][0-9A-Fa-f]{1,8}", s):
+        try:
+            return int(s, 0) & 0xFFFFFFFF
+        except ValueError:
+            return None
+    if re.fullmatch(r"[0-9A-Fa-f]{8}", s):
+        try:
+            return int(s, 16) & 0xFFFFFFFF
+        except ValueError:
+            return None
+    if re.fullmatch(r"\d+", s):
+        try:
+            v = int(s, 10)
+        except ValueError:
+            return None
+        if v >= GBA_ROM_BASE:
+            return v & 0xFFFFFFFF
+        if v >= 0x1000:
+            off, err = parse_rom_file_offset(s)
+            if err or off is None:
+                return None
+            return (off + GBA_ROM_BASE) & 0xFFFFFFFF
+        return None
+    if re.match(r"^0[xX]", s):
+        try:
+            return int(s, 0) & 0xFFFFFFFF
+        except ValueError:
+            return None
+    return None
+
+
 class _StaticRomOffsetDialog:
     """Pick where to write ``need_bytes``; optional FF-gap search (does not patch pointers)."""
 
@@ -7407,6 +7453,7 @@ class StructEditorFrame(ttk.Frame):
         )
         self._ptr_text_update_btn.grid(row=2, column=2, sticky="e", pady=(0, 2))
         self._ptr_text_fi: Optional[int] = None
+        self._ptr_text_spec: Optional[Any] = None  # None = top-level sf_{fi}; ("na", ai, ij) for nested rows
 
         gap_f = ttk.Frame(self._ptr_text_frame)
         gap_f.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
@@ -8190,22 +8237,53 @@ class StructEditorFrame(ttk.Frame):
         if not sel or not sel[0].startswith("sf_"):
             self._ptr_text_frame.grid_remove()
             self._ptr_text_fi = None
+            self._ptr_text_spec = None
             return
         fi, sp = parse_struct_tree_iid(sel[0])
-        if _struct_tree_spec_is_nested(sp):
-            self._ptr_text_frame.grid_remove()
-            self._ptr_text_fi = None
-            return
         if fi >= len(self._fields):
             self._ptr_text_frame.grid_remove()
             self._ptr_text_fi = None
+            self._ptr_text_spec = None
             return
-        fd = self._fields[fi]
-        if fd["type"] not in ("pcs_ptr", "ascii_ptr"):
-            self._ptr_text_frame.grid_remove()
-            self._ptr_text_fi = None
-            return
-        self._ptr_text_fi = fi
+        fd: Optional[Dict[str, Any]] = None
+        foff: Optional[int] = None
+        if _struct_tree_spec_is_nested(sp):
+            if not isinstance(sp, tuple) or sp[0] != "na":
+                self._ptr_text_frame.grid_remove()
+                self._ptr_text_fi = None
+                self._ptr_text_spec = None
+                return
+            na_fd = self._fields[fi]
+            if na_fd.get("type") != "nested_array":
+                self._ptr_text_frame.grid_remove()
+                self._ptr_text_fi = None
+                self._ptr_text_spec = None
+                return
+            _, ai, ij = sp
+            inner = na_fd.get("inner_fields") or []
+            if ij >= len(inner):
+                self._ptr_text_frame.grid_remove()
+                self._ptr_text_fi = None
+                self._ptr_text_spec = None
+                return
+            ifd = inner[ij]
+            if ifd.get("type") not in ("pcs_ptr", "ascii_ptr"):
+                self._ptr_text_frame.grid_remove()
+                self._ptr_text_fi = None
+                self._ptr_text_spec = None
+                return
+            fd = ifd
+            self._ptr_text_fi = fi
+            self._ptr_text_spec = sp
+        else:
+            fd = self._fields[fi]
+            if fd["type"] not in ("pcs_ptr", "ascii_ptr"):
+                self._ptr_text_frame.grid_remove()
+                self._ptr_text_fi = None
+                self._ptr_text_spec = None
+                return
+            self._ptr_text_fi = fi
+            self._ptr_text_spec = None
         if fd["type"] == "ascii_ptr":
             self._ptr_text_title.config(text="ascii_ptr field (NUL-terminated)")
             self._ptr_text_sublabel.config(text="ASCII text:")
@@ -8215,13 +8293,28 @@ class StructEditorFrame(ttk.Frame):
         self._ptr_text_frame.grid(row=4, column=0, sticky="ew", pady=(0, 2))
         data = self._hex.get_data()
         if not data:
+            self._ptr_text_frame.grid_remove()
+            self._ptr_text_fi = None
+            self._ptr_text_spec = None
             return
         try:
             entry_idx = int(self._idx_var.get())
         except ValueError:
+            self._ptr_text_frame.grid_remove()
+            self._ptr_text_fi = None
+            self._ptr_text_spec = None
             return
-        foff = self._entry_file_offset(entry_idx) + fd["offset"]
-        if foff + 4 > len(data):
+        entry_base = self._entry_file_offset(entry_idx)
+        if self._ptr_text_spec is not None and isinstance(self._ptr_text_spec, tuple):
+            _, ai2, ij2 = self._ptr_text_spec
+            na_fd2 = self._fields[fi]
+            foff = self._nested_element_file_off(entry_base, na_fd2, ai2, ij2)
+        else:
+            foff = self._struct_field_file_off(entry_base, fd)
+        if foff is None or foff + 4 > len(data):
+            self._ptr_text_frame.grid_remove()
+            self._ptr_text_fi = None
+            self._ptr_text_spec = None
             return
         ptr = int.from_bytes(data[foff:foff + 4], "little")
         self._ptr_addr_var.set(f"0x{ptr:08X}")
@@ -8235,28 +8328,53 @@ class StructEditorFrame(ttk.Frame):
         self._ptr_text_entry.delete(0, tk.END)
         self._ptr_text_entry.insert(0, text)
 
-    def _pcs_ptr_field_file_off(self, fi: int) -> Optional[int]:
+    def _pcs_ptr_field_file_off(self, fi: int, spec: Optional[Any] = None) -> Optional[int]:
         if fi < 0 or fi >= len(self._fields):
-            return None
-        fd = self._fields[fi]
-        if fd["type"] not in ("pcs_ptr", "ascii_ptr"):
             return None
         try:
             entry_idx = int(self._idx_var.get())
         except ValueError:
             return None
-        foff = self._entry_file_offset(entry_idx) + fd["offset"]
+        entry_base = self._entry_file_offset(entry_idx)
         data = self._hex.get_data()
-        if not data or foff + 4 > len(data):
+        if not data:
+            return None
+        if spec is not None and isinstance(spec, tuple) and spec[0] == "na":
+            _, ai, ij = spec
+            na_fd = self._fields[fi]
+            if na_fd.get("type") != "nested_array":
+                return None
+            inner = na_fd.get("inner_fields") or []
+            if ij >= len(inner):
+                return None
+            ifd = inner[ij]
+            if ifd.get("type") not in ("pcs_ptr", "ascii_ptr"):
+                return None
+            foff = self._nested_element_file_off(entry_base, na_fd, ai, ij)
+        else:
+            fd = self._fields[fi]
+            if fd["type"] not in ("pcs_ptr", "ascii_ptr"):
+                return None
+            foff = self._struct_field_file_off(entry_base, fd)
+        if foff is None or foff + 4 > len(data):
             return None
         return foff
 
-    def _refresh_pcs_ptr_tree_row(self, fi: int) -> None:
-        foff = self._pcs_ptr_field_file_off(fi)
+    def _refresh_pcs_ptr_tree_row(self, fi: int, spec: Optional[Any] = None) -> None:
+        if spec is None and fi == self._ptr_text_fi:
+            spec = getattr(self, "_ptr_text_spec", None)
+        foff = self._pcs_ptr_field_file_off(fi, spec)
         if foff is None:
             return
-        fd = self._fields[fi]
-        iid = f"sf_{fi}"
+        if spec is not None and isinstance(spec, tuple) and spec[0] == "na":
+            _, ai, ij = spec
+            na_fd = self._fields[fi]
+            inner = na_fd.get("inner_fields") or []
+            fd = inner[ij]
+            iid = f"sf_na_{fi}_{ai}_{ij}"
+        else:
+            fd = self._fields[fi]
+            iid = f"sf_{fi}"
         data2 = self._hex.get_data()
         if data2 and self._tree.exists(iid):
             raw = bytes(data2[foff:foff + fd["size"]])
@@ -8282,7 +8400,8 @@ class StructEditorFrame(ttk.Frame):
         self, fi: int, new_text: str, *, file_off: Optional[int] = None
     ) -> bool:
         """Write PCS text at the current pointer; grow into trailing 0xFF padding or relocate into an FF gap."""
-        foff = file_off if file_off is not None else self._pcs_ptr_field_file_off(fi)
+        ptr_spec = self._ptr_text_spec if fi == self._ptr_text_fi else None
+        foff = file_off if file_off is not None else self._pcs_ptr_field_file_off(fi, ptr_spec)
         if foff is None:
             return False
         data = self._hex.get_data()
@@ -8370,7 +8489,8 @@ class StructEditorFrame(ttk.Frame):
         self, fi: int, new_text: str, *, file_off: Optional[int] = None
     ) -> bool:
         """Write Latin-1 + NUL at the current pointer; grow into trailing 0xFF padding or relocate like PCS."""
-        foff = file_off if file_off is not None else self._pcs_ptr_field_file_off(fi)
+        ptr_spec = self._ptr_text_spec if fi == self._ptr_text_fi else None
+        foff = file_off if file_off is not None else self._pcs_ptr_field_file_off(fi, ptr_spec)
         if foff is None:
             return False
         data = self._hex.get_data()
@@ -8457,30 +8577,50 @@ class StructEditorFrame(ttk.Frame):
     def _on_ptr_pointer_apply(self) -> None:
         """Write the GBA pointer from the panel into the struct field."""
         fi = self._ptr_text_fi
+        spec = getattr(self, "_ptr_text_spec", None)
         if fi is None or fi >= len(self._fields):
             return
-        fd = self._fields[fi]
+        if spec is not None and isinstance(spec, tuple) and spec[0] == "na":
+            na_fd = self._fields[fi]
+            _, ai, ij = spec
+            inner = na_fd.get("inner_fields") or []
+            if ij >= len(inner):
+                return
+            fd = inner[ij]
+        else:
+            fd = self._fields[fi]
         if fd["type"] not in ("pcs_ptr", "ascii_ptr"):
             return
-        foff = self._pcs_ptr_field_file_off(fi)
+        foff = self._pcs_ptr_field_file_off(fi, spec)
         if foff is None:
             return
         s = self._ptr_addr_var.get().strip()
-        try:
-            val = int(s, 0)
-        except ValueError:
-            messagebox.showwarning("Struct", "Invalid pointer. Use hex, e.g. 0x08123456.")
+        val = _parse_struct_pointer_edit_literal(s)
+        if val is None:
+            messagebox.showwarning(
+                "Struct",
+                "Invalid pointer. Use hex (e.g. 0x08123456), eight hex digits, or a file offset (decimal ≥ 0x1000).",
+            )
             return
         self._hex.write_bytes_at(foff, val.to_bytes(4, "little"))
-        self._refresh_pcs_ptr_tree_row(fi)
+        self._refresh_pcs_ptr_tree_row(fi, spec)
         self._update_ptr_text_panel()
 
     def _on_ptr_text_update(self) -> None:
         """Apply PCS or ASCII-at-pointer text using padding / 0xFF gap relocation rules."""
         fi = self._ptr_text_fi
+        spec = getattr(self, "_ptr_text_spec", None)
         if fi is None or fi >= len(self._fields):
             return
-        fd = self._fields[fi]
+        if spec is not None and isinstance(spec, tuple) and spec[0] == "na":
+            na_fd = self._fields[fi]
+            _, ai, ij = spec
+            inner = na_fd.get("inner_fields") or []
+            if ij >= len(inner):
+                return
+            fd = inner[ij]
+        else:
+            fd = self._fields[fi]
         if fd["type"] not in ("pcs_ptr", "ascii_ptr"):
             return
         new_text = self._ptr_text_entry.get()
@@ -8490,7 +8630,7 @@ class StructEditorFrame(ttk.Frame):
             else self._apply_ascii_ptr_string_write(fi, new_text)
         )
         if ok:
-            self._refresh_pcs_ptr_tree_row(fi)
+            self._refresh_pcs_ptr_tree_row(fi, spec)
             self._update_ptr_text_panel()
 
     def _find_pcs_anchor_info_for_enum(self, enum_name: str) -> Optional[Dict[str, Any]]:
@@ -9682,6 +9822,7 @@ class StructEditorFrame(ttk.Frame):
         self._cancel_inline_edit()
         self._ptr_text_frame.grid_remove()
         self._ptr_text_fi = None
+        self._ptr_text_spec = None
         self._list_enum_frame.grid_remove()
         self._list_enum_fi = None
         self._list_enum_ctx = None
@@ -10390,13 +10531,9 @@ class StructEditorFrame(ttk.Frame):
                 self._hex.write_bytes_at(foff, enc)
             elif fd["type"] == "pcs_ptr":
                 ptr = int.from_bytes(data[foff:foff + 4], "little")
-                if re.fullmatch(r"0[xX][0-9A-Fa-f]{1,8}", text):
-                    try:
-                        val = int(text, 0)
-                    except ValueError:
-                        self._cancel_inline_edit()
-                        return
-                    self._hex.write_bytes_at(foff, val.to_bytes(4, "little"))
+                lit = _parse_struct_pointer_edit_literal(text)
+                if lit is not None:
+                    self._hex.write_bytes_at(foff, lit.to_bytes(4, "little"))
                 elif (ptr >> 24) in (0x08, 0x09):
                     if not self._apply_pcs_ptr_string_write(fi, raw_edit, file_off=foff):
                         self._cancel_inline_edit()
@@ -10411,13 +10548,9 @@ class StructEditorFrame(ttk.Frame):
                     return
             elif fd["type"] == "ascii_ptr":
                 ptr = int.from_bytes(data[foff:foff + 4], "little")
-                if re.fullmatch(r"0[xX][0-9A-Fa-f]{1,8}", text):
-                    try:
-                        val = int(text, 0)
-                    except ValueError:
-                        self._cancel_inline_edit()
-                        return
-                    self._hex.write_bytes_at(foff, val.to_bytes(4, "little"))
+                lit = _parse_struct_pointer_edit_literal(text)
+                if lit is not None:
+                    self._hex.write_bytes_at(foff, lit.to_bytes(4, "little"))
                 elif (ptr >> 24) in (0x08, 0x09):
                     if not self._apply_ascii_ptr_string_write(fi, raw_edit, file_off=foff):
                         self._cancel_inline_edit()
@@ -10510,13 +10643,9 @@ class StructEditorFrame(ttk.Frame):
             self._hex.write_bytes_at(foff, enc)
         elif fd["type"] == "pcs_ptr":
             ptr = int.from_bytes(data[foff:foff + 4], "little")
-            if re.fullmatch(r"0[xX][0-9A-Fa-f]{1,8}", text):
-                try:
-                    val = int(text, 0)
-                except ValueError:
-                    self._cancel_inline_edit()
-                    return
-                self._hex.write_bytes_at(foff, val.to_bytes(4, "little"))
+            lit = _parse_struct_pointer_edit_literal(text)
+            if lit is not None:
+                self._hex.write_bytes_at(foff, lit.to_bytes(4, "little"))
             elif (ptr >> 24) in (0x08, 0x09):
                 if not self._apply_pcs_ptr_string_write(fi, raw_edit):
                     self._cancel_inline_edit()
@@ -10532,13 +10661,9 @@ class StructEditorFrame(ttk.Frame):
                 return
         elif fd["type"] == "ascii_ptr":
             ptr = int.from_bytes(data[foff:foff + 4], "little")
-            if re.fullmatch(r"0[xX][0-9A-Fa-f]{1,8}", text):
-                try:
-                    val = int(text, 0)
-                except ValueError:
-                    self._cancel_inline_edit()
-                    return
-                self._hex.write_bytes_at(foff, val.to_bytes(4, "little"))
+            lit = _parse_struct_pointer_edit_literal(text)
+            if lit is not None:
+                self._hex.write_bytes_at(foff, lit.to_bytes(4, "little"))
             elif (ptr >> 24) in (0x08, 0x09):
                 if not self._apply_ascii_ptr_string_write(fi, raw_edit):
                     self._cancel_inline_edit()

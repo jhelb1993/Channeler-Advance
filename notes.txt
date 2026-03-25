@@ -1,4 +1,3 @@
-allow the user to edit pointers to text
 fix invalid unicode symbols on linux
 improve performance when loading tools
 more games
