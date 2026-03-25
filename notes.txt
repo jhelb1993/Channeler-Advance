@@ -1,4 +1,3 @@
-complete pcs macros (using charmap.txt as a reference)
 fix pointers not following
 fix string expanding
 fix repointing without prompting for free space offset
