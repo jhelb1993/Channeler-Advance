@@ -2,6 +2,7 @@ complete pcs macros (using charmap.txt as a reference)
 fix pointers not following
 fix string expanding
 fix repointing without prompting for free space offset
+allow the user to edit pointers to text
 fix invalid unicode symbols on linux
 improve performance when loading tools
 more games
