@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 AS=arm-none-eabi-as
+LD=arm-none-eabi-ld
 OBJCOPY=arm-none-eabi-objcopy
 
 function isInPath()
@@ -23,6 +24,8 @@ return $retval
 
 isInPath ${AS}
 let res=$?
+isInPath ${LD}
+let res+=$?
 isInPath ${OBJCOPY}
 let res+=$?
 dst=$2
@@ -42,35 +45,38 @@ then
 	elif [[ ! -s "${1}" ]]
 	then
 		echo "Cannot assemble ${1}: the file is empty."
-	elif [[ res -gt 0 ]]
+	elif [[ $res -gt 0 ]]
 	then
 		echo "Compiler Missing: make sure that you have devkitarm bins in your path variable."
 	else
-	 	if [[ -f "a.out" ]]
-		then
-			rm a.out
-		fi
-		"${AS}" -mthumb -mthumb-interwork "${1}"
+		obj_o="${1%.*}.o"
+		obj_elf="${1%.*}.elf"
+		rm -f "${obj_o}" "${obj_elf}"
+		"${AS}" -mthumb -mthumb-interwork -o "${obj_o}" "${1}"
 		if [[ $? = 0 ]]
 		then
-			if [[ ${2} = "" ]]
+			"${LD}" -nostdlib --section-start=.text=0 -o "${obj_elf}" "${obj_o}"
+			if [[ $? != 0 ]]
 			then
-				dst=${1%%.*}.bin
-			fi
-			"${OBJCOPY}" -O binary a.out "${dst}"
-			if [[ $? != 0 || ! -f ${dst} ]]
-			then
-				rm a.out
-				echo "Cannot assemble ${1}: An error occurred."
+				rm -f "${obj_o}" "${obj_elf}"
+				echo "Cannot assemble ${1}: link failed (arm-none-eabi-ld)."
 			else
-				echo "Assembled successfully."
+				if [[ ${2} = "" ]]
+				then
+					dst=${1%%.*}.bin
+				fi
+				"${OBJCOPY}" -O binary "${obj_elf}" "${dst}"
+				if [[ $? != 0 || ! -f ${dst} ]]
+				then
+					rm -f "${obj_o}" "${obj_elf}"
+					echo "Cannot assemble ${1}: An error occurred."
+				else
+					rm -f "${obj_o}" "${obj_elf}"
+					echo "Assembled successfully."
+				fi
 			fi
-			
-		elif [[ -f "a.out" ]]
-		then
-			rm a.out
-			echo "Cannot assemble ${1}: An error occurred."
 		else
+			rm -f "${obj_o}" "${obj_elf}"
 			echo "Cannot assemble ${1}: An error occurred."
 		fi
 	fi

@@ -5,8 +5,13 @@
 call :CheckFileSize %src%
 @if "%size%" == "0" goto EmptySourceFile
 @if not exist as.exe goto AssemblerMissing
-@if exist a.out del /f /q a.out
-@as -mthumb -mthumb-interwork "%src%"
+@set obj=%~dpn1.o
+@set elf=%~dpn1.elf
+@if exist "%obj%" del /f /q "%obj%"
+@if exist "%elf%" del /f /q "%elf%"
+@as -mthumb -mthumb-interwork -o "%obj%" "%src%"
+@if not "%errorlevel%" == "0" goto Cleanup
+@arm-none-eabi-ld -nostdlib --section-start=.text=0 -o "%elf%" "%obj%"
 @if not "%errorlevel%" == "0" goto Cleanup
 @set dest=%~2
 @if "%dest%" == "" goto NoDestFile
@@ -14,7 +19,7 @@ call :CheckFileSize %src%
 :ToBinary
 @if not exist objcopy.exe goto ObjCopyMissing
 @if exist "%dest%" del /f /q "%dest%"
-@objcopy -O binary a.out "%dest%"
+@objcopy -O binary "%elf%" "%dest%"
 @if not exist "%dest%" goto CleanUp
 @if not "%errorlevel%" == "0" goto Cleanup
 @echo Assembled successfully.
@@ -23,7 +28,8 @@ call :CheckFileSize %src%
 @set src=""
 @set dest=""
 @set size=""
-@if exist a.out del /f /q a.out
+@if exist "%obj%" del /f /q "%obj%"
+@if exist "%elf%" del /f /q "%elf%"
 goto:EOF
 
 :NoDestFile

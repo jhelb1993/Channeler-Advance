@@ -223,6 +223,13 @@ except ImportError:
 
 GBA_ROM_BASE = 0x08000000
 GBA_ROM_MAX = 0x09FFFFFF  # addresses > this are not ROM code pointers; treat as code, not .word
+
+
+def _hackmew_thumb_leading_align_bytes(rom_file_offset: int) -> int:
+    """Bytes the assembler inserts after ``.org`` + ``.align 2`` so the first user Thumb insn is 4-byte aligned (…0/4/8/C)."""
+    rom = (GBA_ROM_BASE + rom_file_offset) & 0xFFFFFFFF
+    m = rom & 3
+    return (4 - m) % 4
 # GBA cartridge header: 4-byte game code at 0xAC (e.g. ``BPRE`` = Pokémon FireRed US).
 GBA_GAME_CODE_OFFSET = 0xAC
 
@@ -312,6 +319,19 @@ def devkit_tool(name: str) -> str:
     if d:
         return os.path.join(d, name)
     return name
+
+
+def _hackmew_resolve_tool(name: str) -> Optional[str]:
+    """Resolve devkitARM ``bin`` tool or the same name on ``PATH`` (same pattern as C inject)."""
+    p = devkit_tool(name)
+    if os.path.isfile(p):
+        return p
+    if os.name == "nt":
+        pe = p + ".exe"
+        if os.path.isfile(pe):
+            return pe
+    w = shutil.which(name)
+    return w if w else None
 
 
 # Anchor browser: virtual folder for ``pokefirered.sym`` (segment must not contain ".")
@@ -11425,7 +11445,8 @@ class HexEditorFrame(ttk.Frame):
                 normalized = re.sub(r"\bbics\b", "bic", normalized, flags=re.IGNORECASE)
                 if normalized != line:
                     lines[i] = raw[: raw.find(line)] + normalized + raw[raw.find(line) + len(line) :]
-        base = self._hackmew_asm_start
+        # Match _compile_hackmew_asm: .org then .align 2 (GNU ARM: 2^2 = 4-byte) before user lines.
+        base = self._hackmew_asm_start + _hackmew_thumb_leading_align_bytes(self._hackmew_asm_start)
         align = 4
 
         def _insn_size(raw_line: str) -> int:
@@ -11486,7 +11507,7 @@ class HexEditorFrame(ttk.Frame):
         return "\n".join(lines)
 
     def _compile_hackmew_asm(self, event: Optional[tk.Event] = None) -> Optional[str]:
-        """Compile edited HackMew ASM via deps/thumb.bat (Windows) or deps/thumb.sh (macOS/Linux) and insert .bin. Ctrl+I."""
+        """Compile edited HackMew ASM with devkitARM ``as`` → ``ld -nostdlib`` → ``objcopy`` (BL fixups require link). Ctrl+I."""
         if not self._hackmew_mode or not self._asm_pane_visible:
             return "break"
         if self._hackmew_asm_start is None or self._hackmew_asm_end is None:
@@ -11500,40 +11521,84 @@ class HexEditorFrame(ttk.Frame):
 
         original_size = self._hackmew_asm_end - self._hackmew_asm_start
 
-        deps_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "deps")
-        if os.name == "nt":
-            thumb_tool = os.path.join(deps_dir, "thumb.bat")
-            if not os.path.isfile(thumb_tool):
-                messagebox.showerror("Compile Error", f"thumb.bat not found at:\n{thumb_tool}")
-                return "break"
-        else:
-            thumb_tool = os.path.join(deps_dir, "thumb.sh")
-            if not os.path.isfile(thumb_tool):
-                messagebox.showerror("Compile Error", f"thumb.sh not found at:\n{thumb_tool}")
-                return "break"
+        rom0 = (GBA_ROM_BASE + self._hackmew_asm_start) & 0xFFFFFFFF
+        if rom0 & 1:
+            messagebox.showerror(
+                "Compile Error",
+                "This Thumb routine’s ROM address is not halfword-aligned (odd file offset). "
+                "Choose a region starting at an even byte.",
+            )
+            return "break"
 
         with tempfile.TemporaryDirectory() as tmpdir:
             asm_path = os.path.join(tmpdir, "edit.asm")
+            o_path = os.path.join(tmpdir, "edit.o")
+            elf_path = os.path.join(tmpdir, "edit.elf")
             bin_path = os.path.join(tmpdir, "edit.bin")
             origin = GBA_ROM_BASE + self._hackmew_asm_start
-            preamble = f".thumb\n.align 4\n.org 0x{origin:X}\n\n"
+            # .align before .org would use LC 0 and align to 2^4 = 16 bytes (wrong). After .org, .align 2 => 4-byte (…0/4/8/C).
+            preamble = f".thumb\n.org 0x{origin:X}\n.align 2\n\n"
             with open(asm_path, "w", encoding="utf-8") as f:
                 f.write(preamble + asm_text + "\n")
 
-            if os.name == "nt":
-                cmd = [os.environ.get("COMSPEC", "cmd.exe"), "/c", thumb_tool, asm_path, bin_path]
-            else:
-                bash = shutil.which("bash") or "/bin/bash"
-                cmd = [bash, thumb_tool, asm_path, bin_path]
-            result = subprocess.run(
-                cmd,
-                cwd=deps_dir,
+            # objcopy on a relocatable .o leaves R_ARM_THM_CALL unfixed (BL slots stay 0xF7FF FFFE).
+            # Link to apply fixups. Default ld relocates .text to a new VMA and breaks clip[origin:]; force
+            # output .text to VMA 0 so addresses match .org and the flat bin slice stays correct.
+            as_exe = _hackmew_resolve_tool("arm-none-eabi-as")
+            ld_exe = _hackmew_resolve_tool("arm-none-eabi-ld")
+            objcopy_exe = _hackmew_resolve_tool("arm-none-eabi-objcopy")
+            if not as_exe or not ld_exe or not objcopy_exe:
+                miss = []
+                if not as_exe:
+                    miss.append("arm-none-eabi-as")
+                if not ld_exe:
+                    miss.append("arm-none-eabi-ld")
+                if not objcopy_exe:
+                    miss.append("arm-none-eabi-objcopy")
+                messagebox.showerror(
+                    "Compile Error",
+                    "Missing: "
+                    + ", ".join(miss)
+                    + "\n\nInstall devkitARM and add its bin directory to PATH.",
+                )
+                return "break"
+
+            r1 = subprocess.run(
+                [as_exe, "-mthumb", "-mthumb-interwork", "-o", o_path, asm_path],
+                cwd=tmpdir,
                 capture_output=True,
                 text=True,
             )
-            if result.returncode != 0 or not os.path.isfile(bin_path):
-                err = (result.stdout + "\n" + result.stderr).strip()
-                messagebox.showerror("Compile Error", f"Assembly failed:\n{err}")
+            if r1.returncode != 0 or not os.path.isfile(o_path):
+                err = (r1.stdout + "\n" + r1.stderr).strip()
+                messagebox.showerror("Compile Error", f"Assembly failed:\n{err[:4000]}")
+                return "break"
+            r2 = subprocess.run(
+                [
+                    ld_exe,
+                    "-nostdlib",
+                    "--section-start=.text=0",
+                    "-o",
+                    elf_path,
+                    o_path,
+                ],
+                cwd=tmpdir,
+                capture_output=True,
+                text=True,
+            )
+            if r2.returncode != 0 or not os.path.isfile(elf_path):
+                err = (r2.stdout + "\n" + r2.stderr).strip()
+                messagebox.showerror("Compile Error", f"Link failed (needed for BL fixups):\n{err[:4000]}")
+                return "break"
+            r3 = subprocess.run(
+                [objcopy_exe, "-O", "binary", elf_path, bin_path],
+                cwd=tmpdir,
+                capture_output=True,
+                text=True,
+            )
+            if r3.returncode != 0 or not os.path.isfile(bin_path):
+                err = (r3.stdout + "\n" + r3.stderr).strip()
+                messagebox.showerror("Compile Error", f"objcopy failed:\n{err[:2000]}")
                 return "break"
 
             with open(bin_path, "rb") as f:

@@ -1,4 +1,3 @@
-fix linux asm insertion
 fix invalid unicode symbols on linux
 pcs macros
 improve performance when loading tools
