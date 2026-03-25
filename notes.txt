@@ -1,4 +1,3 @@
-automatic palette lookup (palette field or `pal`)
 fix linux asm insertion
 fix invalid unicode symbols on linux
 pcs macros

@@ -5256,6 +5256,29 @@ def _parse_helper_field_token(token: str) -> Optional[Dict[str, Any]]:
     return {"name": name, "size": 0, "type": "helper", "enum": None, "helper_refs": refs}
 
 
+def _parse_gfx_palette_hint_token(token: str) -> Optional[Dict[str, Any]]:
+    """`` `pal`graphics.some.palettes`` — zero-byte hint: default palette anchor for sprite preview (same row index)."""
+    t = token.strip()
+    m = re.match(r"^`pal`([\w.+-]+)$", t)
+    if not m:
+        return None
+    ref = (m.group(1) or "").strip()
+    if not ref:
+        return None
+    return {
+        "name": "pal",
+        "size": 0,
+        "type": "gfx_palette_hint",
+        "palette_anchor_name": ref,
+        "enum": None,
+    }
+
+
+def _struct_layout_non_payload_field_type(t: Optional[str]) -> bool:
+    """True for fields that reserve no ROM bytes in the struct row (helpers and palette preview hints)."""
+    return t in ("helper", "gfx_palette_hint")
+
+
 def _tokenize_struct_body(inner: str) -> List[str]:
     """Split struct inner on spaces respecting nested ``<>[]()`` depth."""
     tokens: List[str] = []
@@ -6039,6 +6062,8 @@ def _parse_struct_fields(
     for tok in tokens:
         fd = _parse_helper_field_token(tok)
         if fd is None:
+            fd = _parse_gfx_palette_hint_token(tok)
+        if fd is None:
             fd = _parse_single_field(tok)
         if fd:
             if fd.get("type") == "nested_array":
@@ -6105,7 +6130,7 @@ def _assign_struct_field_offsets(fields: List[Dict[str, Any]]) -> None:
     """Lay out fields in declaration order: helpers (0 bytes), uints, nested_array (consumes max span), etc."""
     lay_at = 0
     for fd in fields:
-        if fd.get("type") == "helper":
+        if _struct_layout_non_payload_field_type(fd.get("type")):
             fd["offset"] = lay_at
             continue
         if fd.get("type") == "nested_array":
@@ -6189,6 +6214,7 @@ def _validate_nested_array_fields(fields: List[Dict[str, Any]]) -> bool:
                 "gfx_tileset",
                 "gfx_tilemap",
                 "gfx_palette",
+                "gfx_palette_hint",
             )
             for k in range(ci + 1, ni):
                 fk = fields[k]
@@ -6208,7 +6234,7 @@ def _validate_nested_array_fields(fields: List[Dict[str, Any]]) -> bool:
                     fj = fields[j]
                     if fj.get("type") == "helper":
                         continue
-                    if fj.get("type") not in ("uint", "pcs", "ascii"):
+                    if fj.get("type") not in ("uint", "pcs", "ascii", "gfx_palette_hint"):
                         return False
         else:
             return False
@@ -6307,7 +6333,7 @@ def _terminator_nested_row_end_exclusive_pointer_blob(
 
 def _struct_is_packed_terminator_only(fields: List[Dict[str, Any]]) -> bool:
     """True when the struct is only an **inline** ``!HEX>inline`` nested array - rows packed back-to-back in ROM."""
-    non_h = [f for f in fields if f.get("type") != "helper"]
+    non_h = [f for f in fields if not _struct_layout_non_payload_field_type(f.get("type"))]
     return (
         len(non_h) == 1
         and non_h[0].get("type") == "nested_array"
@@ -6602,7 +6628,7 @@ def _struct_per_row_terminator_nested_field(fields: List[Dict[str, Any]]) -> Opt
     """``!HEX`` nested data stored **per struct row** (under a pointer), not as the whole packed table at ``Address``."""
     if _struct_is_packed_terminator_only(fields):
         return None
-    non_h = [f for f in fields if f.get("type") != "helper"]
+    non_h = [f for f in fields if not _struct_layout_non_payload_field_type(f.get("type"))]
     for fd in reversed(non_h):
         if fd.get("type") == "nested_array" and fd.get("terminator"):
             return fd
@@ -6699,7 +6725,7 @@ def _struct_row_byte_size(fields: List[Dict[str, Any]]) -> int:
     n = 0
     for f in fields:
         t = f.get("type")
-        if t == "helper":
+        if _struct_layout_non_payload_field_type(t):
             continue
         if t == "nested_array":
             if f.get("base_ptr_field"):
@@ -6790,7 +6816,9 @@ def _try_parse_nested_array_token(token: str) -> Optional[Dict[str, Any]]:
     if not inner_fields:
         return None
     inner_stride = sum(
-        int(f["size"]) for f in inner_fields if f.get("type") not in ("helper",)
+        int(f["size"])
+        for f in inner_fields
+        if not _struct_layout_non_payload_field_type(f.get("type"))
     )
     if inner_stride <= 0:
         return None
@@ -6945,7 +6973,7 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
                     "gfx_spec": legacy,
                 }
             return None
-        if fname == "palette":
+        if fname in ("palette", "pal"):
             pal_spec = parse_graphics_anchor_format(inner)
             if pal_spec is not None and getattr(pal_spec, "kind", None) == "palette":
                 return {
@@ -7654,7 +7682,7 @@ class StructEditorFrame(ttk.Frame):
         self._gfx_tm_log.configure(state=tk.DISABLED)
 
     def _explicit_tilemap_field_indices(self) -> Optional[Tuple[int, int, Optional[int]]]:
-        """If struct has ``tileset<`…`>`` + ``tilemap<`…`>`` (+ optional ``palette<`…`>``), return (ts_i, tm_i, pl_i)."""
+        """If struct has ``tileset<`…`>`` + ``tilemap<`…`>`` (+ optional ``palette<`…`>`` / ``pal<`…`>``), return (ts_i, tm_i, pl_i)."""
         by_name: Dict[str, Tuple[int, Dict[str, Any]]] = {}
         for i, f in enumerate(self._fields):
             n = f.get("name")
@@ -7671,15 +7699,71 @@ class StructEditorFrame(ttk.Frame):
                 ts_i = by_name["tileset"][0]
             if "palette" in by_name and by_name["palette"][1].get("type") == "gfx_palette":
                 pl_i = by_name["palette"][0]
+            elif "pal" in by_name and by_name["pal"][1].get("type") == "gfx_palette":
+                pl_i = by_name["pal"][0]
             if ts_i is not None:
                 return (ts_i, tm_i, pl_i)
         ts_list = [i for i, f in enumerate(self._fields) if f.get("type") == "gfx_tileset"]
         tm_list = [i for i, f in enumerate(self._fields) if f.get("type") == "gfx_tilemap"]
         pl_list = [i for i, f in enumerate(self._fields) if f.get("type") == "gfx_palette"]
         if len(tm_list) == 1 and len(ts_list) == 1:
-            pl_opt = pl_list[0] if len(pl_list) == 1 else None
+            pl_opt: Optional[int] = None
+            if len(pl_list) == 1:
+                pl_opt = pl_list[0]
+            elif len(pl_list) >= 2:
+                name_to_i = {str(self._fields[i].get("name", "")).lower(): i for i in pl_list}
+                pl_opt = name_to_i.get("palette") or name_to_i.get("pal") or pl_list[0]
             return (ts_list[0], tm_list[0], pl_opt)
         return None
+
+    def _gfx_palette_field_indices(self) -> List[int]:
+        return [i for i, f in enumerate(self._fields) if f.get("type") == "gfx_palette"]
+
+    def _default_palette_field_index_for_sprite(self, sprite_fi: int) -> Optional[int]:
+        """Prefer ``palette`` / ``pal`` field names, else the last ``gfx_palette`` before the sprite, else first."""
+        ids = self._gfx_palette_field_indices()
+        if not ids:
+            return None
+        if len(ids) == 1:
+            return ids[0]
+        for prefer in ("palette", "pal"):
+            for i in ids:
+                if str(self._fields[i].get("name", "")).lower() == prefer:
+                    return i
+        before = [i for i in ids if i < sprite_fi]
+        if before:
+            return before[-1]
+        return ids[0]
+
+    def _first_struct_palette_hint_anchor_name(self) -> Optional[str]:
+        for f in self._fields:
+            if f.get("type") != "gfx_palette_hint":
+                continue
+            s = str(f.get("palette_anchor_name") or "").strip()
+            if s:
+                return s
+        return None
+
+    def _resolve_gfx_palette_field_at_entry(
+        self, palette_fd: Dict[str, Any], entry_base: int
+    ) -> Tuple[Optional[Any], Optional[int], str]:
+        """Resolve ``gfx_palette`` pointer in this struct row to ``(spec, rom_file_offset, notes)``."""
+        notes = ""
+        gsp = palette_fd.get("gfx_spec")
+        if gsp is None or getattr(gsp, "kind", None) != "palette":
+            return None, None, notes + f"Field {palette_fd.get('name')!r} is not a palette graphics spec.\n"
+        data = self._hex.get_data()
+        if not data:
+            return None, None, notes + "No ROM loaded.\n"
+        pfoff = self._struct_field_file_off(entry_base, palette_fd)
+        if pfoff is None:
+            return None, None, notes + f"Could not resolve layout for palette field {palette_fd.get('name')!r}.\n"
+        if pfoff + 4 > len(data):
+            return None, None, notes
+        tgt = resolve_gba_pointer(bytes(data), pfoff)
+        if tgt is None:
+            return None, None, notes + f"Palette pointer at {palette_fd.get('name')!r} does not reference ROM.\n"
+        return gsp, tgt, notes + f"Palette from struct field {palette_fd.get('name')!r} (same row).\n"
 
     def _update_gfx_tilemap_panel(self) -> None:
         self._gfx_tilemap_frame.grid_remove()
@@ -7902,19 +7986,45 @@ class StructEditorFrame(ttk.Frame):
                         f"linked palette ignored for preview.\n"
                     )
 
-        pal_name = fd.get("gfx_palette_name")
+        entry_base = self._entry_file_offset(entry_idx)
+        pal_name_pipe = fd.get("gfx_palette_name")
         pal_spec = None
         pal_base = None
-        if override_pal_bytes is None and pal_name:
-            pal_spec, pal_base, pal_notes = self._hex.resolve_palette_for_graphics_row(pal_name, entry_idx)
+        pal_notes = ""
+        if override_pal_bytes is None:
+            pal_i = self._default_palette_field_index_for_sprite(fi)
+            if pal_i is not None:
+                pfd = self._fields[pal_i]
+                pal_spec, pal_base, pal_notes = self._resolve_gfx_palette_field_at_entry(pfd, entry_base)
+                if pal_spec is not None and pal_base is not None:
+                    log_extra += ("\n" + pal_notes) if pal_notes else ""
+                else:
+                    log_extra += pal_notes
             if pal_spec is None or pal_base is None:
-                dpal = "64-color (empty)" if spec.bpp == 6 else "16-color"
-                log_extra += (
-                    (pal_notes or f"\nWarning: could not resolve palette {pal_name!r}.\n")
-                    + f"Using default {dpal} palette.\n"
+                hint = self._first_struct_palette_hint_anchor_name()
+                if hint:
+                    pal_spec, pal_base, pal_notes = self._hex.resolve_palette_for_graphics_row(
+                        hint, entry_idx
+                    )
+                    if pal_spec is None or pal_base is None:
+                        log_extra += (
+                            pal_notes
+                            or f"\nWarning: could not resolve default palette hint {hint!r}.\n"
+                        )
+                    else:
+                        log_extra += ("\n" + pal_notes) if pal_notes else ""
+            if (pal_spec is None or pal_base is None) and pal_name_pipe:
+                pal_spec, pal_base, pal_notes = self._hex.resolve_palette_for_graphics_row(
+                    pal_name_pipe, entry_idx
                 )
-            else:
-                log_extra += ("\n" + pal_notes) if pal_notes else ""
+                if pal_spec is None or pal_base is None:
+                    dpal = "64-color (empty)" if spec.bpp == 6 else "16-color"
+                    log_extra += (
+                        (pal_notes or f"\nWarning: could not resolve palette {pal_name_pipe!r}.\n")
+                        + f"Using default {dpal} palette.\n"
+                    )
+                else:
+                    log_extra += ("\n" + pal_notes) if pal_notes else ""
         raw_pre = bytes(data[tgt : tgt + min(len(data) - tgt, 4 << 20)])
         try:
             tb = extract_sprite_bytes(spec, raw_pre)
@@ -9596,7 +9706,7 @@ class StructEditorFrame(ttk.Frame):
             elif off + self._struct_size > len(data):
                 return
             for fi, fd in enumerate(self._fields):
-                if fd.get("type") == "helper":
+                if fd.get("type") in ("helper", "gfx_palette_hint"):
                     val_str = self._format_value(b"", fd, entry_base=off)
                     self._tree.insert("", tk.END, values=(fd["name"], val_str), iid=f"sf_{fi}")
                     continue
@@ -9871,7 +9981,11 @@ class StructEditorFrame(ttk.Frame):
     def _format_helper_value(self, fd: Dict[str, Any], data: Any, entry_base: int) -> str:
         """Sum ROM uint values for fields named in ``helper_refs`` (same struct row)."""
         refs: List[str] = list(fd.get("helper_refs") or [])
-        by_name = {str(f["name"]): f for f in self._fields if f.get("type") != "helper"}
+        by_name = {
+            str(f["name"]): f
+            for f in self._fields
+            if not _struct_layout_non_payload_field_type(f.get("type"))
+        }
         total = 0
         missing: List[str] = []
         for ref in refs:
@@ -9897,11 +10011,14 @@ class StructEditorFrame(ttk.Frame):
         if not data or not self._tree:
             return
         for fi, fd in enumerate(self._fields):
-            if fd.get("type") != "helper":
-                continue
-            iid = f"sf_{fi}"
-            if self._tree.exists(iid):
-                self._tree.set(iid, "val", self._format_helper_value(fd, data, entry_base))
+            if fd.get("type") == "helper":
+                iid = f"sf_{fi}"
+                if self._tree.exists(iid):
+                    self._tree.set(iid, "val", self._format_helper_value(fd, data, entry_base))
+            elif fd.get("type") == "gfx_palette_hint":
+                iid = f"sf_{fi}"
+                if self._tree.exists(iid):
+                    self._tree.set(iid, "val", self._format_value(b"", fd, entry_base=entry_base))
 
     def _format_value(self, raw: bytes, fd: Dict[str, Any], entry_base: Optional[int] = None) -> str:
         ftype = fd["type"]
@@ -9918,6 +10035,8 @@ class StructEditorFrame(ttk.Frame):
             if not data:
                 return "(-)"
             return self._format_helper_value(fd, data, entry_base)
+        if ftype == "gfx_palette_hint":
+            return f"(default palette) {fd.get('palette_anchor_name', '')}"
         if ftype == "pcs":
             chars = []
             for b in raw:
@@ -10125,7 +10244,7 @@ class StructEditorFrame(ttk.Frame):
             foff = self._nested_element_file_off(entry_base, na_fd, ai, ij)
         else:
             fd = self._fields[fi]
-            if fd.get("type") == "helper":
+            if fd.get("type") in ("helper", "gfx_palette_hint"):
                 return
             foff = self._struct_field_file_off(entry_base, fd)
 
@@ -10363,7 +10482,7 @@ class StructEditorFrame(ttk.Frame):
             return
 
         fd = self._fields[fi]
-        if fd.get("type") == "helper":
+        if fd.get("type") in ("helper", "gfx_palette_hint"):
             self._cancel_inline_edit()
             return
         foff = self._struct_field_file_off(entry_base, fd)
