@@ -16,7 +16,8 @@ POKEFIRERED_PATH = os.path.join(os.path.dirname(__file__), "pokefirered")
 
 class FireRedEditor:
 
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, path: str) -> None:
+        self.path = path
         self.root = root
         self.root.title("Channeler Advance - Pokémon FireRed Editor")
         self.root.geometry("900x650")
@@ -33,7 +34,6 @@ class FireRedEditor:
 
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
-        file_menu.add_command(label="Open ROM...", command=self._on_open_rom)
         file_menu.add_command(label="Load structure TOML...", command=self._on_load_structure_toml, state=tk.DISABLED)
         file_menu.add_command(
             label="Use ROM-paired TOML (clear override)",
@@ -78,6 +78,8 @@ class FireRedEditor:
         self._tools_shell = RomToolsShell(self.root, self._main_paned, self._hex_editor)
         self._hex_editor.set_struct_editor_ref(self._tools_shell.struct_editor)
         self._hex_editor.set_file_menu_refresh_callback(self._refresh_banlist_import_menu_state)
+        
+        self._hex_editor.load_file(self.path)
 
         def _on_structure_toml_refreshed() -> None:
             if self._tools_shell:
