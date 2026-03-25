@@ -1503,33 +1503,56 @@ def find_disjoint_ff_gap_start(
 def parse_ff_gap_search_window_strings(
     data: Any, fs: str, ts: str
 ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
-    """Parse FF-gap search range from two strings (same rules as StructEditor ``_parse_ff_gap_search_window``)."""
+    """Parse FF-gap search range from two strings (Struct editor / dialogs / C-inject).
+
+    * **Both empty** → ``(None, None, None)`` — search the whole ROM (no window).
+    * **From only** — half-open ``[lo, len(rom))``.
+    * **Through only** — inclusive end ``hi`` → half-open ``[0, hi + 1)``.
+    * **Both** — inclusive ``from … through`` → half-open ``[lo, hi + 1)``.
+
+    GBA addresses ``0x08……`` are accepted and converted to file offsets.
+    """
     if not data:
         return None, None, "No ROM loaded."
     n = len(data)
     fs, ts = fs.strip(), ts.strip()
     if not fs and not ts:
         return None, None, None
-    if (fs and not ts) or (not fs and ts):
-        return (
-            None,
-            None,
-            'Enter both “from” and “to”, or leave both empty to search the entire ROM.',
-        )
+
+    def _norm_file_off(x: int) -> int:
+        if GBA_ROM_BASE <= x <= GBA_ROM_MAX:
+            return x - GBA_ROM_BASE
+        return x
+
+    if fs and ts:
+        try:
+            lo = _norm_file_off(int(fs, 0))
+            hi = _norm_file_off(int(ts, 0))
+        except ValueError:
+            return None, None, "Invalid offset (use decimal or 0x hex)."
+        if lo < 0 or hi >= n:
+            return None, None, f"Offsets must lie within the ROM file (0 … 0x{n - 1:X})."
+        if hi < lo:
+            return None, None, "End offset must be ≥ start offset."
+        return lo, hi + 1, None
+
+    if fs and not ts:
+        try:
+            lo = _norm_file_off(int(fs, 0))
+        except ValueError:
+            return None, None, "Invalid offset (use decimal or 0x hex)."
+        if lo < 0 or lo >= n:
+            return None, None, f"Start offset must lie within the ROM file (0 … 0x{n - 1:X})."
+        return lo, n, None
+
+    # through only
     try:
-        lo = int(fs, 0)
-        hi = int(ts, 0)
+        hi = _norm_file_off(int(ts, 0))
     except ValueError:
         return None, None, "Invalid offset (use decimal or 0x hex)."
-    if GBA_ROM_BASE <= lo <= GBA_ROM_MAX:
-        lo -= GBA_ROM_BASE
-    if GBA_ROM_BASE <= hi <= GBA_ROM_MAX:
-        hi -= GBA_ROM_BASE
-    if lo < 0 or hi >= n:
-        return None, None, f"Offsets must lie within the ROM file (0 … 0x{n - 1:X})."
-    if hi < lo:
-        return None, None, "End offset must be ≥ start offset."
-    return lo, hi + 1, None
+    if hi < 0 or hi >= n:
+        return None, None, f"End offset must lie within the ROM file (0 … 0x{n - 1:X})."
+    return 0, hi + 1, None
 
 
 def _pad_graphic_slot(payload: bytes, cap: int) -> bytes:
@@ -7403,7 +7426,11 @@ class StructEditorFrame(ttk.Frame):
         )
         ttk.Label(
             gap_f,
-            text="(file offset or GBA 0x08…; both blank = whole ROM; “through” is inclusive)",
+            text=(
+                "(file offset or GBA 0x08…; both blank = whole ROM; "
+                "from-only = from end of ROM; through-only = start of ROM through; "
+                "both = inclusive range)"
+            ),
             font=("Consolas", 7),
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
@@ -8247,32 +8274,9 @@ class StructEditorFrame(ttk.Frame):
         data = self._hex.get_data()
         if not data:
             return None, None, "No ROM loaded."
-        n = len(data)
-        fs = self._ptr_ff_gap_from_var.get().strip()
-        ts = self._ptr_ff_gap_to_var.get().strip()
-        if not fs and not ts:
-            return None, None, None
-        if (fs and not ts) or (not fs and ts):
-            return (
-                None,
-                None,
-                'Enter both “from” and “to”, or leave both empty to search the entire ROM.',
-            )
-        try:
-            lo = int(fs, 0)
-            hi = int(ts, 0)
-        except ValueError:
-            return None, None, "Invalid offset (use decimal or 0x hex)."
-        if GBA_ROM_BASE <= lo <= GBA_ROM_MAX:
-            lo -= GBA_ROM_BASE
-        if GBA_ROM_BASE <= hi <= GBA_ROM_MAX:
-            hi -= GBA_ROM_BASE
-        if lo < 0 or hi >= n:
-            return None, None, f"Offsets must lie within the ROM file (0 … 0x{n - 1:X})."
-        if hi < lo:
-            return None, None, "End offset must be ≥ start offset."
-        # Inclusive end -> half-open [lo, hi + 1)
-        return lo, hi + 1, None
+        return parse_ff_gap_search_window_strings(
+            data, self._ptr_ff_gap_from_var.get(), self._ptr_ff_gap_to_var.get()
+        )
 
     def _apply_pcs_ptr_string_write(
         self, fi: int, new_text: str, *, file_off: Optional[int] = None
@@ -11798,8 +11802,6 @@ class HexEditorFrame(ttk.Frame):
         lo, hi_ex, err = parse_ff_gap_search_window_strings(self._data, fs, ts)
         if err:
             return None, err
-        if lo is None or hi_ex is None:
-            return None, "Repoint-all scan: enter both from and through, or leave both empty."
         return (lo, hi_ex), None
 
     def _c_inject_search_ff_gap_to_inject_offset(self) -> None:
