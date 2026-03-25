@@ -1,4 +1,4 @@
-update readme (todo)
+update readme with TLDR
 redo tools layout (including popping out in own window/movable/resizable tools)
 fix finnicky behaviors
 improve performance when loading tools
