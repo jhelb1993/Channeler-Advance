@@ -260,7 +260,17 @@ High-level capabilities include:
 - Disassembly (**Ctrl+P**), HackMew ASM (**Ctrl+H**; **Linux** insertion path fixed), pseudo-C (**Ctrl+D**), **Ctrl+M** anchor browser.
 - Graphics: sprites, tilemaps, tilesets, palettes; anchor visual browser.
 
-**Rough roadmap / not implemented yet** (non-exhaustive): auto-generated TOML on ROM open, Python scripting interface, complete pret→TOML function/struct/constant conversion, undo, some FireRed-specific editors (trainer teams, overworld sprites, egg moves).
+## To-Do
+
+Planned or wanted work (non-exhaustive):
+
+- **Auto-generate a TOML** for supported games (bootstrap structure from ROM / metadata instead of hand-authored files only).
+- **Fix TOML writing** so saving anchors does not introduce **extra stray lines** or malformed output.
+- **General polish:** reduce finnicky UI behaviors and **improve performance** (loading Tools, large ROMs, etc.).
+- **Tools layout (large):** redesign the Tools side so panes can **pop out into their own windows**, **resize**, and **move** independently (not only the current docked layout).
+- **Python script pane:** support **`.hma`** scripts with a **paste-first** workflow (paste script content, then run / adapt in the Python window).
+- **Undo** support (e.g. **Ctrl+Z** for ROM or tool edits—scope TBD).
+- **Pokémon FireRed–specific editors (not yet built):** **trainer team** editing, **overworld sprite** editing, **egg moves**.
 
 **Not currently planned:** songs, mapping, event scripting, battle/animation/trainer-AI scripting.
 

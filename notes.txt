@@ -1,12 +1,9 @@
-improve performance when loading tools
-more games
-generate toml (other option)
-triple single quotes instead of double quotes
-toml writing extra bug
+update readme (todo)
+redo tools layout (including popping out in own window/movable/resizable tools)
 fix finnicky behaviors
-better tools layout (including movable/resizable tools)
-changes since 0.1.1.3
-update readme (other ygo games, no outdated info, todo)
+improve performance when loading tools
+generate toml (other option)
+toml writing extra bug
 testing
 .hma scripts
 read the code
