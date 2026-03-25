@@ -11250,6 +11250,7 @@ class HexEditorFrame(ttk.Frame):
         self._text_ascii.bind("<Button-4>", lambda e: _scroll_and_sync(-3))
         self._text_ascii.bind("<Button-5>", lambda e: _scroll_and_sync(3))
         self._text_ascii.bind("<Button-1>", self._on_ascii_click)
+        self._text_ascii.bind("<Double-Button-1>", self._on_ascii_double_click)
         self._text_ascii.bind("<B1-Motion>", self._on_ascii_drag)
         self._text_ascii.bind("<KeyPress>", self._on_ascii_key)
 
@@ -19304,6 +19305,76 @@ Format = "`f|u8`[u8 arg0]"
                 end = max(end, fo + 3)
         return (start, end)
 
+    def _double_click_try_pointer_gfx_row(self, off: int) -> bool:
+        """Follow ROM pointers first, then graphics table row / struct gfx selection. Returns True if handled."""
+        # 1) Follow word-aligned GBA ROM pointers first (struct fields, graphics pointer columns, etc.).
+        #    Graphics *table* row selection used to run before this, so double-click on a pointer cell
+        #    only highlighted the blob/row instead of jumping to the target.
+        # 2) Struct gfx hit-test still runs after follow — LZ/Huff spans are conservative/huge and would
+        #    otherwise swallow pointer slots in the same row if pointer follow failed.
+        ptr_start = (off // 4) * 4
+        if self._get_pointer_at_offset(ptr_start) is not None:
+            if self._follow_pointer_at(ptr_start):
+                return True
+        gtr = self._find_graphics_table_row_extent_at_offset(off)
+        if gtr:
+            tri = gtr.get("graphics_table_row")
+            if tri is not None:
+                try:
+                    self.graphics_table_row_var.set(int(tri))
+                except (ValueError, TypeError, tk.TclError):
+                    pass
+            self._select_named_anchor_extent(gtr, cursor_file_off=off)
+            if self._on_pointer_to_named_anchor_cb:
+                snap = dict(gtr)
+                self.after(10, lambda s=snap: self._on_pointer_to_named_anchor_cb(s))
+            return True
+        gfx_struct = self._find_struct_gfx_field_extent_at_offset(off)
+        if gfx_struct:
+            self._select_named_anchor_extent(gfx_struct, cursor_file_off=off)
+            if self._on_pointer_to_named_anchor_cb:
+                snap = dict(gfx_struct)
+                snap["struct_entry_index"] = int(gfx_struct.get("struct_entry_index", 0))
+                self.after(10, lambda s=snap: self._on_pointer_to_named_anchor_cb(s))
+            return True
+        return False
+
+    def _double_click_try_anchor_and_function(self, off: int) -> bool:
+        """NamedAnchor span selection or whole-function selection. Returns True if handled."""
+        anchor_info = self._find_named_anchor_at_offset(off)
+        if anchor_info:
+            tri = anchor_info.get("graphics_table_row")
+            if tri is not None:
+                try:
+                    self.graphics_table_row_var.set(int(tri))
+                except (ValueError, TypeError, tk.TclError):
+                    pass
+            self._select_named_anchor_extent(anchor_info, cursor_file_off=off)
+            if self._on_pointer_to_named_anchor_cb:
+                snap = dict(anchor_info)
+                t = snap.get("type")
+                if t == "struct":
+                    snap["struct_entry_index"] = _struct_row_index_for_file_offset(
+                        bytes(self._data), snap, off
+                    )
+                elif t == "pcs":
+                    snap["pcs_row_index"] = _pcs_row_index_for_file_offset(snap, off)
+                self.after(10, lambda s=snap: self._on_pointer_to_named_anchor_cb(s))
+            return True
+
+        extent = self._find_function_extent(off)
+        if extent is not None:
+            func_start, func_end = extent
+            self._selection_start = func_start
+            self._selection_end = func_end
+            self._cursor_byte_offset = func_start
+            if self._ensure_cursor_visible():
+                self._update_scrollbar()
+            self._refresh_visible()
+            self._update_cursor_display()
+            return True
+        return False
+
     def _on_double_click(self, event: tk.Event) -> str:
         idx = self._text.index(f"@{event.x},{event.y}")
         off = self._index_to_offset(idx)
@@ -19332,70 +19403,39 @@ Format = "`f|u8`[u8 arg0]"
         on_addr_col = cn_i < HEX_DISP_ADDR_END
 
         if not on_addr_col and cn_i >= HEX_DISP_HEX_START:
-            # 1) Graphics *table* rows (incl. pointer-column palettes): row/blob selection before pointer follow.
-            gtr = self._find_graphics_table_row_extent_at_offset(off)
-            if gtr:
-                tri = gtr.get("graphics_table_row")
-                if tri is not None:
-                    try:
-                        self.graphics_table_row_var.set(int(tri))
-                    except (ValueError, TypeError, tk.TclError):
-                        pass
-                self._select_named_anchor_extent(gtr, cursor_file_off=off)
-                if self._on_pointer_to_named_anchor_cb:
-                    snap = dict(gtr)
-                    self.after(10, lambda s=snap: self._on_pointer_to_named_anchor_cb(s))
-                return "break"
-            # 2) Follow .word pointers (struct ptr fields, etc.) before struct gfx hit-test — LZ/Huff gfx spans
-            #    are conservative/huge and would otherwise swallow pointer slots in the same row.
-            ptr_start = (off // 4) * 4
-            if self._get_pointer_at_offset(ptr_start) is not None:
-                if self._follow_pointer_at(ptr_start):
-                    return "break"
-            # 3) Tight gfx/palette field selection inside struct rows (non-table graphics fields).
-            gfx_struct = self._find_struct_gfx_field_extent_at_offset(off)
-            if gfx_struct:
-                self._select_named_anchor_extent(gfx_struct, cursor_file_off=off)
-                if self._on_pointer_to_named_anchor_cb:
-                    snap = dict(gfx_struct)
-                    snap["struct_entry_index"] = int(gfx_struct.get("struct_entry_index", 0))
-                    self.after(10, lambda s=snap: self._on_pointer_to_named_anchor_cb(s))
+            if self._double_click_try_pointer_gfx_row(off):
                 return "break"
 
-        # NamedAnchor PCS / struct / graphics: select span, sync tools to the row under the click
-        anchor_info = self._find_named_anchor_at_offset(off)
-        if anchor_info:
-            tri = anchor_info.get("graphics_table_row")
-            if tri is not None:
-                try:
-                    self.graphics_table_row_var.set(int(tri))
-                except (ValueError, TypeError, tk.TclError):
-                    pass
-            self._select_named_anchor_extent(anchor_info, cursor_file_off=off)
-            if self._on_pointer_to_named_anchor_cb:
-                snap = dict(anchor_info)
-                t = snap.get("type")
-                if t == "struct":
-                    snap["struct_entry_index"] = _struct_row_index_for_file_offset(
-                        bytes(self._data), snap, off
-                    )
-                elif t == "pcs":
-                    snap["pcs_row_index"] = _pcs_row_index_for_file_offset(snap, off)
-                self.after(10, lambda s=snap: self._on_pointer_to_named_anchor_cb(s))
-            return "break"
-
-        extent = self._find_function_extent(off)
-        if extent is not None:
-            func_start, func_end = extent
-            self._selection_start = func_start
-            self._selection_end = func_end
-            self._cursor_byte_offset = func_start
-            if self._ensure_cursor_visible():
-                self._update_scrollbar()
-            self._refresh_visible()
-            self._update_cursor_display()
+        if self._double_click_try_anchor_and_function(off):
             return "break"
         self._on_click(event)
+        return "break"
+
+    def _on_ascii_double_click(self, event: tk.Event) -> str:
+        """Same navigation as the hex pane; default Tk word-select would highlight ASCII instead of following."""
+        idx = self._text_ascii.index(f"@{event.x},{event.y}")
+        off = self._ascii_index_to_offset(idx)
+        if off is None:
+            return "break"
+        self._text_ascii.focus_set()
+        if self._double_click_try_pointer_gfx_row(off):
+            return "break"
+        if self._double_click_try_anchor_and_function(off):
+            return "break"
+        if event.state & 0x1:
+            if self._selection_start is not None and self._selection_end is not None:
+                s, e = self._selection_start, self._selection_end
+                self._selection_start = min(s, e, off)
+                self._selection_end = max(s, e, off)
+            else:
+                self._selection_start = off
+                self._selection_end = off
+        else:
+            self._selection_start = None
+            self._selection_end = None
+        self._cursor_byte_offset = off
+        self._nibble_pos = 0
+        self._update_cursor_display()
         return "break"
 
     def _on_right_click(self, event: tk.Event) -> None:
