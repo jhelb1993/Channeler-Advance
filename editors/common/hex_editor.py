@@ -24,7 +24,7 @@ from tkinter import ttk, filedialog, messagebox
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from editors.common.channeler_script_api import format_run_header, run_user_script
-from editors.common.pcs_string_view import decode_pcs_string_view
+from editors.common.pcs_string_view import decode_pcs_string_view, encode_pcs_string_body
 from editors.common.gba_graphics import (
     GraphicsAnchorSpec,
     build_sprite_payload_for_rom,
@@ -1148,12 +1148,12 @@ _init_pcs_reverse()
 
 
 def encode_pcs_string(text: str, width: int) -> bytearray:
-    """Encode text to PCS bytes, terminated by 0xFF, padded to width with 0x00."""
-    out = bytearray()
-    for c in text:
-        b = _PCS_CHAR_TO_BYTE.get(c)
-        if b is not None:
-            out.append(b)
+    """Encode text to PCS bytes, terminated by 0xFF, padded to width with 0x00.
+
+    Control codes may be written in brackets (see :func:`encode_pcs_string_body` in
+    ``pcs_string_view``), e.g. ``[clear_to 49 FC]``, ``[FONT_SMALL]``, ``[fc 06 00]``.
+    """
+    out = encode_pcs_string_body(text, _PCS_CHAR_TO_BYTE)
     out.append(0xFF)
     while len(out) < width:
         out.append(0x00)
@@ -1396,11 +1396,7 @@ def decode_ascii_slot(raw: bytes) -> str:
 
 def pcs_encoded_payload_length(text: str) -> int:
     """Byte length of PCS encoding: mapped code units + 0xFF terminator (matches :func:`encode_pcs_string`)."""
-    n = 0
-    for c in text:
-        if _PCS_CHAR_TO_BYTE.get(c) is not None:
-            n += 1
-    return n + 1
+    return len(encode_pcs_string_body(text, _PCS_CHAR_TO_BYTE)) + 1
 
 
 def measure_pcs_rom_slot_capacity(data: Any, off: int, max_scan: int = 8192) -> int:

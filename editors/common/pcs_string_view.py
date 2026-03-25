@@ -4,6 +4,9 @@ PCS string *view* decoding for Tools / struct / enum labels (not the hex editor 
 Decodes ``FD`` / ``F8`` / ``F9`` / ``FC`` using ``editors/firered/pokefirered/charmap.txt`` (pret
 pokefirered) when present: ``STRING = FD``, ``COLOR = FC 01``, ``FONT_SMALL = FC 06 00``, ``@ colors``, etc.
 
+Encoding for the PCS edit field uses :func:`encode_pcs_string_body`: bracket commands such as
+``[clear_to 49 FC]``, ``[FONT_SMALL]``, ``[fc 06 00]``, ``[color:red]`` emit the corresponding bytes.
+
 HexManiac-style notes: https://github.com/haven1433/HexManiacAdvance/blob/master/src/HexManiac.Core/Models/Code/pcsReference.txt
 
 The hex editor keeps a simple byte→glyph map; use :func:`decode_pcs_string_view` elsewhere.
@@ -13,7 +16,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # --- Single-byte display (same mapping as hex_editor._init_pcs; ROM-facing glyphs) ---
 _PCS_BYTE: Dict[int, str] = {}
@@ -307,6 +310,276 @@ def _fc_zero_arg_label(sub: int) -> str:
         0x18: "[resume_music]",
     }
     return fb.get(sub, f"[fc_{sub:02x}]")
+
+
+# --- Bracket command encoding (Tools / PCS edit field; charmap-aware) ---
+_ENCODE_MAPS_BUILT = False
+_ENCODE_FC_FULL: Dict[str, bytes] = {}
+_ENCODE_FC_ZERO: Dict[str, bytes] = {}
+_ENCODE_FD: Dict[str, bytes] = {}
+_ENCODE_COLOR_NAME: Dict[str, int] = {}
+_ENCODE_BTN_NAME: Dict[str, int] = {}
+
+
+def _parse_hex_byte(tok: str) -> Optional[int]:
+    t = tok.strip()
+    if not t:
+        return None
+    if t.lower().startswith("0x"):
+        t = t[2:]
+    if len(t) > 2:
+        return None
+    try:
+        v = int(t, 16)
+    except ValueError:
+        return None
+    if not (0 <= v <= 0xFF):
+        return None
+    return v
+
+
+def _parse_color_token(tok: str) -> Optional[int]:
+    _ensure_encode_maps()
+    t = tok.strip()
+    if not t:
+        return None
+    hx = _parse_hex_byte(t)
+    if hx is not None:
+        return hx
+    return _ENCODE_COLOR_NAME.get(t.lower().replace("-", "_"))
+
+
+def _ensure_encode_maps() -> None:
+    global _ENCODE_MAPS_BUILT
+    if _ENCODE_MAPS_BUILT:
+        return
+    _load_charmap_txt()
+    _ENCODE_FC_FULL.clear()
+    _ENCODE_FC_ZERO.clear()
+    _ENCODE_FD.clear()
+    _ENCODE_COLOR_NAME.clear()
+    _ENCODE_BTN_NAME.clear()
+
+    for (a, b), lab in _CHARMAP_FC_PAIR.items():
+        name = lab.strip("[]").lower()
+        _ENCODE_FC_FULL[name] = bytes([0xFC, a, b])
+
+    for sub, raw in _CHARMAP_FC_LABEL.items():
+        if _fc_arg_count(sub) == 0:
+            _ENCODE_FC_ZERO[raw.lower()] = bytes([0xFC, sub])
+
+    for second, lab in _CHARMAP_FD.items():
+        name = lab.strip("[]").lower()
+        _ENCODE_FD[name] = bytes([0xFD, second])
+
+    for idx, cname in _CHARMAP_COLOR.items():
+        _ENCODE_COLOR_NAME[cname.lower()] = idx
+    for idx, cname in _COLOR_FALLBACK.items():
+        _ENCODE_COLOR_NAME.setdefault(cname.lower(), idx)
+
+    for i, nm in enumerate(_BTN_NAMES):
+        _ENCODE_BTN_NAME[nm.lower()] = i
+
+    _ENCODE_MAPS_BUILT = True
+
+
+def _encode_bracket_inner(inner: str) -> Optional[bytes]:
+    """Parse ``…`` inside ``[…]`` as a PCS control sequence; ``None`` = not a recognized command."""
+    _ensure_encode_maps()
+    s = inner.strip()
+    if not s:
+        return None
+
+    mc = re.match(r"^(color|highlight|shadow)\s*:\s*(\S+)\s*$", s, re.I)
+    if mc:
+        which = mc.group(1).lower()
+        sub = {"color": 0x01, "highlight": 0x02, "shadow": 0x03}[which]
+        v = _parse_color_token(mc.group(2))
+        if v is not None:
+            return bytes([0xFC, sub, v])
+        return None
+
+    for pat, sub_b in (
+        (r"^pause\s*:\s*([0-9A-Fa-f]{1,2})\s*$", 0x08),
+        (r"^palette\s*:\s*([0-9A-Fa-f]{1,2})\s*$", 0x05),
+        (r"^min_letter_spacing\s*:\s*([0-9A-Fa-f]{1,2})\s*$", 0x14),
+        (r"^font\s*:\s*([0-9A-Fa-f]{1,2})\s*$", 0x06),
+    ):
+        mm = re.match(pat, s, re.I)
+        if mm:
+            v = _parse_hex_byte(mm.group(1))
+            if v is not None:
+                return bytes([0xFC, sub_b, v])
+            return None
+
+    mb = re.match(r"^btn\s*:\s*(\S+)\s*$", s, re.I)
+    if mb:
+        t = mb.group(1).strip()
+        bid = _parse_hex_byte(t)
+        if bid is None:
+            bid = _ENCODE_BTN_NAME.get(t.lower())
+        if bid is not None and 0 <= bid <= 0xFF:
+            return bytes([0xF8, bid])
+        return None
+
+    parts = [p for p in re.split(r"\s+", s) if p]
+    if not parts:
+        return None
+    cmd = parts[0].lower()
+
+    if len(parts) == 1:
+        if cmd in _ENCODE_FC_FULL:
+            return _ENCODE_FC_FULL[cmd]
+        if cmd in _ENCODE_FC_ZERO:
+            return _ENCODE_FC_ZERO[cmd]
+        if cmd in _ENCODE_FD:
+            return _ENCODE_FD[cmd]
+        if cmd == "dynamic":
+            return b"\xF7"
+        if cmd == "newline":
+            return b"\xFE"
+        if cmd == "linefeed":
+            return b"\xFA"
+        if cmd == "paragraph":
+            return b"\xFB"
+        return None
+
+    if cmd == "clear_to" and len(parts) == 3:
+        b1, b2 = _parse_hex_byte(parts[1]), _parse_hex_byte(parts[2])
+        if b1 is not None and b2 is not None:
+            return bytes([0xFC, 0x13, b1, b2])
+        return None
+
+    if cmd == "color" and len(parts) == 2:
+        v = _parse_color_token(parts[1])
+        if v is not None:
+            return bytes([0xFC, 0x01, v])
+        return None
+    if cmd == "highlight" and len(parts) == 2:
+        v = _parse_color_token(parts[1])
+        if v is not None:
+            return bytes([0xFC, 0x02, v])
+        return None
+    if cmd == "shadow" and len(parts) == 2:
+        v = _parse_color_token(parts[1])
+        if v is not None:
+            return bytes([0xFC, 0x03, v])
+        return None
+
+    if cmd == "color_highlight_shadow" and len(parts) == 4:
+        a, b, c = _parse_hex_byte(parts[1]), _parse_hex_byte(parts[2]), _parse_hex_byte(parts[3])
+        if a is not None and b is not None and c is not None:
+            return bytes([0xFC, 0x04, a, b, c])
+        return None
+
+    if cmd == "palette" and len(parts) == 2:
+        v = _parse_hex_byte(parts[1])
+        if v is not None:
+            return bytes([0xFC, 0x05, v])
+        return None
+
+    if cmd == "font" and len(parts) == 2:
+        v = _parse_hex_byte(parts[1])
+        if v is not None:
+            return bytes([0xFC, 0x06, v])
+        return None
+
+    if cmd == "pause" and len(parts) == 2:
+        v = _parse_hex_byte(parts[1])
+        if v is not None:
+            return bytes([0xFC, 0x08, v])
+        return None
+
+    if cmd == "play_bgm" and len(parts) == 3:
+        a, b = _parse_hex_byte(parts[1]), _parse_hex_byte(parts[2])
+        if a is not None and b is not None:
+            return bytes([0xFC, 0x0B, a, b])
+        return None
+
+    if cmd == "play_se" and len(parts) == 3:
+        a, b = _parse_hex_byte(parts[1]), _parse_hex_byte(parts[2])
+        if a is not None and b is not None:
+            return bytes([0xFC, 0x10, a, b])
+        return None
+
+    if cmd == "min_letter_spacing" and len(parts) == 2:
+        v = _parse_hex_byte(parts[1])
+        if v is not None:
+            return bytes([0xFC, 0x14, v])
+        return None
+
+    if cmd == "fd" and len(parts) == 2:
+        v = _parse_hex_byte(parts[1])
+        if v is not None:
+            return bytes([0xFD, v])
+        return None
+
+    if cmd == "fc" and len(parts) >= 2:
+        sub = _parse_hex_byte(parts[1])
+        if sub is None:
+            return None
+        ac = _fc_arg_count(sub)
+        if len(parts) != 2 + ac:
+            return None
+        args: List[int] = []
+        for j in range(ac):
+            x = _parse_hex_byte(parts[2 + j])
+            if x is None:
+                return None
+            args.append(x)
+        return bytes([0xFC, sub, *args])
+
+    if cmd == "f9" and len(parts) == 2:
+        v = _parse_hex_byte(parts[1])
+        if v is not None:
+            return bytes([0xF9, v])
+        return None
+
+    if cmd == "f8" and len(parts) == 2:
+        v = _parse_hex_byte(parts[1])
+        if v is not None:
+            return bytes([0xF8, v])
+        return None
+
+    return None
+
+
+def encode_pcs_string_body(text: str, char_to_byte: Dict[str, int]) -> bytearray:
+    """
+    Encode user text to PCS bytes (no ``0xFF`` terminator).
+
+    Literal characters use ``char_to_byte`` (same reverse map as the hex editor). Control codes may be
+    written in brackets, e.g. ``[clear_to 49 FC]``, ``[FONT_SMALL]``, ``[fc 06 00]``, ``[color:red]``.
+    """
+    out = bytearray()
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "[":
+            b = char_to_byte.get(text[i])
+            if b is not None:
+                out.append(b)
+            i += 1
+            continue
+        j = text.find("]", i + 1)
+        if j < 0:
+            b = char_to_byte.get("[")
+            if b is not None:
+                out.append(b)
+            i += 1
+            continue
+        inner = text[i + 1 : j]
+        eb = _encode_bracket_inner(inner)
+        if eb is not None:
+            out.extend(eb)
+        else:
+            for k in range(i + 1, j):
+                c = text[k]
+                bb = char_to_byte.get(c)
+                if bb is not None:
+                    out.append(bb)
+        i = j + 1
+    return out
 
 
 def decode_pcs_string_view(data: bytes) -> str:

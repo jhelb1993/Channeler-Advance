@@ -1,4 +1,3 @@
-fix string expanding
 fix repointing without prompting for free space offset
 allow the user to edit pointers to text
 fix invalid unicode symbols on linux
@@ -8,9 +7,9 @@ generate toml (other option)
 triple single quotes instead of double quotes
 toml writing extra bug
 fix finnicky behaviors
-update readme (other ygo games, no outdated info, todo)
 better tools layout (including movable/resizable tools)
 changes since 0.1.1.3
+update readme (other ygo games, no outdated info, todo)
 testing
 .hma scripts
 read the code
