@@ -48,6 +48,7 @@ _HEX_EDITOR_FLAT_NAMES = (
     "normalize_named_anchor_lookup_key",
     "normalize_named_anchor_format",
     "encode_pcs_string",
+    "decode_pcs_string_view",
     "decode_ascii_slot",
     "thumb2_bl_immediate_target_gba",
 )

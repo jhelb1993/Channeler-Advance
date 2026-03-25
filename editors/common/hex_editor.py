@@ -24,6 +24,7 @@ from tkinter import ttk, filedialog, messagebox
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from editors.common.channeler_script_api import format_run_header, run_user_script
+from editors.common.pcs_string_view import decode_pcs_string_view
 from editors.common.gba_graphics import (
     GraphicsAnchorSpec,
     build_sprite_payload_for_rom,
@@ -1003,15 +1004,6 @@ def _struct_entry_label_enum_field_source(
             "enum_delta": int(delta),
         }
     return None
-
-
-def _decode_pcs_raw_bytes(raw: bytes) -> str:
-    chars: List[str] = []
-    for b in raw:
-        if b == 0xFF:
-            break
-        chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
-    return "".join(chars)
 
 
 def _struct_anchor_search_blob(a: Dict[str, Any], lists_map: Dict[str, Dict[int, str]]) -> str:
@@ -3195,7 +3187,7 @@ class PcsStringTableFrame(ttk.Frame):
                 else:
                     enc = encode_pcs_string(text, info["width"])
                     parts = enc[: enc.index(0xFF)] if 0xFF in enc else enc
-                    disp = "".join(_PCS_BYTE_TO_CHAR.get(b, ".") for b in parts)
+                    disp = decode_pcs_string_view(bytes(parts))
                 self._hex.write_bytes_at(off, enc)
                 self._tree.set(self._edit_iid, "val", disp)
             except (ValueError, TypeError, KeyError):
@@ -3221,7 +3213,7 @@ class PcsStringTableFrame(ttk.Frame):
                 else:
                     enc = encode_pcs_string(text, info["width"])
                     parts = enc[: enc.index(0xFF)] if 0xFF in enc else enc
-                    disp = "".join(_PCS_BYTE_TO_CHAR.get(b, ".") for b in parts)
+                    disp = decode_pcs_string_view(bytes(parts))
                 self._hex.write_bytes_at(off, enc)
                 self._tree.set(self._edit_iid, "val", disp)
             except (ValueError, TypeError, KeyError):
@@ -3331,12 +3323,7 @@ class PcsStringTableFrame(ttk.Frame):
             if enc == "ascii":
                 disp = decode_ascii_slot(chunk)
             else:
-                chars = []
-                for b in chunk:
-                    if b == 0xFF:
-                        break
-                    chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
-                disp = "".join(chars)
+                disp = decode_pcs_string_view(chunk)
             self._tree.insert("", tk.END, values=(str(i), disp), iid=f"pcs_{i}")
 
     def _reset_pcs_row_find_ui(self) -> None:
@@ -9418,13 +9405,7 @@ class StructEditorFrame(ttk.Frame):
         chunk = bytes(data[off : off + width])
         if pcs_info.get("encoding") == "ascii":
             return decode_ascii_slot(chunk)
-        chars = []
-        for i in range(width):
-            b = data[off + i]
-            if b == 0xFF:
-                break
-            chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
-        return "".join(chars)
+        return decode_pcs_string_view(chunk)
 
     def _update_entry_index_name_label(self) -> None:
         """Show PCS or ``[[List]]`` label for the current entry when ``]count`` matches a PCS table or List name."""
@@ -10058,12 +10039,7 @@ class StructEditorFrame(ttk.Frame):
         if ftype == "gfx_palette_hint":
             return f"(default palette) {fd.get('palette_anchor_name', '')}"
         if ftype == "pcs":
-            chars = []
-            for b in raw:
-                if b == 0xFF:
-                    break
-                chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
-            return "".join(chars)
+            return decode_pcs_string_view(raw)
         if ftype == "ascii":
             return decode_ascii_slot(raw)
         if ftype == "pcs_ptr":
@@ -10135,15 +10111,9 @@ class StructEditorFrame(ttk.Frame):
         data = self._hex.get_data()
         if not data or file_off < 0 or file_off >= len(data):
             return ""
-        chars = []
-        for i in range(256):
-            if file_off + i >= len(data):
-                break
-            b = data[file_off + i]
-            if b == 0xFF:
-                break
-            chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
-        return "".join(chars)
+        end = min(len(data), file_off + 256)
+        chunk = bytes(data[file_off:end])
+        return decode_pcs_string_view(chunk)
 
     def _read_ascii_at_pointer(self, file_off: int) -> str:
         """Latin-1 text at ``file_off`` up to first ``0x00`` (``field<''>`` pointer fields)."""
@@ -10189,13 +10159,7 @@ class StructEditorFrame(ttk.Frame):
                 if info.get("encoding") == "ascii":
                     preview = decode_ascii_slot(chunk)
                 else:
-                    chars = []
-                    for i in range(info["width"]):
-                        b = data[entry_off + i]
-                        if b == 0xFF:
-                            break
-                        chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
-                    preview = "".join(chars)
+                    preview = decode_pcs_string_view(chunk)
                 return f"{value} ({preview})"
         for sa in self._hex.get_struct_anchors():
             if normalize_named_anchor_lookup_key(str(sa["name"])) != base_key:
@@ -15884,16 +15848,8 @@ Format = "`f|u8`[u8 arg0]"
         data = self.get_data()
         if not data or file_off < 0:
             return ""
-        chars: List[str] = []
-        for i in range(limit):
-            p = file_off + i
-            if p >= len(data):
-                break
-            b = data[p]
-            if b == 0xFF:
-                break
-            chars.append(_PCS_BYTE_TO_CHAR.get(b, "."))
-        return "".join(chars)
+        end = min(len(data), file_off + limit)
+        return decode_pcs_string_view(bytes(data[file_off:end]))
 
     def _read_ascii_string_at_file_off(self, file_off: int, limit: int = 256) -> str:
         data = self.get_data()
@@ -15927,7 +15883,7 @@ Format = "`f|u8`[u8 arg0]"
         raw = bytes(data[roff : roff + fsz])
         t = fld["type"]
         if t == "pcs":
-            s = _decode_pcs_raw_bytes(raw)
+            s = decode_pcs_string_view(raw)
             return s if s else None
         if t == "ascii":
             s = decode_ascii_slot(raw)

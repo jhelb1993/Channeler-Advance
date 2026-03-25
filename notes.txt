@@ -1,13 +1,16 @@
+complete pcs macros (using charmap.txt as a reference)
+fix pointers not following
+fix string expanding
+fix repointing without prompting for free space offset
 fix invalid unicode symbols on linux
-pcs macros
 improve performance when loading tools
-horizontally resizable tools
 more games
 generate toml (other option)
 triple single quotes instead of double quotes
 toml writing extra bug
 fix finnicky behaviors
 update readme (other ygo games, no outdated info, todo)
+better tools layout (including horizontally resizable tools)
 changes since 0.1.1.3
 testing
 .hma scripts
