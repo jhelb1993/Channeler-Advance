@@ -119,7 +119,7 @@ class ChannelerScriptAPI:
 
     @property
     def toml(self) -> Dict[str, Any]:
-        """Shallow copy of loaded TOML tables (FunctionAnchors, NamedAnchors, …)."""
+        """Shallow copy of loaded TOML tables (FunctionAnchors, NamedAnchors, ...)."""
         return dict(self._hex._toml_data) if self._hex._toml_data else {}
 
     @property
@@ -146,7 +146,7 @@ class ChannelerScriptAPI:
         return merged.get(gba_addr & ~1)
 
     def label_for_rom_pointer_word(self, word_le: int) -> str:
-        """Format a 32-bit little-endian ROM pointer word as ``Name`` or ``0x…`` (UI-style)."""
+        """Format a 32-bit little-endian ROM pointer word as ``Name`` or ``0x...`` (UI-style)."""
         if not (GBA_ROM_BASE <= word_le <= GBA_ROM_MAX):
             return f"0x{word_le & 0xFFFFFFFF:08X}"
         lab = self.label_for_gba(word_le)

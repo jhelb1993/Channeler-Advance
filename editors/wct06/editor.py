@@ -45,7 +45,7 @@ class WCT06Editor:
         )
         file_menu.add_command(label="Save", command=self._on_save, state=tk.DISABLED)
         file_menu.add_command(label="Save As...", command=self._on_save_as, state=tk.DISABLED)
-        file_menu.add_command(label="Edit Matched Words…", command=self._on_edit_matched_words, state=tk.DISABLED)
+        file_menu.add_command(label="Edit Matched Words...", command=self._on_edit_matched_words, state=tk.DISABLED)
         file_menu.add_separator()
         file_menu.add_command(label="Import Sprite...", command=self._on_file_import_sprite, state=tk.DISABLED)
         file_menu.add_command(
@@ -110,7 +110,7 @@ class WCT06Editor:
             "Import YDK deck...",
         ):
             self._file_menu.entryconfig(_imp, state=state)
-        self._file_menu.entryconfig("Edit Matched Words…", state=state)
+        self._file_menu.entryconfig("Edit Matched Words...", state=state)
         self._refresh_banlist_import_menu_state()
         if has_file and self._tools_shell:
             self._tools_shell.refresh_anchors()
@@ -202,5 +202,5 @@ class WCT06Editor:
             "Ctrl+T — show/hide tools pane\n"
             "Ctrl+Shift+1/2/3 — toggle Table / Struct / Graphics slot\n"
             "Ctrl+M — Anchors browser: double-click a table/struct leaf to open it in Tools\n"
-            "Goto box: NamedAnchor name, file offset, or 0x08… address opens the matching tool when valid",
+            "Goto box: NamedAnchor name, file offset, or 0x08... address opens the matching tool when valid",
         )

@@ -227,7 +227,7 @@ GBA_ROM_MAX = 0x09FFFFFF  # addresses > this are not ROM code pointers; treat as
 
 
 def _hackmew_thumb_leading_align_bytes(rom_file_offset: int) -> int:
-    """Bytes the assembler inserts after ``.org`` + ``.align 2`` so the first user Thumb insn is 4-byte aligned (…0/4/8/C)."""
+    """Bytes the assembler inserts after ``.org`` + ``.align 2`` so the first user Thumb insn is 4-byte aligned (...0/4/8/C)."""
     rom = (GBA_ROM_BASE + rom_file_offset) & 0xFFFFFFFF
     m = rom & 3
     return (4 - m) % 4
@@ -428,7 +428,7 @@ _CFRU_REALPOINT_IGNORE_FILE_OFFS = {0x3986C0, 0x3986EC, 0xDABDF0}
 C_INJECT_PATCHES_TEMPLATE = """### hooks
 # Each line: function_name  hook_location  register
 # function_name = injected symbol: channeler_inject / inject, any T/t symbol from last compile (nm on ELF), or pokefirered.sym name
-# hook_location = GBA 0x08…… or file offset; register = 0–7 (ldr rN, [pc] / bx chain)
+# hook_location = GBA 0x08...... or file offset; register = 0–7 (ldr rN, [pc] / bx chain)
 # Example (aligned hook site, 8 bytes):
 # channeler_inject  0x08040000  0
 
@@ -448,15 +448,15 @@ C_INJECT_PATCHES_TEMPLATE = """### hooks
 CHANNELER_SCRIPT_TEMPLATE = """# In-tool script (Ctrl+Shift+Enter). API: ch / channeler
 #  Why here: ch reads/writes the ROM open in this window (+ TOML); a .py on disk must reopen the .gba.
 #  ch.log("msg")          - append to output pane
-#  ch.toml                - copy of loaded TOML dict (FunctionAnchors / NamedAnchors / …)
+#  ch.toml                - copy of loaded TOML dict (FunctionAnchors / NamedAnchors / ...)
 #  ch.resolve("name")      - (file_offset|None, err) for Goto / NamedAnchor / ]count [[List]] name
 #  ch.read_u32_le(off)     ch.write_bytes(off, bytes)
 #  ch.label_for_gba(0x08001234)  - merged pokefirered.sym + TOML name, or None
 #  ch.label_for_rom_pointer_word(w)  - word as symbol or hex
 #  ch.classify_gba(addr)   - "rom" | "ewram" | "iwram" | "other"
 #  ch.sym_name_to_addr()   full pokefirered.sym map
-#  GBA_ROM_BASE, GBA_ROM_MAX, GBA_EWRAM_* … in namespace
-#  hex_editor, gba_graphics - full modules; also common names at top level (parse_rom_file_offset, …)
+#  GBA_ROM_BASE, GBA_ROM_MAX, GBA_EWRAM_* ... in namespace
+#  hex_editor, gba_graphics - full modules; also common names at top level (parse_rom_file_offset, ...)
 #  Optional: from hex_editor import SomeSymbol  - works like normal Python
 
 ch.log("Hello from Channeler script")
@@ -583,7 +583,7 @@ GBA_EWRAM_END = 0x0203FFFF
 GBA_IWRAM_START = 0x03000000
 GBA_IWRAM_END = 0x03007FFF
 BYTES_PER_ROW = 16
-# Hex pane text layout: "RRRRRRRR  " (10) + caret strip (16) + "  " (2) + hex pairs…
+# Hex pane text layout: "RRRRRRRR  " (10) + caret strip (16) + "  " (2) + hex pairs...
 HEX_DISP_ADDR_END = 10
 HEX_DISP_CARET_START = 10
 HEX_DISP_CARET_END = 26  # exclusive
@@ -664,14 +664,14 @@ def _graphics_anchor_combo_display(info: Dict[str, Any]) -> str:
             if info.get("graphics_table_pointer_column"):
                 return (
                     f"{name}{_GFX_COMBO_DISPLAY_SEP}"
-                    f"{n} pointers to palettes (decode ucp8… at *ptr), index from [[List]] {ref}"
+                    f"{n} pointers to palettes (decode ucp8... at *ptr), index from [[List]] {ref}"
                 )
             return (
                 f"{name}{_GFX_COMBO_DISPLAY_SEP}"
-                f"{n} palette rows (each [ucp8…] blob), index from [[List]] {ref}"
+                f"{n} palette rows (each [ucp8...] blob), index from [[List]] {ref}"
             )
         if info.get("graphics_table_pointer_column"):
-            return f"{name}{_GFX_COMBO_DISPLAY_SEP}{n} pointers to palettes (ucp8…)"
+            return f"{name}{_GFX_COMBO_DISPLAY_SEP}{n} pointers to palettes (ucp8...)"
         return f"{name}{_GFX_COMBO_DISPLAY_SEP}palette table ({n} rows)"
     if ref:
         return f"{name}{_GFX_COMBO_DISPLAY_SEP}{n} rows via {ref}"
@@ -690,7 +690,7 @@ def _graphics_table_blob_file_off(
     info: Dict[str, Any], table_row_idx: int, rom: Optional[bytes] = None
 ) -> Tuple[int, str]:
     """ROM file offset for one row of a graphics table. LZ/Huff rows have no fixed stride in ROM.
-    Pointer palette tables (``palette<`ucp8…`>`` rows) resolve the GBA .word at ``base + row*4``."""
+    Pointer palette tables (``palette<`ucp8...`>`` rows) resolve the GBA .word at ``base + row*4``."""
     base = int(info["base_off"])
     if not info.get("graphics_table"):
         return base, ""
@@ -707,7 +707,7 @@ def _graphics_table_blob_file_off(
             w = int.from_bytes(rom[ptr_slot : ptr_slot + 4], "little")
             return base, (
                 f"Pointer table row {table_row_idx}: 0x{w:08X} at file 0x{ptr_slot:X} "
-                "is not a valid ROM pointer (0x08…… / 0x09……).\n"
+                "is not a valid ROM pointer (0x08...... / 0x09......).\n"
             )
         return tgt, ""
     if info.get("graphics_table_compressed_rows"):
@@ -805,7 +805,7 @@ def _repoint_rom_for_moved_byte_range(
     """
     Data in ``[src_lo, src_hi)`` has been logically moved to ``[new_lo, new_lo + (src_hi - src_lo))``.
 
-    - Every word-aligned ROM pointer (0x08…… / 0x09……) whose target file offset lies in
+    - Every word-aligned ROM pointer (0x08...... / 0x09......) whose target file offset lies in
       ``[src_lo, src_hi)`` is adjusted by ``(new_lo - src_lo)``.
     - If ``include_bl``, every Thumb-2 ``BL`` whose target lies in that range is re-encoded to the new target.
 
@@ -874,7 +874,7 @@ def _repoint_rom_for_moved_byte_range(
 
 
 def _toml_named_anchor_address_hex_string(file_offset: int) -> str:
-    """Format a ROM **file** offset for ``[[NamedAnchors]].Address`` (``0x…`` hex, no ``0x08`` GBA prefix)."""
+    """Format a ROM **file** offset for ``[[NamedAnchors]].Address`` (``0x...`` hex, no ``0x08`` GBA prefix)."""
     fo = int(file_offset)
     if fo < 0:
         raise ValueError("ROM file offset must be non-negative")
@@ -895,7 +895,7 @@ def _toml_address_value_to_file_offset(addr: Any) -> Optional[int]:
 
 
 def _normalize_toml_address_fields_to_hex_strings(toml_data: Dict[str, Any]) -> None:
-    """Normalize ``Address`` on anchor-like tables to canonical ``0x…`` string form before writing TOML."""
+    """Normalize ``Address`` on anchor-like tables to canonical ``0x...`` string form before writing TOML."""
     for key in ("NamedAnchors", "MatchedWords", "FunctionAnchors"):
         rows = toml_data.get(key)
         if not isinstance(rows, list):
@@ -913,7 +913,7 @@ def _normalize_toml_address_fields_to_hex_strings(toml_data: Dict[str, Any]) -> 
 
 
 def _toml_text_unquote_address_hex_literals(text: str) -> str:
-    """Turn ``Address = \"0x…\"`` into ``Address = 0x…`` (valid TOML hex integers, no quotes)."""
+    """Turn ``Address = \"0x...\"`` into ``Address = 0x...`` (valid TOML hex integers, no quotes)."""
     return re.sub(
         r'^(\s*)Address\s*=\s*"0x([0-9A-Fa-f]+)"\s*$',
         r"\1Address = 0x\2",
@@ -1172,10 +1172,10 @@ def encode_ascii_slot(text: str, width: int) -> bytearray:
 
 
 def _normalize_offset_padding_dual_ydeck_main_extra(t: str) -> str:
-    """Expand ``offset<padding:::: main: `ydk`…[card:L]/main extra: `ydk`…[card:L]/extra>`` into a parseable layout.
+    """Expand ``offset<padding:::: main: `ydk`...[card:L]/main extra: `ydk`...[card:L]/extra>`` into a parseable layout.
 
     Inserts ``offset<>`` (4-byte pointer column) and lays out padding, lengths, and YDK blobs under ``*offset``
-    (``padding@offset+0``, ``maindeck<*offset+10+…>``, etc.) so ROM reads follow the row pointer before fields.
+    (``padding@offset+0``, ``maindeck<*offset+10+...>``, etc.) so ROM reads follow the row pointer before fields.
     The sugar form is not bracket-safe for :func:`_parse_struct_fields` (outer ``]`` matches too early).
     On-disk TOML can keep the sugar spelling."""
     pat = re.compile(
@@ -1199,7 +1199,7 @@ def _normalize_offset_padding_dual_ydeck_main_extra(t: str) -> str:
 def _normalize_offset_angle_open_bracket_before_ydk(t: str) -> str:
     """Insert ``[`` after ``word<`` when a `` `ydk` `` deck inner omits it (``offset<``, ``maindeck<``, etc.).
 
-    Valid nested-array form is ``name<[`ydk`Anchor[card:List]…``; TOML often has ``offset<`ydk`…`` with no
+    Valid nested-array form is ``name<[`ydk`Anchor[card:List]...``; TOML often has ``offset<`ydk`...`` with no
     ``[`` between ``<`` and the backticks, which breaks bracket matching for the outer struct."""
     return re.sub(
         r"(\w+)<(?!\[)\s*(`ydk`)",
@@ -1214,7 +1214,7 @@ def _normalize_offset_inner_card_before_count_slash(t: str) -> str:
 
     Wrong: ``[card:ListName/countField>`` - no ``]`` between the list name and ``/``.
     Right: ``[card:ListName]/countField>`` - must **not** add another ``]`` when that ``]`` is already present
-    (otherwise ``…[card:…]/count>`` becomes ``…[card:…]]/count>`` and breaks nested ``pack<[…/cardamount>`` layouts).
+    (otherwise ``...[card:...]/count>`` becomes ``...[card:...]]/count>`` and breaks nested ``pack<[.../cardamount>`` layouts).
     """
     return re.sub(
         r"(\[card\s*:\s*[\w.]+)\s*/(\w+)>",
@@ -1225,10 +1225,10 @@ def _normalize_offset_inner_card_before_count_slash(t: str) -> str:
 
 
 def _normalize_ydk_wrapper_close_before_count_slash(t: str) -> str:
-    """Close the ``[`` opened before `` `ydk`Anchor`` when TOML has ``…[card:List]/count>`` with only one ``]``.
+    """Close the ``[`` opened before `` `ydk`Anchor`` when TOML has ``...[card:List]/count>`` with only one ``]``.
 
     Valid nested form is ``deck<[`ydk`data.cards.passwords[card:cardnumbers]]/40>`` — two ``]`` before ``/`` (inner
-    list + ydk wrapper). Common shorthand omits the wrapper ``]``: ``…[card:cardnumbers]/40>``."""
+    list + ydk wrapper). Common shorthand omits the wrapper ``]``: ``...[card:cardnumbers]/40>``."""
     return re.sub(
         r"(`ydk`[a-zA-Z0-9_.]+)(\[card\s*:\s*[\w.]+\s*\])/(\w+)\s*>",
         r"\1\2]/\3>",
@@ -1240,13 +1240,13 @@ def _normalize_ydk_wrapper_close_before_count_slash(t: str) -> str:
 def _normalize_ydk_deck_struct_shorthand_format(t: str) -> str:
     """Expand minimal `` `ydk` `` deck lines so :func:`_parse_struct_fields` accepts them.
 
-    * `` `ydk`anchor[card:List]N`` (no outer brackets) - common in TOML; struct loader requires ``[…]N``.
+    * `` `ydk`anchor[card:List]N`` (no outer brackets) - common in TOML; struct loader requires ``[...]N``.
     * ``[`ydk`anchor[card:List]!HEX>]N`` - same idea with an explicit ``!`` terminator hex (ignored for layout).
 
     Both normalize to ``[card:List]N``: **N** rows of **u16** ``card`` slots with the given ``[[List]]`` enum - the
     password table name stays only in the **raw** Format (for YDK import / password lookup), not in this expansion.
 
-    For a pointer-based deck blob (``offset<… main: …``), write the full ``offset<…>`` form in TOML instead of this shorthand.
+    For a pointer-based deck blob (``offset<... main: ...``), write the full ``offset<...>`` form in TOML instead of this shorthand.
     """
     s = str(t or "").strip()
     if not s:
@@ -1271,7 +1271,7 @@ def _normalize_ydk_deck_struct_shorthand_format(t: str) -> str:
 
 
 def _normalize_ban_deck_struct_shorthand_format(t: str) -> str:
-    """Strip `` `ban` `` (+ optional password-anchor token) so ``[card:… copies:…]count`` parses as a struct table."""
+    """Strip `` `ban` `` (+ optional password-anchor token) so ``[card:... copies:...]count`` parses as a struct table."""
     s = str(t or "").strip()
     if not s.startswith("`ban`"):
         return s
@@ -1378,7 +1378,7 @@ def _struct_seq_parallel_eligible(fields: List[Dict[str, Any]]) -> Optional[str]
 
 
 def normalize_named_anchor_format(raw: Any) -> str:
-    """Whitespace-strip; expand ``[…]!HEX`` terminator shorthand and `` `ban` `` / `` `ydk` `` deck lines for struct NamedAnchors."""
+    """Whitespace-strip; expand ``[...]!HEX`` terminator shorthand and `` `ban` `` / `` `ydk` `` deck lines for struct NamedAnchors."""
     t = _strip_reshef_struct_format_prefix(str(raw or "").strip())
     t = _strip_seq_struct_format_prefix(t)
     t = _normalize_shorthand_bracket_terminator_format(t)
@@ -1508,9 +1508,9 @@ def parse_ff_gap_search_window_strings(
     * **Both empty** → ``(None, None, None)`` — search the whole ROM (no window).
     * **From only** — half-open ``[lo, len(rom))``.
     * **Through only** — inclusive end ``hi`` → half-open ``[0, hi + 1)``.
-    * **Both** — inclusive ``from … through`` → half-open ``[lo, hi + 1)``.
+    * **Both** — inclusive ``from ... through`` → half-open ``[lo, hi + 1)``.
 
-    GBA addresses ``0x08……`` are accepted and converted to file offsets.
+    GBA addresses ``0x08......`` are accepted and converted to file offsets.
     """
     if not data:
         return None, None, "No ROM loaded."
@@ -1531,7 +1531,7 @@ def parse_ff_gap_search_window_strings(
         except ValueError:
             return None, None, "Invalid offset (use decimal or 0x hex)."
         if lo < 0 or hi >= n:
-            return None, None, f"Offsets must lie within the ROM file (0 … 0x{n - 1:X})."
+            return None, None, f"Offsets must lie within the ROM file (0 ... 0x{n - 1:X})."
         if hi < lo:
             return None, None, "End offset must be ≥ start offset."
         return lo, hi + 1, None
@@ -1542,7 +1542,7 @@ def parse_ff_gap_search_window_strings(
         except ValueError:
             return None, None, "Invalid offset (use decimal or 0x hex)."
         if lo < 0 or lo >= n:
-            return None, None, f"Start offset must lie within the ROM file (0 … 0x{n - 1:X})."
+            return None, None, f"Start offset must lie within the ROM file (0 ... 0x{n - 1:X})."
         return lo, n, None
 
     # through only
@@ -1551,7 +1551,7 @@ def parse_ff_gap_search_window_strings(
     except ValueError:
         return None, None, "Invalid offset (use decimal or 0x hex)."
     if hi < 0 or hi >= n:
-        return None, None, f"End offset must lie within the ROM file (0 … 0x{n - 1:X})."
+        return None, None, f"End offset must lie within the ROM file (0 ... 0x{n - 1:X})."
     return 0, hi + 1, None
 
 
@@ -2072,8 +2072,8 @@ class _RepointBytesDialog:
             f,
             text=(
                 f"Move {self._need} byte(s) from file 0x{self._src_lo:08X}–0x{self._src_hi - 1:08X} "
-                f"(GBA 0x{self._src_lo + GBA_ROM_BASE:08X} …).\n\n"
-                "All word-aligned ROM pointers (0x08…… / 0x09……) that target any address in this range "
+                f"(GBA 0x{self._src_lo + GBA_ROM_BASE:08X} ...).\n\n"
+                "All word-aligned ROM pointers (0x08...... / 0x09......) that target any address in this range "
                 "will be adjusted. Optionally, Thumb-2 BL instructions that branch into this range are re-encoded.\n\n"
                 "Pick a **destination file offset** (must be a run of 0xFF bytes of at least this length, "
                 "disjoint from the source range), or use Search FF gap."
@@ -2191,7 +2191,7 @@ class _RepointBytesDialog:
 
 
 def parse_rom_file_offset(s: str) -> Tuple[Optional[int], str]:
-    """Parse a ROM **file** offset; accepts decimal/hex or GBA pointer ``0x08……``."""
+    """Parse a ROM **file** offset; accepts decimal/hex or GBA pointer ``0x08......``."""
     s = str(s).strip()
     if not s:
         return None, "Enter a file offset (or use Search FF gap)."
@@ -2210,7 +2210,7 @@ def _parse_struct_pointer_edit_literal(text: str) -> Optional[int]:
     """Parse a user-entered GBA pointer word for struct inline/panel edits.
 
     Accepts ``0x``/``0X`` hex (like :func:`int` with base 0), exactly eight hex
-    digits without a prefix (common for ``08……`` ROM addresses), decimal values
+    digits without a prefix (common for ``08......`` ROM addresses), decimal values
     ``>= 0x08000000``, and ROM **file** offsets (decimal ``>= 0x1000``) using
     the same rules as :func:`parse_rom_file_offset`.
 
@@ -2277,7 +2277,7 @@ class _StaticRomOffsetDialog:
         head = (
             f"Data size: {n} byte(s) (0x{n:X}).\n"
             + (blurb + "\n" if blurb else "")
-            + "Enter a **file offset** (hex/decimal or GBA 0x08……) or search for an FF gap.\n"
+            + "Enter a **file offset** (hex/decimal or GBA 0x08......) or search for an FF gap.\n"
         )
         ttk.Label(f, text=head, wraplength=440).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
         ttk.Label(f, text="File offset:", font=("Consolas", 9)).grid(row=1, column=0, sticky="w")
@@ -2903,7 +2903,7 @@ class _TilemapPngDimsDialog:
         if upd and nm_map and not nm_ts:
             messagebox.showwarning(
                 "Import",
-                "Tilemap anchor Format is ucm…|tileset - enter the tileset NamedAnchor name.",
+                "Tilemap anchor Format is ucm...|tileset - enter the tileset NamedAnchor name.",
             )
             return
         self.result = (mw, mh, bpp, ncolors, skip, nm_map, nm_ts, nm_pal, upd, rom_clip_8)
@@ -3431,7 +3431,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         gfx_btn_row = ttk.Frame(top)
         gfx_btn_row.grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 0))
         ttk.Button(gfx_btn_row, text="Decode", command=self._decode_selected).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(gfx_btn_row, text="Import graphic…", command=self._on_import_graphic).pack(side=tk.LEFT)
+        ttk.Button(gfx_btn_row, text="Import graphic...", command=self._on_import_graphic).pack(side=tk.LEFT)
         ttk.Checkbutton(
             gfx_btn_row,
             text="Quantize tilemap palette",
@@ -4206,7 +4206,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                 self._emit_gfx_decode_log(
                     log_pre
                     + (
-                        f"Tilemap needs a tile sheet NamedAnchor (uct/lzt/ucs/lzs…); "
+                        f"Tilemap needs a tile sheet NamedAnchor (uct/lzt/ucs/lzs...); "
                         f"missing or invalid: {tsn!r}\n"
                     )
                 )
@@ -4322,7 +4322,7 @@ class GraphicsPreviewFrame(ttk.Frame):
             return
         info = next((a for a in self._hex.get_graphics_anchors() if str(a["name"]) == name), None)
         if not info or info["spec"].kind != "sprite":
-            messagebox.showinfo("Preview palette", "Select a sprite anchor (uct/lzt/ucs/lzs…).")
+            messagebox.showinfo("Preview palette", "Select a sprite anchor (uct/lzt/ucs/lzs...).")
             return
         sp = info["spec"]
         s = self._sprite_pal_off_var.get().strip()
@@ -4490,7 +4490,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         if spec.kind != "sprite":
             messagebox.showinfo(
                 "Import graphic",
-                "Import is only implemented for sprite (uct/lzt/ucs/lzs…) or tilemap (ucm/lzm…) anchors, not palette-only.",
+                "Import is only implemented for sprite (uct/lzt/ucs/lzs...) or tilemap (ucm/lzm...) anchors, not palette-only.",
             )
             return
         if spec.bpp not in (4, 6, 8):
@@ -4667,7 +4667,7 @@ class GraphicsPreviewFrame(ttk.Frame):
             elif not pan:
                 messagebox.showerror(
                     "Import graphic",
-                    "8bpp sprites need a linked palette NamedAnchor (|palette… in TOML), "
+                    "8bpp sprites need a linked palette NamedAnchor (|palette... in TOML), "
                     "or load a preview palette from a ROM offset (8 bpp / 256 colors).",
                 )
                 self._set_log("".join(logs))
@@ -4745,7 +4745,7 @@ class GraphicsPreviewFrame(ttk.Frame):
             elif not pan:
                 messagebox.showerror(
                     "Import graphic",
-                    "6bpp sprites need a linked palette NamedAnchor (|palette… in TOML), "
+                    "6bpp sprites need a linked palette NamedAnchor (|palette... in TOML), "
                     "or load a preview palette from a ROM offset (6 bpp / 64 colors).",
                 )
                 self._set_log("".join(logs))
@@ -4863,7 +4863,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     "No |palette anchor on this sprite: tiles imported; preview uses default grayscale palette.\n"
                 )
 
-        self._gfx_decode_log_prefix = "".join(logs) + "\nRe-decoding preview…\n\n"
+        self._gfx_decode_log_prefix = "".join(logs) + "\nRe-decoding preview...\n\n"
         self._decode_selected()
 
     def _import_tilemap_from_png(self, name: str, info: Dict[str, Any], spec: Any) -> None:
@@ -4885,7 +4885,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         if ga_ts is None or ga_ts["spec"].kind != "sprite":
             messagebox.showerror(
                 "Import tilemap",
-                f"Tilemap needs a valid tile sheet NamedAnchor (uct/lzt/ucs/lzs…); missing or invalid: {tsn!r}",
+                f"Tilemap needs a valid tile sheet NamedAnchor (uct/lzt/ucs/lzs...); missing or invalid: {tsn!r}",
             )
             return
         ts_spec = ga_ts["spec"]
@@ -4934,7 +4934,7 @@ class GraphicsPreviewFrame(ttk.Frame):
         if spec.bpp == 8 and not pan_key:
             messagebox.showerror(
                 "Import tilemap",
-                "8bpp tilemaps need a linked palette NamedAnchor (|palette… on tilemap or tileset).",
+                "8bpp tilemaps need a linked palette NamedAnchor (|palette... on tilemap or tileset).",
             )
             return
 
@@ -5148,7 +5148,7 @@ class GraphicsPreviewFrame(ttk.Frame):
                     "TOML: could not auto-rewrite tileset Format; adjust WxH manually if preview is wrong.\n"
                 )
 
-        self._gfx_decode_log_prefix = "".join(logs) + "\nRe-decoding preview…\n\n"
+        self._gfx_decode_log_prefix = "".join(logs) + "\nRe-decoding preview...\n\n"
         self._decode_selected()
 
 
@@ -5255,7 +5255,7 @@ def _parse_bitfield_token(token: str) -> Optional[Dict[str, Any]]:
     Subfields may sum to fewer bits than the storage size; the rest is implicit padding (kept on write).
 
     If the head uses a single ``.`` (1 byte) but subfields need 9–16 bits, storage is promoted to **2 bytes**
-    (same as ``field:|t|``) so ``evs.|t|hp:|…`` still parses when the intent was ``evs:|t|…``."""
+    (same as ``field:|t|``) so ``evs.|t|hp:|...`` still parses when the intent was ``evs:|t|...``."""
     if "|t|" not in token:
         return None
     token = _normalize_bitfield_token_spacing(token)
@@ -5314,7 +5314,7 @@ def _parse_bitfield_token(token: str) -> Optional[Dict[str, Any]]:
 
 
 def _parse_helper_field_token(token: str) -> Optional[Dict[str, Any]]:
-    """Parse ``name|=a+b+…`` - computed sum of uint fields; no ROM bytes (size 0)."""
+    """Parse ``name|=a+b+...`` - computed sum of uint fields; no ROM bytes (size 0)."""
     m = re.match(r"^(\w+)\|=(.+)$", token.strip())
     if not m:
         return None
@@ -5393,12 +5393,12 @@ def _struct_format_has_ydk_import_marker(fmt_raw: str) -> bool:
 
 
 def _struct_format_has_ban_import_marker(fmt_raw: str) -> bool:
-    """True when the Format includes `` `ban` `` before the ``[card:…]`` banlist table (EDOPro ``.conf`` / ``.lflist`` import)."""
+    """True when the Format includes `` `ban` `` before the ``[card:...]`` banlist table (EDOPro ``.conf`` / ``.lflist`` import)."""
     return bool(re.search(r"`ban`\s*[\w.]*\s*\[", str(fmt_raw or "")))
 
 
 def _struct_format_ydk_password_anchor_name(fmt_raw: str) -> str:
-    """NamedAnchor ``Name`` for 32-bit password lookup: text after `` `ydk` ``, up to the ``[`` that opens ``[card:…]``.
+    """NamedAnchor ``Name`` for 32-bit password lookup: text after `` `ydk` ``, up to the ``[`` that opens ``[card:...]``.
 
     Stops before that bracket so names like ``data.cards.passwords`` are not fused with the card list (and are not
     mistaken for a width token next to ``[``).
@@ -5429,7 +5429,7 @@ def _struct_format_ydk_card_list_name(fmt_raw: str) -> Optional[str]:
     """First ``[card:ListName`` token in the Format (e.g. ``[card:cardnames]``, ``[card:cardnames copies:]``).
 
     Deck u16 values use **[[List]] keys** (e.g. 4007), not 0-based row indices - so the list name must be found
-    even when more fields follow ``card:…`` before the closing ``]``.
+    even when more fields follow ``card:...`` before the closing ``]``.
 
     When the password NamedAnchor uses a **different** ``]count`` list (e.g. ``]cardstatsnames``), row *i* takes the
     label from that index list and reverse-looks it up here. If both lists are the same (or only this name is
@@ -5510,7 +5510,7 @@ def _struct_anchor_info_supports_ydk_import(info: Optional[Dict[str, Any]]) -> b
 
 
 def _struct_format_ban_password_anchor_name(fmt_raw: str) -> str:
-    """NamedAnchor for 32-bit password lookup: optional name after `` `ban` ``, before ``[card:…]``."""
+    """NamedAnchor for 32-bit password lookup: optional name after `` `ban` ``, before ``[card:...]``."""
     m = re.search(r"`ban`\s*([\w.]*?)\s*\[", str(fmt_raw or ""))
     if not m:
         return "data.cards.passwords"
@@ -5519,14 +5519,14 @@ def _struct_format_ban_password_anchor_name(fmt_raw: str) -> str:
 
 
 def _parse_ban_table_literal_row_count(fmt_raw: str) -> Optional[int]:
-    """If *fmt_raw* normalizes to ``[…]N`` with integer *N*, return *N*; else ``None`` (e.g. ``]MatchedWord``)."""
+    """If *fmt_raw* normalizes to ``[...]N`` with integer *N*, return *N*; else ``None`` (e.g. ``]MatchedWord``)."""
     fmt_n = normalize_named_anchor_format(fmt_raw)
     c = _parse_struct_count(fmt_n)
     return int(c) if isinstance(c, int) else None
 
 
 def _struct_anchor_info_supports_ban_import(info: Optional[Dict[str, Any]]) -> bool:
-    """True when the struct Format includes `` `ban` `` and a ``[card:… copies:]`` row layout."""
+    """True when the struct Format includes `` `ban` `` and a ``[card:... copies:]`` row layout."""
     if not info:
         return False
     if info.get("ban_import"):
@@ -5789,7 +5789,7 @@ def _ydk_build_deck_blob(
 def _ydk_card_indices_for_nested_count_field(
     count_field: str, main_idx: List[int], extra_idx: List[int]
 ) -> List[int]:
-    """``/main`` / ``/extra`` on ``offset<[`ydk`…]/…>`` map to ``#main`` / ``#extra``; any other count field uses both sections (main then extra)."""
+    """``/main`` / ``/extra`` on ``offset<[`ydk`...]/...>`` map to ``#main`` / ``#extra``; any other count field uses both sections (main then extra)."""
     cf = str(count_field or "").lower()
     if cf == "extra":
         return list(extra_idx)
@@ -5799,7 +5799,7 @@ def _ydk_card_indices_for_nested_count_field(
 
 
 def _normalize_offset_padding_count_card_run(inner: str) -> str:
-    """Expand sugar into ``offset<>`` + ``@offset+N`` payload fields + ``cards<…>inline*offset+N`` (payload at ``*offset``)."""
+    """Expand sugar into ``offset<>`` + ``@offset+N`` payload fields + ``cards<...>inline*offset+N`` (payload at ``*offset``)."""
 
     def _repl(m: Any) -> str:
         prefix = _strip_ydk_marker_from_offset_prefix(m.group(1).strip())
@@ -5821,7 +5821,7 @@ def _normalize_offset_padding_count_card_run(inner: str) -> str:
 
 
 def _merge_bitfield_tokens_list(tokens: List[str]) -> List[str]:
-    """Merge tokens so an incomplete ``…|t|`` + continuation (split on spaces) becomes one bitfield token."""
+    """Merge tokens so an incomplete ``...|t|`` + continuation (split on spaces) becomes one bitfield token."""
     merged: List[str] = []
     ti = 0
     while ti < len(tokens):
@@ -5838,7 +5838,7 @@ def _merge_bitfield_tokens_list(tokens: List[str]) -> List[str]:
                 merged.append(buf)
                 ti = j
                 continue
-            # Avoid leaving ``evs:|t|`` and ``hp:…`` as separate tokens (would mis-parse the rest of the struct).
+            # Avoid leaving ``evs:|t|`` and ``hp:...`` as separate tokens (would mis-parse the rest of the struct).
             if j > ti + 1:
                 merged.append(buf)
                 ti = j
@@ -5898,7 +5898,7 @@ def _parse_nested_array_inner_body_fields(inner_body: str) -> Optional[List[Dict
 def _replace_nested_array_slash_count_in_format(
     fmt: str, nested_field_name: str, old_digits: str, new_count: int
 ) -> Optional[str]:
-    """Rewrite ``name<…/old>`` to ``name<…/new>`` when *old* is a decimal literal (hard-coded ``/N`` slot count)."""
+    """Rewrite ``name<.../old>`` to ``name<.../new>`` when *old* is a decimal literal (hard-coded ``/N`` slot count)."""
     name = str(nested_field_name or "").strip()
     od = str(old_digits or "").strip()
     if not name or not od or not re.fullmatch(r"\d+", od):
@@ -6168,10 +6168,10 @@ def _parse_struct_fields(
 def _finalize_nested_array_pointer_semantics(fields: List[Dict[str, Any]]) -> None:
     """Count-based ``name<[inner]/count>`` stores a 4-byte GBA pointer **at** ``name``; inner rows live at ``*ptr``.
 
-    Exception: **implicit row pointer** - ``[options<…/count> count::]`` (nested field first, count last) - keeps the
+    Exception: **implicit row pointer** - ``[options<.../count> count::]`` (nested field first, count last) - keeps the
     legacy layout: pointer at **row** offset 0, count after; no separate field name for the pointer.
 
-    Another exception: ``…*base_ptr`` - pointer is in the named ``ptr``/``pcs_ptr`` field, not at ``name``.
+    Another exception: ``...*base_ptr`` - pointer is in the named ``ptr``/``pcs_ptr`` field, not at ``name``.
 
     For ``!HEX>`` **without** the ``inline`` suffix: ``name`` is a **4-byte GBA pointer**; the terminator-delimited
     blob lives at ``*name`` (same idea as count-based ``name<[inner]/count>`` on ROM that store a pointer column).
@@ -6229,13 +6229,13 @@ def _validate_nested_array_fields(fields: List[Dict[str, Any]]) -> bool:
     the terminated blob lives at ``*ptr``, so **later fields may follow** in the struct row.
 
     Valid layouts:
-    - **Count first:** ``count`` uint appears before ``name<[inner]/count>``. Fixed fields (uint/ptr/PCS/…)
+    - **Count first:** ``count`` uint appears before ``name<[inner]/count>``. Fixed fields (uint/ptr/PCS/...)
       may appear between ``count`` and the nested field; several nested fields may share the **same** count
-      uint (e.g. ``[count. padding:. ptr<> drops<…/count> spawnrate<…/count> …]``).
-    - **Count before one packed nested (legacy tail):** ``[cost:: … pack<[inner]/cardamount>]`` — ``pack`` last
+      uint (e.g. ``[count. padding:. ptr<> drops<.../count> spawnrate<.../count> ...]``).
+    - **Count before one packed nested (legacy tail):** ``[cost:: ... pack<[inner]/cardamount>]`` — ``pack`` last
       holds a 4-byte pointer; inner rows at ``*pack``.
     - **Count last:** ``name<[inner]/count>`` appears before ``count``, and the **count** field must be **last**
-      (e.g. ``[options<…/count> count::]``) - **implicit** pointer at row offset 0 unless ``*base_ptr`` is used.
+      (e.g. ``[options<.../count> count::]``) - **implicit** pointer at row offset 0 unless ``*base_ptr`` is used.
     - **External TOML count:** ``/ref`` where ``ref`` is **not** a uint field in this struct — row count is
       resolved from the same rules as ``]ref`` on the table (``[[List]]`` span, MatchedWord, PCS row count,
       etc.). Only **pointer-backed** nested data (4-byte GBA pointer at ``name`` or a ``ptr`` field). You can
@@ -6299,7 +6299,7 @@ def _validate_nested_array_fields(fields: List[Dict[str, Any]]) -> bool:
                 if fk.get("type") not in _PLAIN_BEFORE_NESTED:
                     return False
         elif ni < ci:
-            # Nested field before count: count uint is usually last (``[options<…/c> c::]``). Allow
+            # Nested field before count: count uint is usually last (``[options<.../c> c::]``). Allow
             # trailing fixed slots (e.g. ``padding:.``) after the count when they are plain uint/PCS/ASCII.
             if ci != len(fields) - 1:
                 for j in range(ci + 1, len(fields)):
@@ -6580,7 +6580,7 @@ def _nested_array_max_span_bytes(fd: Dict[str, Any], fields: List[Dict[str, Any]
 
 
 def _nested_array_implicit_row_pointer(fields: List[Dict[str, Any]], na_fd: Dict[str, Any]) -> bool:
-    """True for ``[options<…/count> count::]`` - row is implicit 4-byte GBA ptr @0 + ``count``; data at ``*ptr``."""
+    """True for ``[options<.../count> count::]`` - row is implicit 4-byte GBA ptr @0 + ``count``; data at ``*ptr``."""
     if na_fd.get("base_ptr_field") or na_fd.get("type") != "nested_array":
         return False
     names = [str(f.get("name", "")) for f in fields]
@@ -6708,7 +6708,7 @@ def _struct_per_row_terminator_nested_field(fields: List[Dict[str, Any]]) -> Opt
 
 
 def _struct_ydk_pointer_count_nested_fields(fields: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """All ``[`ydk`…]/countField>`` pointer+length nested arrays (u16 ``card`` rows, no ``!`` terminator)."""
+    """All ``[`ydk`...]/countField>`` pointer+length nested arrays (u16 ``card`` rows, no ``!`` terminator)."""
     out: List[Dict[str, Any]] = []
     for fd in fields:
         if fd.get("type") != "nested_array":
@@ -6816,7 +6816,7 @@ def _struct_row_byte_size(fields: List[Dict[str, Any]]) -> int:
 
 
 def _try_parse_nested_array_token(token: str) -> Optional[Dict[str, Any]]:
-    """Parse ``name<[inner]/countField>``, ``name<[inner]!HEX>`` (terminator bytes), or ``…*ptr`` / ``…*ptr+N``."""
+    """Parse ``name<[inner]/countField>``, ``name<[inner]!HEX>`` (terminator bytes), or ``...*ptr`` / ``...*ptr+N``."""
     raw = token.strip()
     base_ptr_field: Optional[str] = None
     base_ptr_chain: List[str] = []
@@ -6824,7 +6824,7 @@ def _try_parse_nested_array_token(token: str) -> Optional[Dict[str, Any]]:
         head, tail = raw.rsplit("*", 1)
         h, t = head.strip(), tail.strip()
         m_tail = re.match(r"^(\w+)((?:\+\d+|\+\w+)+)?$", t)
-        # ``…!0000>inline`` ends with ``inline``, not ``>`` - same rule as below.
+        # ``...!0000>inline`` ends with ``inline``, not ``>`` - same rule as below.
         if m_tail and (h.endswith(">") or re.search(r">\s*inline\s*$", h)):
             raw = h
             base_ptr_field = m_tail.group(1)
@@ -6833,7 +6833,7 @@ def _try_parse_nested_array_token(token: str) -> Optional[Dict[str, Any]]:
     if "<[" not in raw:
         return None
     rs = raw.rstrip()
-    # Allow ``…!0000>inline`` (packed inline) as well as ``…!0000>`` (pointer column).
+    # Allow ``...!0000>inline`` (packed inline) as well as ``...!0000>`` (pointer column).
     if not (rs.endswith(">") or re.search(r">\s*inline\s*$", rs)):
         return None
     m = re.match(r"^(\w+)<(\[)", raw)
@@ -7033,7 +7033,7 @@ def _parse_single_field(token: str) -> Optional[Dict[str, Any]]:
                     "hex": True,
                     "gfx_spec": tm_spec,
                 }
-            # Legacy: full ``ucm…|anchor|pal`` in one backtick blob
+            # Legacy: full ``ucm...|anchor|pal`` in one backtick blob
             legacy = parse_graphics_anchor_format(inner)
             if legacy is not None and getattr(legacy, "kind", None) == "tilemap":
                 return {
@@ -7252,7 +7252,7 @@ class StructEditorFrame(ttk.Frame):
         self._build()
 
     def _entry_pcs_row_for_struct_index(self, struct_idx: int) -> Optional[int]:
-        """PCS row for ``]pcsTable±N…`` struct count: ``pcs_row = struct_idx - (struct_count - pcs_count)``.
+        """PCS row for ``]pcsTable±N...`` struct count: ``pcs_row = struct_idx - (struct_count - pcs_count)``.
 
         When the Format suffix only changes the struct table length (e.g. ``data.pokemon.names+1``), the
         linked PCS table row count differs by the same amount; map struct indices so lookup matches that offset.
@@ -7474,7 +7474,7 @@ class StructEditorFrame(ttk.Frame):
         ttk.Label(
             gap_f,
             text=(
-                "(file offset or GBA 0x08…; both blank = whole ROM; "
+                "(file offset or GBA 0x08...; both blank = whole ROM; "
                 "from-only = from end of ROM; through-only = start of ROM through; "
                 "both = inclusive range)"
             ),
@@ -7580,7 +7580,7 @@ class StructEditorFrame(ttk.Frame):
         self._gfx_photo: Optional[Any] = None
         self._gfx_struct_sprite_palette_override: Optional[Tuple[int, int, str]] = None
 
-        # tileset<`lzt4`> tilemap<`lzm4xWxH|…`> palette<`ucp4`>: composite tilemap decode
+        # tileset<`lzt4`> tilemap<`lzm4xWxH|...`> palette<`ucp4`>: composite tilemap decode
         self._gfx_tilemap_frame = ttk.Frame(self)
         self._gfx_tilemap_frame.columnconfigure(0, weight=1)
         ttk.Label(self._gfx_tilemap_frame, text="tilemap (tileset + map + optional palette)", font=("Consolas", 8, "bold")).grid(
@@ -7759,7 +7759,7 @@ class StructEditorFrame(ttk.Frame):
         self._gfx_tm_log.configure(state=tk.DISABLED)
 
     def _explicit_tilemap_field_indices(self) -> Optional[Tuple[int, int, Optional[int]]]:
-        """If struct has ``tileset<`…`>`` + ``tilemap<`…`>`` (+ optional ``palette<`…`>`` / ``pal<`…`>``), return (ts_i, tm_i, pl_i)."""
+        """If struct has ``tileset<`...`>`` + ``tilemap<`...`>`` (+ optional ``palette<`...`>`` / ``pal<`...`>``), return (ts_i, tm_i, pl_i)."""
         by_name: Dict[str, Tuple[int, Dict[str, Any]]] = {}
         for i, f in enumerate(self._fields):
             n = f.get("name")
@@ -7897,7 +7897,7 @@ class StructEditorFrame(ttk.Frame):
         ts_tgt = resolve_gba_pointer(data, ts_off_f)
         tm_tgt = resolve_gba_pointer(data, tm_off_f)
         if ts_tgt is None or tm_tgt is None:
-            self._set_gfx_tm_log("Tileset or tilemap pointer does not reference ROM (need 0x08…/0x09…).")
+            self._set_gfx_tm_log("Tileset or tilemap pointer does not reference ROM (need 0x08.../0x09...).")
             self._gfx_tm_img_label.configure(image="", text="(bad pointer)")
             return
         pal_spec = None
@@ -8021,7 +8021,7 @@ class StructEditorFrame(ttk.Frame):
             return
         tgt = resolve_gba_pointer(data, foff)
         if tgt is None:
-            self._set_gfx_log("Pointer does not reference ROM (need 0x08…/0x09… GBA address).")
+            self._set_gfx_log("Pointer does not reference ROM (need 0x08.../0x09... GBA address).")
             self._gfx_img_label.configure(image="", text="(bad pointer)")
             return
         log_extra = ""
@@ -8458,7 +8458,7 @@ class StructEditorFrame(ttk.Frame):
         gba_gap = gap + GBA_ROM_BASE
         if w_lo is not None and w_hi_ex is not None:
             range_note = (
-                f"\n\nSearch was limited to file 0x{w_lo:X} … 0x{w_hi_ex - 1:X} (inclusive)."
+                f"\n\nSearch was limited to file 0x{w_lo:X} ... 0x{w_hi_ex - 1:X} (inclusive)."
             )
         else:
             range_note = "\n\nSearch used the entire ROM (set “FF gap search” fields to restrict)."
@@ -8547,7 +8547,7 @@ class StructEditorFrame(ttk.Frame):
         gba_gap = gap + GBA_ROM_BASE
         if w_lo is not None and w_hi_ex is not None:
             range_note = (
-                f"\n\nSearch was limited to file 0x{w_lo:X} … 0x{w_hi_ex - 1:X} (inclusive)."
+                f"\n\nSearch was limited to file 0x{w_lo:X} ... 0x{w_hi_ex - 1:X} (inclusive)."
             )
         else:
             range_note = "\n\nSearch used the entire ROM (set “FF gap search” fields to restrict)."
@@ -9313,11 +9313,11 @@ class StructEditorFrame(ttk.Frame):
         return None
 
     def selected_struct_supports_ydk_import(self) -> bool:
-        """True when the struct Format has `` `ydk` `` (and optional password table name) before the card ``[…]``."""
+        """True when the struct Format has `` `ydk` `` (and optional password table name) before the card ``[...]``."""
         return _struct_anchor_info_supports_ydk_import(self._selected_struct_anchor())
 
     def selected_struct_supports_ban_import(self) -> bool:
-        """True when the struct Format has `` `ban` `` and ``[card:… copies:]`` (EDOPro banlist import)."""
+        """True when the struct Format has `` `ban` `` and ``[card:... copies:]`` (EDOPro banlist import)."""
         return _struct_anchor_info_supports_ban_import(self._selected_struct_anchor())
 
     def _on_combo_select(self, event: Optional[tk.Event] = None) -> None:
@@ -10490,7 +10490,7 @@ class StructEditorFrame(ttk.Frame):
             part = fd["parts"][bk]
             mx = (1 << part["bits"]) - 1
             if new_val < 0 or new_val > mx:
-                messagebox.showwarning("Struct", f"Value must be in 0 … {mx} for this bitfield.")
+                messagebox.showwarning("Struct", f"Value must be in 0 ... {mx} for this bitfield.")
                 self._cancel_inline_edit()
                 return
             cur = int.from_bytes(data[foff : foff + fd["size"]], "little")
@@ -10620,7 +10620,7 @@ class StructEditorFrame(ttk.Frame):
             part = fd["parts"][bi]
             mx = (1 << part["bits"]) - 1
             if new_val < 0 or new_val > mx:
-                messagebox.showwarning("Struct", f"Value must be in 0 … {mx} for this bitfield.")
+                messagebox.showwarning("Struct", f"Value must be in 0 ... {mx} for this bitfield.")
                 self._cancel_inline_edit()
                 return
             cur = int.from_bytes(data[foff : foff + fd["size"]], "little")
@@ -11626,7 +11626,7 @@ class HexEditorFrame(ttk.Frame):
             elf_path = os.path.join(tmpdir, "edit.elf")
             bin_path = os.path.join(tmpdir, "edit.bin")
             origin = GBA_ROM_BASE + self._hackmew_asm_start
-            # .align before .org would use LC 0 and align to 2^4 = 16 bytes (wrong). After .org, .align 2 => 4-byte (…0/4/8/C).
+            # .align before .org would use LC 0 and align to 2^4 = 16 bytes (wrong). After .org, .align 2 => 4-byte (...0/4/8/C).
             preamble = f".thumb\n.org 0x{origin:X}\n.align 2\n\n"
             with open(asm_path, "w", encoding="utf-8") as f:
                 f.write(preamble + asm_text + "\n")
@@ -12174,7 +12174,7 @@ class HexEditorFrame(ttk.Frame):
         if not off_str:
             messagebox.showerror(
                 "C inject",
-                "Set Inject @ (file offset, 0x08… GBA address, or NamedAnchor name).",
+                "Set Inject @ (file offset, 0x08... GBA address, or NamedAnchor name).",
             )
             return "break"
         file_off, err = self.resolve_file_offset_or_named_anchor(off_str)
@@ -12217,8 +12217,8 @@ class HexEditorFrame(ttk.Frame):
             with open(c_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(c_src)
             # Headers only declare ROM APIs; the linker needs absolute symbols (pokefirered.sym).
-            # Thumb BL reaches only ±4 MiB: inject sites in expanded ROM (e.g. 0x0871…) cannot reach
-            # vanilla code at 0x0800… with a direct BL. -mlong-calls emits load+bx (or veneer) so calls
+            # Thumb BL reaches only ±4 MiB: inject sites in expanded ROM (e.g. 0x0871...) cannot reach
+            # vanilla code at 0x0800... with a direct BL. -mlong-calls emits load+bx (or veneer) so calls
             # resolve to real PutWindowTilemap-style addresses instead of nearby glue (sub_871a25x).
             compile_flags = [
                 "-mcpu=arm7tdmi",
@@ -12282,7 +12282,7 @@ class HexEditorFrame(ttk.Frame):
                     "Undefined symbols not found in pokefirered.sym (or nm failed):\n"
                     f"{sample}{more}\n\n"
                     "Runtime/compiler helpers (e.g. __aeabi_*) need libgcc or different flags.\n"
-                    "ROM data labels in ROM (0x08…) need an even address: add the symbol name to\n"
+                    "ROM data labels in ROM (0x08...) need an even address: add the symbol name to\n"
                     "rom.txt in the repo root (one per line).",
                 )
                 return "break"
@@ -14096,7 +14096,7 @@ Format = "`f|u8`[u8 arg0]"
         return None
 
     def resolve_file_offset_or_named_anchor(self, s: str) -> Tuple[Optional[int], str]:
-        """Parse a ROM **file** offset (or GBA ``0x08…``), resolve a ``[[NamedAnchors]]`` **Name**, or a ``[[List]]``
+        """Parse a ROM **file** offset (or GBA ``0x08...``), resolve a ``[[NamedAnchors]]`` **Name**, or a ``[[List]]``
         **Name** when that list is the ``]count`` source for a struct table (same as Goto)."""
         off, err = parse_rom_file_offset(s)
         if off is not None:
@@ -14249,7 +14249,7 @@ Format = "`f|u8`[u8 arg0]"
         return merged
 
     def _rewrite_decompiler_hex_literals(self, text: str, merged: Dict[int, str]) -> str:
-        """Replace ``0x08…`` / RAM literals with symbol names when present in ``merged`` (keys are norm addresses)."""
+        """Replace ``0x08...`` / RAM literals with symbol names when present in ``merged`` (keys are norm addresses)."""
         if not text or not merged:
             return text
 
@@ -14606,7 +14606,7 @@ Format = "`f|u8`[u8 arg0]"
         return self._get_pcs_table_anchors()
 
     def get_graphics_anchors(self) -> List[Dict[str, Any]]:
-        """NamedAnchors whose Format is a graphics palette/sprite/tile/tilemap spec (ucp4, uct4xWxH, ucm4xWxH|…, …)
+        """NamedAnchors whose Format is a graphics palette/sprite/tile/tilemap spec (ucp4, uct4xWxH, ucm4xWxH|..., ...)
         or a table ``[rowSpec]countRef`` of identical rows."""
         result: List[Dict[str, Any]] = []
         pcs_names = {a["name"] for a in self._get_pcs_table_anchors()}
@@ -14985,7 +14985,7 @@ Format = "`f|u8`[u8 arg0]"
                 struct_size = _struct_row_byte_size(fields)
                 if struct_size <= 0:
                     continue
-            # Use normalized Format for ]count - bare `` `ydk`…[card:…]N`` TOML has no leading ``[``, so
+            # Use normalized Format for ]count - bare `` `ydk`...[card:...]N`` TOML has no leading ``[``, so
             # :func:`_parse_struct_count` would return None on *fmt_raw* even when *fields* parsed from *fmt*.
             count_raw = _parse_struct_count(fmt)
             if count_raw is None:
@@ -15352,7 +15352,7 @@ Format = "`f|u8`[u8 arg0]"
         cr = _parse_struct_count(raw_in)
         if not isinstance(cr, int):
             return False
-        # Standard ``[…]count`` (depth-balanced): replace trailing literal integer after outer ``]``.
+        # Standard ``[...]count`` (depth-balanced): replace trailing literal integer after outer ``]``.
         s = body
         depth = 0
         for i, ch in enumerate(s):
@@ -15368,7 +15368,7 @@ Format = "`f|u8`[u8 arg0]"
     def _ydk_maybe_bump_anchor_literal_after_import(
         self, anchor: Dict[str, Any], fmt_raw: str, min_table_rows: int
     ) -> Optional[str]:
-        """Bare `` `ydk`…[card:…]N``: if the table needs more than *N* rows, raise the trailing count in TOML."""
+        """Bare `` `ydk`...[card:...]N``: if the table needs more than *N* rows, raise the trailing count in TOML."""
         cur = _parse_bare_ydk_deck_shorthand_trailing_count(fmt_raw)
         if cur is None or min_table_rows <= cur:
             return None
@@ -15384,7 +15384,7 @@ Format = "`f|u8`[u8 arg0]"
     def _ban_maybe_bump_anchor_literal_after_import(
         self, anchor: Dict[str, Any], fmt_raw: str, min_table_rows: int
     ) -> Optional[str]:
-        """`` `ban`…[card:… copies:]N``: if the table needs more than *N* rows, raise the trailing count in TOML."""
+        """`` `ban`...[card:... copies:]N``: if the table needs more than *N* rows, raise the trailing count in TOML."""
         cur = _parse_ban_table_literal_row_count(fmt_raw)
         if cur is None or min_table_rows <= cur:
             return None
@@ -16103,7 +16103,7 @@ Format = "`f|u8`[u8 arg0]"
         return None
 
     def update_named_anchor_gba_address(self, anchor_name: str, gba_addr: int) -> Tuple[bool, str]:
-        """Persist ``Address`` for a ``[[NamedAnchors]]`` row: ROM **file offset** as hex (``0x…``), no ``0x08`` prefix.
+        """Persist ``Address`` for a ``[[NamedAnchors]]`` row: ROM **file offset** as hex (``0x...``), no ``0x08`` prefix.
 
         ``gba_addr`` may be a full GBA ROM pointer (``0x08xxxxxx``) or a file offset; file offset is what gets stored.
         """
@@ -16199,7 +16199,7 @@ Format = "`f|u8`[u8 arg0]"
                 if samples:
                     show = ", ".join(repr(s) for s in samples[:5])
                     if len(samples) > 5:
-                        show += ", …"
+                        show += ", ..."
                     extra = f" First name(s) in this TOML: {show}."
                 hint = ""
                 if create_if_missing and (file_off is None or new_format is None):
@@ -16691,7 +16691,7 @@ Format = "`f|u8`[u8 arg0]"
         count_field_name: str = "",
         show_done_message: bool = True,
     ) -> None:
-        """Write u16 card indices at ``*ptr`` for ``offset<[`ydk`…]/countField>`` layouts; update ``length``."""
+        """Write u16 card indices at ``*ptr`` for ``offset<[`ydk`...]/countField>`` layouts; update ``length``."""
         struct_name = str(info.get("name", "")).strip()
         base_off = int(info["base_off"])
         entry_base = base_off + entry_idx * int(info["struct_size"])
@@ -16705,7 +16705,7 @@ Format = "`f|u8`[u8 arg0]"
             messagebox.showerror(
                 "Import YDK",
                 f"Nested length is resolved from TOML/ROM metadata ({cf_name!r}), not a struct uint field. "
-                "Use a numeric slot count in the nested field (e.g. deck<…/40>) so the importer can update it, "
+                "Use a numeric slot count in the nested field (e.g. deck<.../40>) so the importer can update it, "
                 "or edit the structure TOML manually.",
             )
             return
@@ -16753,8 +16753,8 @@ Format = "`f|u8`[u8 arg0]"
                     "Import YDK - update slot count",
                     f"The deck needs {new_len} cards ({need_bytes} bytes) but the Format hard-codes "
                     f"/{cf_name.strip()} slots ({old_span} bytes).\n\n"
-                    f"Update [[NamedAnchors]] Format for {struct_name!r} so `{na_nm}<…>/{cf_name.strip()}>` "
-                    f"becomes `…/{new_len}`? (Saves the structure TOML.)\n\n"
+                    f"Update [[NamedAnchors]] Format for {struct_name!r} so `{na_nm}<...>/{cf_name.strip()}>` "
+                    f"becomes `.../{new_len}`? (Saves the structure TOML.)\n\n"
                     "Yes — rewrite the constant and continue.\n"
                     "No — cancel this import.",
                 ):
@@ -16766,7 +16766,7 @@ Format = "`f|u8`[u8 arg0]"
                     if new_fmt is None:
                         messagebox.showerror(
                             "Import YDK",
-                            f"Could not find `{na_nm}<…>/{cf_name.strip()}>` in the anchor Format; "
+                            f"Could not find `{na_nm}<...>/{cf_name.strip()}>` in the anchor Format; "
                             "edit the TOML manually.",
                         )
                         return
@@ -17082,7 +17082,7 @@ Format = "`f|u8`[u8 arg0]"
         fmt_src: str,
         entry_idx: int,
     ) -> None:
-        """Import passwords into a ``[card:List]N`` table (normalized `` `ydk`…[card:List]N`` shorthand).
+        """Import passwords into a ``[card:List]N`` table (normalized `` `ydk`...[card:List]N`` shorthand).
 
         ``#main`` then ``#extra`` YDK lines are written as one contiguous u16-per-row run (main cards first).
         """
@@ -17167,7 +17167,7 @@ Format = "`f|u8`[u8 arg0]"
         fmt_src: str,
         entry_idx: int,
     ) -> None:
-        """Import EDOPro ``.conf`` / ``.lflist`` rows into `` `ban`[card:… copies:]…`` (u16 card id + u16 restriction)."""
+        """Import EDOPro ``.conf`` / ``.lflist`` rows into `` `ban`[card:... copies:]...`` (u16 card id + u16 restriction)."""
         struct_name = str(info.get("name", "")).strip()
         struct_size = int(info["struct_size"])
         base_off = int(info["base_off"])
@@ -17246,7 +17246,7 @@ Format = "`f|u8`[u8 arg0]"
         if not _struct_anchor_info_supports_ban_import(info):
             messagebox.showinfo(
                 "Import banlist",
-                "Select a struct whose Format includes `ban` before [card:… copies:…] (see Structure TOML).",
+                "Select a struct whose Format includes `ban` before [card:... copies:...] (see Structure TOML).",
             )
             return
         if not self._toml_path or not os.path.isfile(self._toml_path):
@@ -17255,7 +17255,7 @@ Format = "`f|u8`[u8 arg0]"
         if info.get("packed_terminator"):
             messagebox.showerror(
                 "Import banlist",
-                "Banlist import applies to flat ``[card:… copies:]`` tables, not packed terminator-only layouts.",
+                "Banlist import applies to flat ``[card:... copies:]`` tables, not packed terminator-only layouts.",
             )
             return
         fields = list(info.get("fields") or [])
@@ -17313,7 +17313,7 @@ Format = "`f|u8`[u8 arg0]"
             uniq_bad = sorted(set(invalid_pw))
             preview = ", ".join(str(x) for x in uniq_bad[:12])
             if len(uniq_bad) > 12:
-                preview += ", …"
+                preview += ", ..."
             if not messagebox.askyesno(
                 "Import banlist - unknown passwords",
                 f"{len(invalid_pw)} line(s) reference passwords not in this ROM (e.g. {preview}).\n\n"
@@ -17360,7 +17360,7 @@ Format = "`f|u8`[u8 arg0]"
             messagebox.showinfo(
                 "Import YDK",
                 "Select a struct whose Format includes `ydk` (and optional password table Name) before the card field list "
-                "(e.g. offset<… main: `ydk`data.cards.passwords[card:cardnames]!0000> - see Structure TOML).",
+                "(e.g. offset<... main: `ydk`data.cards.passwords[card:cardnames]!0000> - see Structure TOML).",
             )
             return
         if not self._toml_path or not os.path.isfile(self._toml_path):
@@ -17390,7 +17390,7 @@ Format = "`f|u8`[u8 arg0]"
                 messagebox.showerror(
                     "Import YDK",
                     "This struct must have either a per-row !-terminated nested card run, a "
-                    "`ydk` [card:…] card table, or a `ydk` pointer+length deck (offset<[…]/length> with u16 cards).",
+                    "`ydk` [card:...] card table, or a `ydk` pointer+length deck (offset<[...]/length> with u16 cards).",
                 )
                 return
             # Match the import branch below: prefer `ydk` pointer+length deck(s) when present. Otherwise
@@ -17463,7 +17463,7 @@ Format = "`f|u8`[u8 arg0]"
             uniq_bad = sorted(set(invalid_pw))
             preview = ", ".join(str(x) for x in uniq_bad[:12])
             if len(uniq_bad) > 12:
-                preview += ", …"
+                preview += ", ..."
             if not messagebox.askyesno(
                 "Import YDK - unknown passwords",
                 f"{len(invalid_pw)} line(s) reference passwords not in this ROM (e.g. {preview}).\n\n"
@@ -19578,11 +19578,11 @@ Format = "`f|u8`[u8 arg0]"
             menu.add_command(label="Follow pointer", command=lambda: self._follow_pointer_at(ptr_start))
         if off is not None:
             menu.add_command(
-                label="Incoming references to this byte…",
+                label="Incoming references to this byte...",
                 command=lambda o=off: self._show_xref_dialog(o),
             )
         if self._selection_start is not None and self._selection_end is not None and self._data:
-            menu.add_command(label="Repoint bytes…", command=self._on_repoint_bytes)
+            menu.add_command(label="Repoint bytes...", command=self._on_repoint_bytes)
         menu.add_command(label="Select all", command=lambda: self._select_all())
         menu.add_command(label="Go to offset...", command=self._on_goto_offset)
         menu.add_separator()
@@ -19736,7 +19736,7 @@ Format = "`f|u8`[u8 arg0]"
         if bl_errs:
             msg += "\n\nBL out of range (not patched):\n" + "\n".join(bl_errs[:20])
             if len(bl_errs) > 20:
-                msg += f"\n… and {len(bl_errs) - 20} more."
+                msg += f"\n... and {len(bl_errs) - 20} more."
         parent = self.winfo_toplevel()
         if bl_errs or err_toml:
             messagebox.showwarning("Repoint bytes", msg, parent=parent)
@@ -19835,7 +19835,7 @@ Format = "`f|u8`[u8 arg0]"
         top.transient(self.winfo_toplevel())
         ttk.Label(
             top,
-            text="ROM .word pointers (0x08…… / 0x09……) that point here:",
+            text="ROM .word pointers (0x08...... / 0x09......) that point here:",
             font=("Consolas", 9),
         ).grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
         lb_w = tk.Listbox(top, font=("Consolas", 9), height=8, width=72, selectmode=tk.SINGLE)
@@ -19925,7 +19925,7 @@ Format = "`f|u8`[u8 arg0]"
         dialog.grab_set()
         ttk.Label(
             dialog,
-            text="Anchor name, offset (hex), or GBA 0x08…:",
+            text="Anchor name, offset (hex), or GBA 0x08...:",
             font=("Consolas", 9),
         ).grid(row=0, column=0, padx=5, pady=5)
         entry = ttk.Entry(dialog, width=12)

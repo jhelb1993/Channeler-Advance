@@ -391,7 +391,7 @@ def _ensure_encode_maps() -> None:
 
 
 def _encode_control_inner(inner: str) -> Optional[bytes]:
-    """Parse ``…`` inside ``[…]`` or pret ``{…}`` as a PCS control sequence; ``None`` = not recognized."""
+    """Parse ``...`` inside ``[...]`` or pret ``{...}`` as a PCS control sequence; ``None`` = not recognized."""
     _ensure_encode_maps()
     s = inner.strip()
     if not s:

@@ -2,7 +2,7 @@
 GBA graphics helpers: LZ77 decompress (pret ``lz.c``) and **pure-Python** palette/tile decode aligned with pret
 ``tools/gbagfx/gfx.c`` (``ReadGbaPalette``, 4bpp/8bpp tile layout, ``DecodeNonAffineTilemap``). PNG output uses Pillow.
 
-Palette formats: ucp4, lzp4, **huff4p4** / **huff8p8** (GBA Huffman), ucp4:HEX…, ucp8:N / lzp8:N.
+Palette formats: ucp4, lzp4, **huff4p4** / **huff8p8** (GBA Huffman), ucp4:HEX..., ucp8:N / lzp8:N.
 Sprite sheets: ucs/lzs (and **uct/lzt** — same layout as 4bpp/8bpp ``.4bpp`` / ``.8bpp`` in gbagfx); **huff4**/**huff8** mirror **lz** for Huff-compressed blobs (pret ``huff.c``).
 Bare **uct4** / **lzt8** (no ``xWxH``): LZ77 or raw blob is only tiles; tile count = len÷32 or len÷64; drawn as one row (matches gbagfx tile strip + ``-width N`` style).
 Tilemaps: ucm/lzm 4bpp or 8bpp non-affine maps (2 bytes/cell, same layout as [Tilemap Studio GBA_4BPP](https://github.com/Rangi42/tilemap-studio/blob/master/src/tilemap-format.cpp) / pret ``NonAffineTile``);
@@ -80,7 +80,7 @@ def ygodm_decode_inplace(buf: bytearray) -> None:
 
 
 def _split_reshef_graphics_prefix(s: str) -> Tuple[str, bool]:
-    """`` `reshef`ucs…`` / `` `reshef`huff8…`` prefix (standalone graphics Format)."""
+    """`` `reshef`ucs...`` / `` `reshef`huff8...`` prefix (standalone graphics Format)."""
     t = str(s or "").strip()
     m = re.match(r"^\s*`reshef`\s*", t, re.IGNORECASE)
     if m:
@@ -122,7 +122,7 @@ def _hex_preview(data: bytes, max_bytes: int = 96) -> str:
     n = min(len(data), max_bytes)
     body = " ".join(f"{b:02X}" for b in data[:n])
     if len(data) > n:
-        return f"{body} … (+{len(data) - n} more bytes; total len={len(data)})"
+        return f"{body} ... (+{len(data) - n} more bytes; total len={len(data)})"
     return f"{body} (len={len(data)})"
 
 
@@ -1275,7 +1275,7 @@ class GraphicsAnchorSpec:
     kind: str  # "palette" | "sprite" | "tilemap"
     bpp: int  # palette: 4 or 8; sprite: 4, 6, or 8; tilemap: 4 or 8
     lz: bool
-    # GBA Huffman (pret huff.c): 4 = 0x24… nybble symbols, 8 = 0x28… byte symbols. Exclusive with ``lz``.
+    # GBA Huffman (pret huff.c): 4 = 0x24... nybble symbols, 8 = 0x28... byte symbols. Exclusive with ``lz``.
     huff_bpp: Optional[int] = None
     # ygodm8: apply ``ygodm_encode`` before Huff compress / inverse after decompress (`` `reshef` `` in TOML).
     reshef_ygodm: bool = False
@@ -1290,9 +1290,9 @@ class GraphicsAnchorSpec:
     # tilemap (ucm/lzm): map size in tiles; ROM holds ``map_w * map_h`` × u16 entries (non-affine)
     map_w_tiles: int = 0
     map_h_tiles: int = 0
-    # tilemap: tileset NamedAnchor (``uct4…`` / ``lzt8…`` / ``ucs4…`` / …)
+    # tilemap: tileset NamedAnchor (``uct4...`` / ``lzt8...`` / ``ucs4...`` / ...)
     tileset_anchor_name: Optional[str] = None
-    # sprite or tilemap: optional palette NamedAnchor after ``|`` (tilemap: ``ucm…|tileset|palette``)
+    # sprite or tilemap: optional palette NamedAnchor after ``|`` (tilemap: ``ucm...|tileset|palette``)
     palette_anchor_name: Optional[str] = None
 
 
@@ -1371,7 +1371,7 @@ def measure_sprite_rom_footprint(
         return tile_data_bytes(spec.bpp, spec.width_tiles, spec.height_tiles)
     raise ValueError(
         "Cannot size this raw sprite slot for import (variable-length strip without WxH). "
-        "Use a fixed uct/ucs WxH format or LZ/Huff (lzt/lzs, huff4t/huff8t, …) in TOML."
+        "Use a fixed uct/ucs WxH format or LZ/Huff (lzt/lzs, huff4t/huff8t, ...) in TOML."
     )
 
 
@@ -1589,7 +1589,7 @@ def read_sprite_preview_palette_at_rom_offset(
 
 def ucp8_slot_hex_digits_for_chunk_count(n_chunks: int) -> str:
     """
-    Build the ``ucp8:`` hex suffix for ``n_chunks`` contiguous 32-byte subpalettes (slots 0 … n−1).
+    Build the ``ucp8:`` hex suffix for ``n_chunks`` contiguous 32-byte subpalettes (slots 0 ... n−1).
 
     Each chunk holds **16** RGB555 colors. ``n_chunks`` is 1–16 (up to 256 colors total).
     """
@@ -2085,7 +2085,7 @@ def parse_graphics_anchor_format(fmt: str) -> Optional[GraphicsAnchorSpec]:
             )
         )
 
-    # 4bpp palette: optional :HEX… — each hex digit names a palette index (0–F); one 32-byte chunk per digit in ROM order
+    # 4bpp palette: optional :HEX... — each hex digit names a palette index (0–F); one 32-byte chunk per digit in ROM order
     m = re.fullmatch(r"(uc|lz|huff4|huff8)p4(?::([0-9a-fA-F]+))?", s, re.IGNORECASE)
     if m:
         try:
@@ -2197,8 +2197,8 @@ def parse_graphics_anchor_format(fmt: str) -> Optional[GraphicsAnchorSpec]:
 
 def parse_tilemap_dimension_spec(inner: str) -> Optional[GraphicsAnchorSpec]:
     """
-    Struct field inner for ``tilemap<`…`>``: ``ucm4xWxH`` / ``lzm4xWxH`` with optional ignored ``|tail``
-    (e.g. ``|table``). Does not embed tileset/palette NamedAnchors; use ``tileset<`…`>`` / ``palette<`…`>`` fields.
+    Struct field inner for ``tilemap<`...`>``: ``ucm4xWxH`` / ``lzm4xWxH`` with optional ignored ``|tail``
+    (e.g. ``|table``). Does not embed tileset/palette NamedAnchors; use ``tileset<`...`>`` / ``palette<`...`>`` fields.
     """
     s = _strip_outer_backticks(inner.strip())
     dim_part = s.split("|", 1)[0].strip()
@@ -2236,7 +2236,7 @@ def parse_graphics_table_format(
     """
     Table of identical graphics blobs: ``[rowFormat]countRef``.
 
-    ``rowFormat`` parses as a standalone graphics spec (palette, sprite/tile sheet, or tilemap, with optional ``|…`` tails).
+    ``rowFormat`` parses as a standalone graphics spec (palette, sprite/tile sheet, or tilemap, with optional ``|...`` tails).
     ``countRef`` is resolved in the hex editor (PCS table name, ``[[List]]`` name, numeric count, etc.).
 
     Returns ``(spec, countRef, row_is_pointer_column)``. The third flag is ``True`` when ``rowFormat`` uses struct
@@ -2275,7 +2275,7 @@ def parse_graphics_table_format(
     row_is_pointer_column = False
     row_spec = parse_graphics_anchor_format(inner)
     if row_spec is None:
-        # Row may mirror struct shorthand: ``pal<`ucp8:0123`>``, ``card<`huff8s8x10x10|graphics…`>``, etc.
+        # Row may mirror struct shorthand: ``pal<`ucp8:0123`>``, ``card<`huff8s8x10x10|graphics...`>``, etc.
         sm = re.match(r"^(\w+)<`([^`]*)`>\s*$", inner.strip())
         if sm:
             row_spec = parse_graphics_anchor_format(sm.group(2).strip())
@@ -2432,9 +2432,9 @@ def rewrite_standalone_sprite_format_dimensions(
 ) -> Optional[str]:
     """
     Rewrite WxH in a standalone graphics NamedAnchor ``Format`` (optional leading ``^``, outer backticks,
-    optional ``|palette…`` tail, or ``[rowSpec]countRef`` graphics table).
+    optional ``|palette...`` tail, or ``[rowSpec]countRef`` graphics table).
 
-    Recognizes ``ucs``/``lzs``/``uct``/``lzt`` sprite specs. Bare ``uct4`` / ``lzt8`` becomes ``uct4xWxH`` / …
+    Recognizes ``ucs``/``lzs``/``uct``/``lzt`` sprite specs. Bare ``uct4`` / ``lzt8`` becomes ``uct4xWxH`` / ...
     Returns ``None`` if the format is not a rewriteable sprite sheet token.
     """
     tw, th = int(width_tiles), int(height_tiles)
@@ -2873,7 +2873,7 @@ def decode_graphics_anchor_to_png(
         if external_tileset_spec is None or external_tileset_base_off is None:
             return None, "Tilemap decode requires ``external_tileset_spec`` and ``external_tileset_base_off`` (tileset NamedAnchor).\n"
         if external_tileset_spec.kind != "sprite":
-            return None, f"Tileset anchor must be a tile sheet (uct/lzt/ucs/lzs…), not {external_tileset_spec.kind!r}.\n"
+            return None, f"Tileset anchor must be a tile sheet (uct/lzt/ucs/lzs...), not {external_tileset_spec.kind!r}.\n"
         if external_tileset_base_off < 0 or external_tileset_base_off >= len(rom):
             return None, "Invalid ROM offset for tileset.\n"
         try:
