@@ -18083,9 +18083,13 @@ Format = "`f|u8`[u8 arg0]"
         last = first + thumb_size
         self._scroll_y.set(first, min(last, 1.0))
 
+    def _disasm_region_align(self) -> int:
+        """File-offset step for disasm / pseudo-C region starts: halfword (2) in Thumb, word (4) in ARM."""
+        return 2 if self._asm_mode == "thumb" else 4
+
     def _get_disasm_bounds(self) -> Tuple[int, int]:
-        """Return ``[start, end)`` file offsets for ASM / pseudo-C (word-aligned start)."""
-        align = 4
+        """Return ``[start, end)`` file offsets for ASM / pseudo-C (aligned start: even in Thumb)."""
+        align = self._disasm_region_align()
         if not self._data:
             return 0, 0
         if self._selection_start is not None and self._selection_end is not None:
@@ -18156,7 +18160,7 @@ Format = "`f|u8`[u8 arg0]"
                 self._text_asm.configure(state=tk.DISABLED)
                 return
             mode = CS_MODE_THUMB if self._asm_mode == "thumb" else CS_MODE_ARM
-            align = 4
+            align = self._disasm_region_align()
             start, end = self._get_disasm_bounds()
             if start >= len(self._data):
                 self._text_asm.insert(tk.END, "(No bytes selected)")
@@ -18286,7 +18290,7 @@ Format = "`f|u8`[u8 arg0]"
             self._text_pseudo_c.insert(tk.END, "(No data)")
             self._text_pseudo_c.configure(state=tk.DISABLED)
             return
-        align = 4
+        align = self._disasm_region_align()
         start, end = self._get_disasm_bounds()
         if start >= len(self._data):
             self._text_pseudo_c.insert(tk.END, "(No bytes selected)")
@@ -18344,7 +18348,7 @@ Format = "`f|u8`[u8 arg0]"
         if ok:
             self.after(0, lambda r=result, g=generation: self._angr_decompile_done(r, g))
         else:
-            align = 4
+            align = self._disasm_region_align()
             self.after(
                 0,
                 lambda g=generation, s=start, e=end, err=result, al=align: self._angr_fallback_to_capstone(
@@ -18807,7 +18811,7 @@ Format = "`f|u8`[u8 arg0]"
         if not self._data or not _CAPSTONE_AVAILABLE:
             return []
         mode = CS_MODE_THUMB if self._asm_mode == "thumb" else CS_MODE_ARM
-        align = 4
+        align = self._disasm_region_align()
         if self._selection_start is not None and self._selection_end is not None:
             start = min(self._selection_start, self._selection_end)
             end = max(self._selection_start, self._selection_end) + 1
@@ -19267,7 +19271,7 @@ Format = "`f|u8`[u8 arg0]"
         Returns None if Capstone unavailable or no bx found."""
         if not self._data or not _CAPSTONE_AVAILABLE:
             return None
-        align = 4
+        align = self._disasm_region_align()
         start = (offset // align) * align
         if start >= len(self._data):
             return None
